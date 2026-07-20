@@ -69,6 +69,20 @@ cd hoerbuchkloeppler
 ./build.sh --help       # all options
 ```
 
+### Install to /Applications (optional, signed & notarized)
+
+`build.sh` produces a quick, ad-hoc-signed **development build** in the project root — handy for testing the current state. If you want the app permanently in `/Applications` as a **deliberately installed, notarized version** — signed with a Developer ID and notarized by Apple, so it launches without Gatekeeper prompts (also on other Macs) — use `install.sh`:
+
+```bash
+./install.sh                 # build → sign → notarize → staple → /Applications
+./install.sh --no-notarize   # faster: Developer-ID-signed only (runs on this Mac)
+./install.sh --help
+```
+
+This needs an Apple **Developer ID Application** certificate in your keychain and a `notarytool` keychain profile. The profile name comes from the `NOTARY_PROFILE` environment variable or a clone-local git config — it is never committed, and credentials stay in the keychain (never passed on the command line). Without a Developer ID, use `./build.sh` or `./install.sh --no-notarize`.
+
+Building locally and installing to your own `/Applications` is **not** redistribution, so it stays clear of the GPL obligations that the bundled `ffmpeg` would otherwise pull in (see [Install / Build](#install--build) above).
+
 ---
 
 ## Command-line usage (`kloeppler`)
