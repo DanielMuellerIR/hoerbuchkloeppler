@@ -1,0 +1,519 @@
+import SwiftUI
+import Foundation
+import Combine
+import AVFoundation
+import AppKit
+
+public struct TagCandidate: Identifiable, Equatable {
+    public let id = UUID()
+    public let type: String
+    public let key: String
+    public let value: String
+    public init(type: String, key: String, value: String) { self.type = type; self.key = key; self.value = value }
+}
+
+public enum LogType {
+    case info      // Standardtext (Primary Color)
+    case highlight // Pfade, Tool-Outputs, Befehle (AccentColor)
+    case dim       // Light gray (MediaInfo output)
+}
+
+public struct LogEntry: Identifiable {
+    public let id = UUID()
+    public let type: LogType
+    public let message: String
+    public let date: Date
+    public init(type: LogType, message: String, date: Date) { self.type = type; self.message = message; self.date = date }
+}
+
+public struct SegmentStatus: Equatable {
+    public let filename: String
+    public var progress: Double
+    public init(filename: String, progress: Double) { self.filename = filename; self.progress = progress }
+}
+
+public class ConversionSession: ObservableObject, Identifiable {
+    public let id = UUID()
+    public let metadataGroup = DispatchGroup()
+    public init() {}
+    @Published public var settings = SettingsManager.shared.loadSettings()
+    
+    @Published public var audioFiles: [AudioFile] = [] {
+        didSet { if audioFiles.isEmpty { clearMetadata() } }
+    }
+    
+    @Published public var coverImage: NSImage?
+    @Published public var coverPath: String?
+    /// Rohdaten eines eingebetteten Covers (aus einer Audiodatei extrahiert), das
+    /// NICHT als separate Bilddatei vorliegt. Wird vor der Kodierung in eine
+    /// temporäre Datei geschrieben, damit ffmpeg es einbetten kann — sonst ginge
+    /// ein nur eingebettetes Cover im Output verloren.
+    public var embeddedCoverData: Data?
+    @Published public var title: String = ""
+    @Published public var author: String = ""
+    @Published public var genre: String = "Hörbuch"
+    
+    // --- KONVERSION STATUS & LOGGING ---
+    @Published public var isConverting: Bool = false
+    @Published public var showOverlay: Bool = false
+    @Published public var progress: Double = 0.0
+    @Published public var conversionStatus: String = "Bereit"
+    /// Ergebnis des letzten Konvertierungslaufs (nil = noch nicht beendet,
+    /// true = erfolgreich, false = mit Fehler/abgebrochen). Erlaubt der CLI
+    /// einen korrekten Exit-Code statt blind "Erfolg" zu melden.
+    public var lastConversionSucceeded: Bool?
+    
+    // KORREKTUR: Strukturierte Logs für das Terminal-Interface
+    @Published public var eventLogs: [LogEntry] = []
+    @Published public var logString: String = "" // Für Legacy/Fallback
+    @Published public var segmentProgress: [Int: SegmentStatus] = [:]
+
+    @Published public var titleCandidates: [TagCandidate] = []
+    @Published public var authorCandidates: [TagCandidate] = []
+    @Published public var showSelectionUI = false
+    @Published public var selectedFileInfoText: String = ""
+    @Published public var showInfoSheet = false
+    @Published public var isFetchingInfo = false
+
+    private static let logDateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateFormat = "HH:mm:ss.SSS"
+        return df
+    }()
+
+    /// Ziel für die Terminal-Ausgabe von `addLog`/`logVerbose`.
+    ///
+    /// Standard (`nil`): direkt per `print` auf stdout — so verhält sich die GUI-App
+    /// wie bisher (Logzeilen landen in der Xcode-Konsole).
+    ///
+    /// Die CLI hängt hier ihren Renderer ein: der räumt vor jeder Logzeile den
+    /// Pacman-Statusblock ab und zeichnet ihn danach neu. Ohne diese Kopplung
+    /// schreibt das Log mitten in die laufende Redraw-Schleife, deren
+    /// Cursor-Buchführung stimmt danach nicht mehr, und sie löscht die falschen
+    /// Zeilen.
+    ///
+    /// Wird immer auf dem Main-Thread aufgerufen; der Renderer braucht deshalb
+    /// keine eigene Sperre. Setzen ebenfalls nur auf dem Main-Thread (vor dem Start).
+    public var logSink: ((String) -> Void)?
+
+    /// Gibt eine fertige Zeile ins Terminal aus — über die Senke, falls gesetzt.
+    /// Nur auf dem Main-Thread aufrufen.
+    private func emit(_ line: String) {
+        if let logSink = logSink { logSink(line) } else { print(line) }
+    }
+
+    // NEU: Thread-sicheres Loggen mit Typen und Reverse-Order
+    public func addLog(_ message: String, type: LogType = .info) {
+        let entry = LogEntry(type: type, message: message, date: Date())
+        DispatchQueue.main.async {
+            self.eventLogs.append(entry) // KORREKTUR: Jetzt anhängen (unten), nicht oben einfügen
+            self.logString = self.eventLogs.map { $0.message }.joined(separator: "\n")
+            let timeStr = ConversionSession.logDateFormatter.string(from: entry.date)
+            self.emit("[\(timeStr)] \(message)")
+        }
+    }
+
+    public func logVerbose(_ message: String) {
+        guard settings.isVerbose else { return }
+        // Verbose-Zeilen gehen bewusst nur ins Terminal, nicht ins UI-Log — sonst
+        // wird die Oberfläche zugemüllt. Die Ausgabe läuft trotzdem über den
+        // Main-Thread: Aufrufer sind u.a. die parallelen Encoding-Threads, deren
+        // rohes print() sonst nebenläufig in die Fortschrittsanzeige der CLI
+        // schreiben würde.
+        DispatchQueue.main.async { self.emit("[VERBOSE] \(message)") }
+    }
+    
+    public func logCurrentSettings() {
+        addLog("⚙️ Aktuelle Einstellungen (geladen aus Speicher):", type: .info)
+        addLog("   - Mono: \(settings.isMono ? "Ja" : "Nein")", type: .info)
+        addLog("   - Bitrate: \(settings.bitrate)", type: .info)
+        addLog("   - Abtastrate: \(settings.sampleRate) Hz", type: .info)
+        addLog("   - Max Duration: \(settings.maxDurationHours == nil ? "Unlimitiert" : "\(settings.maxDurationHours!) Std")", type: .info)
+        addLog("   - Parallel Mode: \(settings.useParallelEncoding ? "Aktiviert" : "Deaktiviert")", type: .info)
+    }
+
+    public func initSegmentProgress(index: Int, filename: String) {
+        DispatchQueue.main.async {
+            self.segmentProgress[index] = SegmentStatus(filename: filename, progress: 0.0)
+        }
+    }
+
+    public func updateSegmentProgress(index: Int, progress: Double) {
+        DispatchQueue.main.async {
+            if var status = self.segmentProgress[index] {
+                status.progress = progress
+                self.segmentProgress[index] = status
+            }
+        }
+    }
+
+    public func forceCloseOverlay() {
+        resetSession()
+    }
+
+    public func resetSession() {
+        self.audioFiles.removeAll()
+        clearMetadata()
+        self.showOverlay = false
+        self.isConverting = false
+        self.progress = 0.0
+        self.eventLogs = []
+        self.logString = ""
+        self.segmentProgress = [:]
+    }
+
+    /// Kennung der zuletzt gestarteten Info-Abfrage. Klickt der Nutzer schnell
+    /// nacheinander auf mehrere Dateien, laufen mehrere mediainfo-Prozesse
+    /// parallel — ohne diese Kennung könnte ein langsamer, veralteter Lauf das
+    /// Ergebnis der zuletzt angefragten Datei überschreiben.
+    /// Nur auf dem Main-Thread lesen/schreiben.
+    private var infoRequestToken = UUID()
+
+    /// Nur auf dem Main-Thread aufrufen (setzt @Published-State).
+    public func fetchRawMediaInfo(for file: AudioFile) {
+        let token = UUID()
+        self.infoRequestToken = token
+        self.isFetchingInfo = true
+        self.selectedFileInfoText = "Lade Informationen..."
+        self.showInfoSheet = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Gebündeltes mediainfo bevorzugen (getBinaryURL: Bundle -> PATH ->
+            // Homebrew-Fallback). Vorher fest verdrahtete Homebrew-Pfade ließen
+            // den Info-Dialog in der verteilten App ohne Homebrew scheitern,
+            // obwohl mediainfo mitgeliefert wird.
+            guard let miURL = FFmpegWrapper.getBinaryURL(name: "mediainfo") else {
+                self.updateInfoText("❌ MediaInfo wurde auf diesem System nicht gefunden.", token: token)
+                return
+            }
+
+            let process = Process()
+            process.executableURL = miURL
+            process.arguments = [file.url.path]
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                if data.isEmpty {
+                    self.updateInfoText("MediaInfo hat keine Informationen geliefert.", token: token)
+                    return
+                }
+                let encodingsToTry: [(name: String, encoding: String.Encoding)] = [
+                    ("UTF-8", .utf8), ("Mac OS Roman", String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(0x0800)))),
+                    ("ISO-8859-1 / Windows-1252", .isoLatin1), ("ASCII", .ascii)
+                ]
+                var decodedText: String?
+                for attempt in encodingsToTry {
+                    if let text = String(data: data, encoding: attempt.encoding) {
+                        decodedText = text; break
+                    }
+                }
+                self.updateInfoText(decodedText ?? "Dekodierung fehlgeschlagen.", token: token)
+            } catch {
+                self.updateInfoText("Fehler: \(error.localizedDescription)", token: token)
+            }
+        }
+    }
+
+    private func updateInfoText(_ text: String, token: UUID) {
+        DispatchQueue.main.async {
+            // Veraltete Antwort verwerfen: Der Nutzer hat inzwischen die Info
+            // einer anderen Datei angefragt, deren Ergebnis gewinnen muss.
+            guard token == self.infoRequestToken else { return }
+            self.selectedFileInfoText = text
+            self.isFetchingInfo = false
+        }
+    }
+
+    public var startTime: Date?
+    public var processedSecondsAtStart: TimeInterval?
+    public var totalDuration: TimeInterval { audioFiles.reduce(0) { $0 + $1.duration } }
+
+    public func clearMetadata() {
+        self.title = ""; self.author = ""; self.genre = "Hörbuch"
+        self.coverImage = nil; self.coverPath = nil; self.embeddedCoverData = nil
+        self.titleCandidates = []; self.authorCandidates = []
+    }
+    
+    /// `skipCoverExtraction`: überspringt die (schwere, AVAsset-lastige) Suche nach
+    /// eingebettetem Cover. Wird vom Ordner-Pfad genutzt, der das Cover bereits beim
+    /// Hintergrund-Scan (`scanFolder`) ermittelt hat — so läuft die Suche nicht ein
+    /// zweites Mal, und vor allem nicht auf dem Main-Thread.
+    public func processIncomingFiles(_ newFiles: [AudioFile], skipCoverExtraction: Bool = false) {
+        addLog("📥 Importiere \(newFiles.count) Datei(en)...")
+        self.audioFiles.append(contentsOf: newFiles)
+        self.audioFiles.sort { (a, b) -> Bool in
+            // Natürliche Sortierung wie im Finder: "Teil 2" kommt vor "Teil 10".
+            // Reines String-< würde unnummerierte Ziffernfolgen falsch ordnen
+            // (1, 10, 11, ..., 2) und damit die Kapitelreihenfolge zerstören.
+            if a.name != b.name { return a.name.localizedStandardCompare(b.name) == .orderedAscending }
+            return a.startTime < b.startTime
+        }
+        if !skipCoverExtraction && coverImage == nil && coverPath == nil {
+            // Artwork-Suche (schwere AVAsset-Zugriffe) in den Hintergrund — beim
+            // Einzeldatei-Drop lief sie sonst synchron auf dem Main-Thread und
+            // ließ die UI haken (der Ordner-Pfad erledigt das bereits im
+            // Hintergrund-Scan, siehe skipCoverExtraction).
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                for file in newFiles {
+                    if let artworkData = AudioFile.extractEmbeddedArtwork(from: file.url) {
+                        let image = NSImage(data: artworkData)
+                        DispatchQueue.main.async {
+                            // Hat der Nutzer inzwischen selbst ein Cover gesetzt,
+                            // gewinnt seines — das gefundene Artwork verwerfen.
+                            guard let self = self, self.coverImage == nil, self.coverPath == nil else { return }
+                            // Rohdaten merken, damit das eingebettete Cover später wirklich
+                            // in die Ausgabe geschrieben wird (coverPath bleibt nil).
+                            self.coverImage = image; self.coverPath = nil; self.embeddedCoverData = artworkData
+                        }
+                        break
+                    }
+                }
+            }
+        }
+        if title.isEmpty || author.isEmpty {
+            if let first = audioFiles.first { importGlobalMetadata(from: first) }
+        }
+    }
+
+    private func importGlobalMetadata(from file: AudioFile) {
+        metadataGroup.enter()
+        // Die Group STARK fassen (nicht über self): wäre self beim Ausführen des
+        // Blocks bereits dealloziert, liefe self?.metadataGroup.leave() ins Leere
+        // → enter() ohne leave() → metadataGroup.wait() (CLI) hinge für immer.
+        let group = metadataGroup
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            defer { group.leave() }
+            guard let self = self else { return }
+            
+            guard let miURL = FFmpegWrapper.getBinaryURL(name: "mediainfo") else {
+                DispatchQueue.main.async { self.showSelectionUI = true }
+                return
+            }
+
+            let process = Process()
+            process.executableURL = miURL
+            process.arguments = ["--Output=JSON", file.url.path]
+            
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            
+            do {
+                try process.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                
+                if data.isEmpty {
+                    DispatchQueue.main.async { self.showSelectionUI = true }
+                    return
+                }
+                
+                guard let startIdx = data.firstIndex(of: 123), let endIdx = data.lastIndex(of: 125) else {
+                    DispatchQueue.main.async { self.showSelectionUI = true }
+                    return
+                }
+                let jsonDataSegment = data.subdata(in: startIdx..<(endIdx + 1))
+                
+                var finalJSONData: Data?
+                let encodingsToTry: [(name: String, encoding: String.Encoding)] = [
+                    ("UTF-8", .utf8), 
+                    ("Mac OS Roman", String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(0x0800)))), 
+                    ("ISO-8859-1 / Windows-1252", .isoLatin1), 
+                    ("UTF-16", .utf16)
+                ]
+                for attempt in encodingsToTry {
+                    if let decodedString = String(data: jsonDataSegment, encoding: attempt.encoding), let dataBack = decodedString.data(using: .utf8) {
+                        finalJSONData = dataBack
+                        break
+                    }
+                }
+                
+                guard let validUTF8Data = finalJSONData else {
+                    DispatchQueue.main.async { self.showSelectionUI = true }
+                    return
+                }
+                
+                let jsonObject = try JSONSerialization.jsonObject(with: validUTF8Data, options: [])
+                var generalTrack: [String: Any]?
+                if let dict = jsonObject as? [String: Any], 
+                   let media = dict["media"] as? [String: Any], 
+                   let tracks = media["track"] as? [[String: Any]] {
+                    generalTrack = tracks.first(where: { $0["@type"] as? String == "General" })
+                }
+                
+                guard let finalGeneral = generalTrack else {
+                    DispatchQueue.main.async { self.showSelectionUI = true }
+                    return
+                }
+                
+                var foundTitles: [TagCandidate] = []
+                var foundAuthors: [TagCandidate] = []
+                func extractValue(for key: String) -> String? {
+                    return finalGeneral[key] as? String ?? (finalGeneral[key] as? [String])?.first
+                }
+                
+                if let album = extractValue(for: "Album") { foundTitles.append(TagCandidate(type: "MediaInfo", key: "Album", value: album)) }
+                if let titleVal = extractValue(for: "Title") { foundTitles.append(TagCandidate(type: "MediaInfo", key: "Title", value: titleVal)) }
+                if let performer = extractValue(for: "Performer") { foundAuthors.append(TagCandidate(type: "MediaInfo", key: "Performer", value: performer)) }
+                if let albumPerf = extractValue(for: "Album_Performer") { foundAuthors.append(TagCandidate(type: "MediaInfo", key: "Album_Performer", value: albumPerf)) }
+                
+                DispatchQueue.main.async {
+                    self.titleCandidates = foundTitles
+                    self.authorCandidates = foundAuthors
+                    
+                    if self.title.isEmpty, let bestT = foundTitles.first?.value { self.title = bestT }
+                    if self.author.isEmpty, let bestA = foundAuthors.first?.value { self.author = bestA }
+                    
+                    let titleIsEmpty = self.title.trimmingCharacters(in: .whitespaces).isEmpty
+                    let authorIsEmpty = self.author.trimmingCharacters(in: .whitespaces).isEmpty
+                    
+                    let shouldShowUI = (titleIsEmpty && !foundTitles.isEmpty) || (authorIsEmpty && !foundAuthors.isEmpty)
+                    if shouldShowUI { self.showSelectionUI = true }
+                }
+            } catch {
+                DispatchQueue.main.async { self.showSelectionUI = true }
+            }
+        }
+    }
+
+    /// Ergebnis eines Ordner-Scans. Enthält KEINEN `@Published`-State und darf daher
+    /// gefahrlos auf einem Hintergrund-Thread berechnet werden.
+    public struct ScannedFolder {
+        public var audioFiles: [AudioFile]
+        public var imageURLs: [URL]
+        public var embeddedArtwork: Data?
+    }
+
+    /// Schwerer Teil des Ordner-Imports: rekursiv scannen, m4b-Kapitel via ffmpeg
+    /// extrahieren, Dauern/eingebettetes Artwork lesen. Rührt **keinen**
+    /// `@Published`-State an → thread-safe. In der GUI auf einen Hintergrund-Thread
+    /// legen (sonst friert der Drop großer Ordner ein), dann `applyScannedFolder`
+    /// auf dem Main-Thread aufrufen.
+    public func scanFolder(_ url: URL) -> ScannedFolder {
+        let fileManager = FileManager.default
+        guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey]) else {
+            return ScannedFolder(audioFiles: [], imageURLs: [], embeddedArtwork: nil)
+        }
+        var foundAudio: [AudioFile] = []; var foundImages: [URL] = []
+        for case let fileURL as URL in enumerator {
+            let ext = fileURL.pathExtension.lowercased()
+            if ["mp3", "m4a", "wav", "flac", "m4b", "mp4"].contains(ext) {
+                if ["m4b", "mp4"].contains(ext), let chapters = AudioFile.extractChapters(from: fileURL) { foundAudio.append(contentsOf: chapters) }
+                else { foundAudio.append(AudioFile(url: fileURL)) }
+            } else if ["jpg", "jpeg", "png"].contains(ext) { foundImages.append(fileURL) }
+        }
+        var embedded: Data? = nil
+        for audioFile in foundAudio {
+            if let artworkData = AudioFile.extractEmbeddedArtwork(from: audioFile.url) { embedded = artworkData; break }
+        }
+        return ScannedFolder(audioFiles: foundAudio, imageURLs: foundImages, embeddedArtwork: embedded)
+    }
+
+    /// Leichter Teil: das Scan-Ergebnis in den `@Published`-State übernehmen.
+    /// MUSS auf dem Main-Thread laufen.
+    public func applyScannedFolder(_ scanned: ScannedFolder) {
+        if coverImage == nil, let artworkData = scanned.embeddedArtwork {
+            coverImage = NSImage(data: artworkData)
+            coverPath = nil
+            // Rohdaten merken (siehe processIncomingFiles): nur so landet ein
+            // eingebettetes Cover ohne separate Bilddatei auch im Output.
+            embeddedCoverData = artworkData
+        }
+        // Cover-Suche nicht erneut (schon im Scan erledigt) — sonst liefe sie hier
+        // auf dem Main-Thread über alle Dateien.
+        processIncomingFiles(scanned.audioFiles, skipCoverExtraction: true)
+        if !scanned.imageURLs.isEmpty, let url = findLargestImage(from: scanned.imageURLs) { selectCover(url: url) }
+    }
+
+    /// Synchroner Ordner-Import (CLI-Pfad + Abwärtskompatibilität): scannen + anwenden
+    /// am Stück auf dem aufrufenden Thread. Die CLI ruft danach `metadataGroup.wait()`
+    /// und verlässt sich darauf, dass der Import hier synchron abgeschlossen ist.
+    public func addFolder(_ url: URL) {
+        applyScannedFolder(scanFolder(url))
+    }
+
+    private func findLargestImage(from urls: [URL]) -> URL? {
+        var maxFileSize = -1; var largestURL: URL?
+        for url in urls {
+            if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > maxFileSize {
+                maxFileSize = size; largestURL = url
+            }
+        }
+        return largestURL
+    }
+
+    public func selectCover(url: URL) {
+        if let image = NSImage(contentsOf: url) {
+            self.coverImage = resizeImage(image, maxDimension: 2000); self.coverPath = url.path
+            // Gewählte Datei hat Vorrang vor eingebettetem Artwork.
+            self.embeddedCoverData = nil
+        }
+    }
+
+    private func resizeImage(_ image: NSImage, maxDimension: CGFloat) -> NSImage {
+        let size = image.size
+        // Ungültige Bildmaße nicht skalieren (würde durch null teilen).
+        guard size.width > 0, size.height > 0 else { return image }
+        if size.width <= maxDimension && size.height <= maxDimension { return image }
+        let ratio = size.width / size.height
+        let newSize = ratio > 1 ? NSSize(width: maxDimension, height: maxDimension / ratio) : NSSize(width: maxDimension * ratio, height: maxDimension)
+        let newImage = NSImage(size: newSize)
+        newImage.lockFocus()
+        image.draw(in: NSRect(origin: .zero, size: newSize), from: .zero, operation: .copy, fraction: 1.0)
+        newImage.unlockFocus()
+        return newImage
+    }
+
+    public func formatFileSize(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
+    }
+}
+
+public struct AudioFile: Identifiable {
+    public let id = UUID()
+    public let url: URL
+    public let duration: TimeInterval
+    public let startTime: TimeInterval
+    public var chapterTitle: String
+    public var name: String { url.lastPathComponent }
+
+    public init(url: URL) {
+        self.url = url
+        let asset = AVAsset(url: url)
+        // CMTimeGetSeconds kann NaN/Infinity liefern (korrupte/unlesbare Datei).
+        // An der Quelle auf einen endlichen, nicht-negativen Wert klemmen — sonst
+        // crashen spätere Int()-Casts (Int(NaN)) und Divisionen durch die Dauer.
+        self.duration = AudioFile.sanitizeDuration(CMTimeGetSeconds(asset.duration))
+        self.startTime = 0
+        if let titleTag = AudioFile.findRobustTag(for: "title", in: asset.metadata) { self.chapterTitle = titleTag }
+        else { self.chapterTitle = url.deletingPathExtension().lastPathComponent }
+    }
+    public init(url: URL, startTime: TimeInterval, duration: TimeInterval, chapterTitle: String) {
+        self.url = url
+        self.startTime = AudioFile.sanitizeDuration(startTime)
+        self.duration = AudioFile.sanitizeDuration(duration)
+        self.chapterTitle = chapterTitle
+    }
+
+    /// Macht eine Sekundenangabe für Berechnungen sicher: NaN/Infinity/negativ → 0.
+    static func sanitizeDuration(_ seconds: TimeInterval) -> TimeInterval {
+        return (seconds.isFinite && seconds >= 0) ? seconds : 0
+    }
+    private static func findRobustTag(for tagName: String, in metadata: [AVMetadataItem]) -> String? {
+        if let commonItem = metadata.first(where: { $0.commonKey?.rawValue == tagName }) {
+            if let value = commonItem.stringValue, !value.isEmpty { return value }
+        }
+        for item in metadata {
+            guard let key = item.key else { continue }
+            let keyString = String(describing: key).lowercased()
+            if keyString.contains(tagName.lowercased()), let value = item.stringValue, !value.isEmpty { return value }
+        }
+        return nil
+    }
+}

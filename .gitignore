@@ -1,0 +1,30 @@
+# Swift Package Manager Build-Artefakte (nie einchecken)
+.build/
+
+# Xcode User-Daten
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+**/.swiftpm/xcode/xcuserdata/
+DerivedData/
+
+# Packaging-Output des Resources/bin-Verzeichnisses
+pkg_out/
+
+# Externe Binaries — NICHT einchecken (ffmpeg ist GPL + ~76 MB). Das Build-Skript
+# (build.sh) lädt sie vom Upstream nach Resources/bin/. Das Verzeichnis selbst
+# bleibt via .gitkeep im Repo, weil Package.swift es via .copy("Resources/bin") braucht.
+HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/Resources/bin/ffmpeg
+HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/Resources/bin/mediainfo
+
+# Gebaute App im Repo-Root (Build-Skript legt sie zum bequemen Testen dort ab)
+/Hörbuchklöppler.app
+build/
+
+# Hörprobe-Dateien (Audio) — als GitHub-Release-Asset gedacht, nicht ins Repo
+/hoerprobe/
+
+# macOS Finder-Müll
+.DS_Store
+
+# Scratch-/Testdateien
+test.txt
