@@ -32,6 +32,17 @@ public struct SegmentStatus: Equatable {
     public init(filename: String, progress: Double) { self.filename = filename; self.progress = progress }
 }
 
+public struct ImportToken: Equatable {
+    fileprivate let generation: UUID
+    fileprivate let coverRevision: UInt
+}
+
+struct MetadataResolution: Equatable {
+    let title: String
+    let author: String
+    let shouldShowSelection: Bool
+}
+
 public class ConversionSession: ObservableObject, Identifiable {
     public let id = UUID()
     public let metadataGroup = DispatchGroup()
@@ -44,11 +55,18 @@ public class ConversionSession: ObservableObject, Identifiable {
     
     @Published public var coverImage: NSImage?
     @Published public var coverPath: String?
+    @Published public var isPreparingArtwork = false
     /// Rohdaten eines eingebetteten Covers (aus einer Audiodatei extrahiert), das
     /// NICHT als separate Bilddatei vorliegt. Wird vor der Kodierung in eine
     /// temporäre Datei geschrieben, damit ffmpeg es einbetten kann — sonst ginge
     /// ein nur eingebettetes Cover im Output verloren.
     public var embeddedCoverData: Data?
+    private var importGeneration = UUID()
+    private var artworkRequest = UUID()
+    private var coverRevision: UInt = 0
+    private var cliSourceFolderURL: URL?
+    private var cliRepresentedFileIDs = Set<UUID>()
+    private var cliRepresentedChapterTitles: [UUID: String] = [:]
     @Published public var title: String = ""
     @Published public var author: String = ""
     @Published public var genre: String = "Hörbuch"
@@ -62,6 +80,40 @@ public class ConversionSession: ObservableObject, Identifiable {
     /// true = erfolgreich, false = mit Fehler/abgebrochen). Erlaubt der CLI
     /// einen korrekten Exit-Code statt blind "Erfolg" zu melden.
     public var lastConversionSucceeded: Bool?
+
+    private let conversionContextLock = NSLock()
+    private var activeConversionContext: ConversionContext?
+
+    /// Startet einen neuen Lauf und macht einen eventuell noch auslaufenden
+    /// Vorgänger ungültig. Dessen spätere Completion darf den neuen UI-State
+    /// dadurch nicht mehr überschreiben.
+    func beginConversionRun() -> ConversionContext {
+        let context = ConversionContext()
+        conversionContextLock.lock()
+        let previous = activeConversionContext
+        activeConversionContext = context
+        conversionContextLock.unlock()
+        previous?.cancel()
+        return context
+    }
+
+    func currentConversionContext() -> ConversionContext? {
+        conversionContextLock.lock()
+        defer { conversionContextLock.unlock() }
+        return activeConversionContext
+    }
+
+    func isCurrentConversion(_ id: UUID) -> Bool {
+        conversionContextLock.lock()
+        defer { conversionContextLock.unlock() }
+        return activeConversionContext?.id == id
+    }
+
+    func endConversion(_ id: UUID) {
+        conversionContextLock.lock()
+        if activeConversionContext?.id == id { activeConversionContext = nil }
+        conversionContextLock.unlock()
+    }
     
     // KORREKTUR: Strukturierte Logs für das Terminal-Interface
     @Published public var eventLogs: [LogEntry] = []
@@ -132,14 +184,16 @@ public class ConversionSession: ObservableObject, Identifiable {
         addLog("   - Parallel Mode: \(settings.useParallelEncoding ? "Aktiviert" : "Deaktiviert")", type: .info)
     }
 
-    public func initSegmentProgress(index: Int, filename: String) {
+    public func initSegmentProgress(index: Int, filename: String, runID: UUID? = nil) {
         DispatchQueue.main.async {
+            if let runID, !self.isCurrentConversion(runID) { return }
             self.segmentProgress[index] = SegmentStatus(filename: filename, progress: 0.0)
         }
     }
 
-    public func updateSegmentProgress(index: Int, progress: Double) {
+    public func updateSegmentProgress(index: Int, progress: Double, runID: UUID? = nil) {
         DispatchQueue.main.async {
+            if let runID, !self.isCurrentConversion(runID) { return }
             if var status = self.segmentProgress[index] {
                 status.progress = progress
                 self.segmentProgress[index] = status
@@ -152,6 +206,7 @@ public class ConversionSession: ObservableObject, Identifiable {
     }
 
     public func resetSession() {
+        invalidateImportWork()
         self.audioFiles.removeAll()
         clearMetadata()
         self.showOverlay = false
@@ -236,13 +291,65 @@ public class ConversionSession: ObservableObject, Identifiable {
         self.title = ""; self.author = ""; self.genre = "Hörbuch"
         self.coverImage = nil; self.coverPath = nil; self.embeddedCoverData = nil
         self.titleCandidates = []; self.authorCandidates = []
+        self.showSelectionUI = false
+        invalidateArtworkWork()
+    }
+
+    /// Markiert einen neuen GUI-Import. Langsame Antworten eines vorherigen
+    /// Datei-/Ordner-Drops verlieren damit sofort ihre Schreibberechtigung.
+    /// Nur auf dem Main-Thread aufrufen.
+    public func beginImport() -> ImportToken {
+        importGeneration = UUID()
+        cliSourceFolderURL = nil
+        cliRepresentedFileIDs = []
+        cliRepresentedChapterTitles = [:]
+        invalidateArtworkWork()
+        return ImportToken(generation: importGeneration, coverRevision: coverRevision)
+    }
+
+    private func invalidateImportWork() {
+        importGeneration = UUID()
+        cliSourceFolderURL = nil
+        cliRepresentedFileIDs = []
+        cliRepresentedChapterTitles = [:]
+        invalidateArtworkWork()
+    }
+
+    private func invalidateArtworkWork() {
+        artworkRequest = UUID()
+        isPreparingArtwork = false
+    }
+
+    private func isCurrentImport(_ token: ImportToken) -> Bool {
+        token.generation == importGeneration
+    }
+
+    /// Der GUI→CLI-Handoff ist nur ehrlich, wenn die aktuelle Dateiliste exakt
+    /// aus einem einzigen Ordner-Import stammt. Einzeldateien oder gemischte
+    /// Imports kann die ordnerbasierte CLI nicht identisch darstellen.
+    public var cliFolderIfRepresentable: URL? {
+        let currentIDs = Set(audioFiles.map(\.id))
+        let chapterTitlesStillMatch = audioFiles.allSatisfy {
+            cliRepresentedChapterTitles[$0.id] == $0.chapterTitle
+        }
+        guard !currentIDs.isEmpty,
+              currentIDs == cliRepresentedFileIDs,
+              chapterTitlesStillMatch else { return nil }
+        return cliSourceFolderURL
     }
     
     /// `skipCoverExtraction`: überspringt die (schwere, AVAsset-lastige) Suche nach
     /// eingebettetem Cover. Wird vom Ordner-Pfad genutzt, der das Cover bereits beim
     /// Hintergrund-Scan (`scanFolder`) ermittelt hat — so läuft die Suche nicht ein
     /// zweites Mal, und vor allem nicht auf dem Main-Thread.
-    public func processIncomingFiles(_ newFiles: [AudioFile], skipCoverExtraction: Bool = false) {
+    public func processIncomingFiles(
+        _ newFiles: [AudioFile],
+        skipCoverExtraction: Bool = false,
+        importToken: ImportToken? = nil,
+        sourceFolderForCLI: URL? = nil
+    ) {
+        if let importToken, !isCurrentImport(importToken) { return }
+        let canRepresentFolder = audioFiles.isEmpty && sourceFolderForCLI != nil
         addLog("📥 Importiere \(newFiles.count) Datei(en)...")
         self.audioFiles.append(contentsOf: newFiles)
         self.audioFiles.sort { (a, b) -> Bool in
@@ -252,34 +359,60 @@ public class ConversionSession: ObservableObject, Identifiable {
             if a.name != b.name { return a.name.localizedStandardCompare(b.name) == .orderedAscending }
             return a.startTime < b.startTime
         }
+        if canRepresentFolder, let sourceFolderForCLI, !newFiles.isEmpty {
+            cliSourceFolderURL = sourceFolderForCLI
+            cliRepresentedFileIDs = Set(audioFiles.map(\.id))
+            cliRepresentedChapterTitles = Dictionary(uniqueKeysWithValues: audioFiles.map { ($0.id, $0.chapterTitle) })
+        } else if !newFiles.isEmpty {
+            cliSourceFolderURL = nil
+            cliRepresentedFileIDs = []
+            cliRepresentedChapterTitles = [:]
+        }
         if !skipCoverExtraction && coverImage == nil && coverPath == nil {
             // Artwork-Suche (schwere AVAsset-Zugriffe) in den Hintergrund — beim
             // Einzeldatei-Drop lief sie sonst synchron auf dem Main-Thread und
             // ließ die UI haken (der Ordner-Pfad erledigt das bereits im
             // Hintergrund-Scan, siehe skipCoverExtraction).
+            let request = UUID()
+            artworkRequest = request
+            let expectedCoverRevision = coverRevision
+            // Bei einem Multi-Datei-Drop können mehrere Provider kurz
+            // nacheinander ankommen. Die jeweils neueste Suche umfasst deshalb
+            // die komplette aktuelle Liste und kann Artwork aus einem früher
+            // gelieferten Provider weiterhin finden.
+            let filesToSearch = audioFiles
+            let importedFileIDs = Set(filesToSearch.map(\.id))
+            isPreparingArtwork = true
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                for file in newFiles {
+                var foundArtwork: (image: NSImage?, data: Data)?
+                for file in filesToSearch {
                     if let artworkData = AudioFile.extractEmbeddedArtwork(from: file.url) {
-                        let image = NSImage(data: artworkData)
-                        DispatchQueue.main.async {
-                            // Hat der Nutzer inzwischen selbst ein Cover gesetzt,
-                            // gewinnt seines — das gefundene Artwork verwerfen.
-                            guard let self = self, self.coverImage == nil, self.coverPath == nil else { return }
-                            // Rohdaten merken, damit das eingebettete Cover später wirklich
-                            // in die Ausgabe geschrieben wird (coverPath bleibt nil).
-                            self.coverImage = image; self.coverPath = nil; self.embeddedCoverData = artworkData
-                        }
+                        foundArtwork = (NSImage(data: artworkData), artworkData)
                         break
                     }
+                }
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.artworkRequest == request,
+                          self.coverRevision == expectedCoverRevision,
+                          importToken.map(self.isCurrentImport) ?? true,
+                          importedFileIDs.isSubset(of: Set(self.audioFiles.map(\.id))) else { return }
+                    self.isPreparingArtwork = false
+                    // Ein zwischenzeitlich manuell gesetztes Cover gewinnt.
+                    guard self.coverImage == nil, self.coverPath == nil,
+                          let foundArtwork else { return }
+                    self.coverImage = foundArtwork.image
+                    self.coverPath = nil
+                    self.embeddedCoverData = foundArtwork.data
                 }
             }
         }
         if title.isEmpty || author.isEmpty {
-            if let first = audioFiles.first { importGlobalMetadata(from: first) }
+            if let first = audioFiles.first { importGlobalMetadata(from: first, importToken: importToken) }
         }
     }
 
-    private func importGlobalMetadata(from file: AudioFile) {
+    private func importGlobalMetadata(from file: AudioFile, importToken: ImportToken?) {
         metadataGroup.enter()
         // Die Group STARK fassen (nicht über self): wäre self beim Ausführen des
         // Blocks bereits dealloziert, liefe self?.metadataGroup.leave() ins Leere
@@ -290,7 +423,7 @@ public class ConversionSession: ObservableObject, Identifiable {
             guard let self = self else { return }
             
             guard let miURL = FFmpegWrapper.getBinaryURL(name: "mediainfo") else {
-                DispatchQueue.main.async { self.showSelectionUI = true }
+                self.showMetadataSelection(ifCurrent: importToken)
                 return
             }
 
@@ -307,12 +440,12 @@ public class ConversionSession: ObservableObject, Identifiable {
                 process.waitUntilExit()
                 
                 if data.isEmpty {
-                    DispatchQueue.main.async { self.showSelectionUI = true }
+                    self.showMetadataSelection(ifCurrent: importToken)
                     return
                 }
                 
                 guard let startIdx = data.firstIndex(of: 123), let endIdx = data.lastIndex(of: 125) else {
-                    DispatchQueue.main.async { self.showSelectionUI = true }
+                    self.showMetadataSelection(ifCurrent: importToken)
                     return
                 }
                 let jsonDataSegment = data.subdata(in: startIdx..<(endIdx + 1))
@@ -332,7 +465,7 @@ public class ConversionSession: ObservableObject, Identifiable {
                 }
                 
                 guard let validUTF8Data = finalJSONData else {
-                    DispatchQueue.main.async { self.showSelectionUI = true }
+                    self.showMetadataSelection(ifCurrent: importToken)
                     return
                 }
                 
@@ -345,7 +478,7 @@ public class ConversionSession: ObservableObject, Identifiable {
                 }
                 
                 guard let finalGeneral = generalTrack else {
-                    DispatchQueue.main.async { self.showSelectionUI = true }
+                    self.showMetadataSelection(ifCurrent: importToken)
                     return
                 }
                 
@@ -361,27 +494,64 @@ public class ConversionSession: ObservableObject, Identifiable {
                 if let albumPerf = extractValue(for: "Album_Performer") { foundAuthors.append(TagCandidate(type: "MediaInfo", key: "Album_Performer", value: albumPerf)) }
                 
                 DispatchQueue.main.async {
+                    guard importToken.map(self.isCurrentImport) ?? true else { return }
                     self.titleCandidates = foundTitles
                     self.authorCandidates = foundAuthors
-                    
-                    if self.title.isEmpty, let bestT = foundTitles.first?.value { self.title = bestT }
-                    if self.author.isEmpty, let bestA = foundAuthors.first?.value { self.author = bestA }
-                    
-                    let titleIsEmpty = self.title.trimmingCharacters(in: .whitespaces).isEmpty
-                    let authorIsEmpty = self.author.trimmingCharacters(in: .whitespaces).isEmpty
-                    
-                    let shouldShowUI = (titleIsEmpty && !foundTitles.isEmpty) || (authorIsEmpty && !foundAuthors.isEmpty)
-                    if shouldShowUI { self.showSelectionUI = true }
+
+                    // Erst entscheiden, ob eine Auswahl nötig ist, dann genau
+                    // einen eindeutigen Kandidaten automatisch übernehmen.
+                    // Der frühere Ablauf füllte zuerst das Feld und prüfte danach
+                    // auf "leer" — dadurch war die Auswahl-UI unerreichbar.
+                    let resolution = Self.resolveMetadata(
+                        currentTitle: self.title,
+                        currentAuthor: self.author,
+                        titleCandidates: foundTitles,
+                        authorCandidates: foundAuthors
+                    )
+                    self.title = resolution.title
+                    self.author = resolution.author
+                    self.showSelectionUI = resolution.shouldShowSelection
                 }
             } catch {
-                DispatchQueue.main.async { self.showSelectionUI = true }
+                self.showMetadataSelection(ifCurrent: importToken)
             }
         }
+    }
+
+    private func showMetadataSelection(ifCurrent importToken: ImportToken?) {
+        DispatchQueue.main.async {
+            guard importToken.map(self.isCurrentImport) ?? true else { return }
+            self.showSelectionUI = true
+        }
+    }
+
+    static func resolveMetadata(
+        currentTitle: String,
+        currentAuthor: String,
+        titleCandidates: [TagCandidate],
+        authorCandidates: [TagCandidate]
+    ) -> MetadataResolution {
+        func resolve(current: String, candidates: [TagCandidate]) -> (String, Bool) {
+            guard current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return (current, false)
+            }
+            let uniqueValues = Array(Set(candidates.map(\.value))).sorted()
+            return uniqueValues.count == 1 ? (uniqueValues[0], false) : (current, true)
+        }
+
+        let resolvedTitle = resolve(current: currentTitle, candidates: titleCandidates)
+        let resolvedAuthor = resolve(current: currentAuthor, candidates: authorCandidates)
+        return MetadataResolution(
+            title: resolvedTitle.0,
+            author: resolvedAuthor.0,
+            shouldShowSelection: resolvedTitle.1 || resolvedAuthor.1
+        )
     }
 
     /// Ergebnis eines Ordner-Scans. Enthält KEINEN `@Published`-State und darf daher
     /// gefahrlos auf einem Hintergrund-Thread berechnet werden.
     public struct ScannedFolder {
+        public var sourceURL: URL
         public var audioFiles: [AudioFile]
         public var imageURLs: [URL]
         public var embeddedArtwork: Data?
@@ -395,7 +565,7 @@ public class ConversionSession: ObservableObject, Identifiable {
     public func scanFolder(_ url: URL) -> ScannedFolder {
         let fileManager = FileManager.default
         guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey]) else {
-            return ScannedFolder(audioFiles: [], imageURLs: [], embeddedArtwork: nil)
+            return ScannedFolder(sourceURL: url, audioFiles: [], imageURLs: [], embeddedArtwork: nil)
         }
         var foundAudio: [AudioFile] = []; var foundImages: [URL] = []
         for case let fileURL as URL in enumerator {
@@ -409,13 +579,16 @@ public class ConversionSession: ObservableObject, Identifiable {
         for audioFile in foundAudio {
             if let artworkData = AudioFile.extractEmbeddedArtwork(from: audioFile.url) { embedded = artworkData; break }
         }
-        return ScannedFolder(audioFiles: foundAudio, imageURLs: foundImages, embeddedArtwork: embedded)
+        return ScannedFolder(sourceURL: url, audioFiles: foundAudio, imageURLs: foundImages, embeddedArtwork: embedded)
     }
 
     /// Leichter Teil: das Scan-Ergebnis in den `@Published`-State übernehmen.
     /// MUSS auf dem Main-Thread laufen.
-    public func applyScannedFolder(_ scanned: ScannedFolder) {
-        if coverImage == nil, let artworkData = scanned.embeddedArtwork {
+    public func applyScannedFolder(_ scanned: ScannedFolder, importToken: ImportToken? = nil) {
+        if let importToken, !isCurrentImport(importToken) { return }
+        let expectedCoverRevision = importToken?.coverRevision ?? coverRevision
+        if coverRevision == expectedCoverRevision, coverImage == nil, coverPath == nil,
+           let artworkData = scanned.embeddedArtwork {
             coverImage = NSImage(data: artworkData)
             coverPath = nil
             // Rohdaten merken (siehe processIncomingFiles): nur so landet ein
@@ -424,8 +597,17 @@ public class ConversionSession: ObservableObject, Identifiable {
         }
         // Cover-Suche nicht erneut (schon im Scan erledigt) — sonst liefe sie hier
         // auf dem Main-Thread über alle Dateien.
-        processIncomingFiles(scanned.audioFiles, skipCoverExtraction: true)
-        if !scanned.imageURLs.isEmpty, let url = findLargestImage(from: scanned.imageURLs) { selectCover(url: url) }
+        processIncomingFiles(
+            scanned.audioFiles,
+            skipCoverExtraction: true,
+            importToken: importToken,
+            sourceFolderForCLI: scanned.sourceURL
+        )
+        if coverRevision == expectedCoverRevision,
+           !scanned.imageURLs.isEmpty,
+           let url = findLargestImage(from: scanned.imageURLs) {
+            selectCover(url: url)
+        }
     }
 
     /// Synchroner Ordner-Import (CLI-Pfad + Abwärtskompatibilität): scannen + anwenden
@@ -447,10 +629,20 @@ public class ConversionSession: ObservableObject, Identifiable {
 
     public func selectCover(url: URL) {
         if let image = NSImage(contentsOf: url) {
+            coverRevision &+= 1
+            invalidateArtworkWork()
             self.coverImage = resizeImage(image, maxDimension: 2000); self.coverPath = url.path
             // Gewählte Datei hat Vorrang vor eingebettetem Artwork.
             self.embeddedCoverData = nil
         }
+    }
+
+    public func removeCover() {
+        coverRevision &+= 1
+        invalidateArtworkWork()
+        coverImage = nil
+        coverPath = nil
+        embeddedCoverData = nil
     }
 
     private func resizeImage(_ image: NSImage, maxDimension: CGFloat) -> NSImage {

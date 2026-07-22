@@ -75,11 +75,11 @@ cd hoerbuchkloeppler
 
 ```bash
 ./install.sh                 # build → sign → notarize → staple → /Applications
-./install.sh --no-notarize   # faster: Developer-ID-signed only (runs on this Mac)
+./install.sh --no-notarize   # Developer-ID-signed test build in the project; never installs
 ./install.sh --help
 ```
 
-This needs an Apple **Developer ID Application** certificate in your keychain and a `notarytool` keychain profile. The profile name comes from the `NOTARY_PROFILE` environment variable or a clone-local git config — it is never committed, and credentials stay in the keychain (never passed on the command line). Without a Developer ID, use `./build.sh` or `./install.sh --no-notarize`.
+This needs an Apple **Developer ID Application** certificate in your keychain and a `notarytool` keychain profile. The profile name comes from the `NOTARY_PROFILE` environment variable or a clone-local git config — it is never committed, and credentials stay in the keychain (never passed on the command line). `--no-notarize` still needs the Developer ID but exits after verifying the project-local test build; only a successfully notarized, stapled and Gatekeeper-accepted build may be copied to `/Applications`. Without a Developer ID, use `./build.sh`.
 
 Building locally and installing to your own `/Applications` is **not** redistribution, so it stays clear of the GPL obligations that the bundled `ffmpeg` would otherwise pull in (see [Install / Build](#install--build) above).
 

@@ -1,87 +1,169 @@
 import Foundation
 import AVFoundation
 import CoreMedia
+import Darwin
 
-public struct FFmpegWrapper {
-    private static var activeProcesses = Set<Process>()
-    private static let registryLock = NSLock()
-    
-    private static var isCancelled = false
-    private static let cancellationLock = NSLock()
-    
-    public static func setIsCancelled(_ value: Bool) {
-        cancellationLock.lock()
-        isCancelled = value
-        cancellationLock.unlock()
-    }
-    
-    public static func getIsCancelled() -> Bool {
-        cancellationLock.lock()
-        let val = isCancelled
-        cancellationLock.unlock()
-        return val
-    }
+public struct ConversionPlan {
+    public let groups: [[AudioFile]]
+    public let outputURLs: [URL]
+}
 
-    private static func registerProcess(_ process: Process) {
-        registryLock.lock()
-        activeProcesses.insert(process)
-        registryLock.unlock()
-    }
-    
-    private static func unregisterProcess(_ process: Process) {
-        registryLock.lock()
-        activeProcesses.remove(process)
-        registryLock.unlock()
+/// Laufbezogener Besitz aller Prozesse und temporären Dateien. Dadurch kann ein
+/// Fenster nur seinen eigenen Lauf abbrechen; ein zweites Fenster bleibt
+/// unangetastet. Die Sperre schließt außerdem das Rennen zwischen Start und
+/// Abbruch eines Prozesses.
+final class ConversionContext {
+    let id = UUID()
+
+    private let lock = NSLock()
+    private var cancelled = false
+    private var processes = Set<Process>()
+    private var tempDirectories = Set<URL>()
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
     }
 
-    // Registry der aktiven Temp-Verzeichnisse, damit ein Abbruch (besonders der
-    // CLI-SIGINT mit sofortigem exit) die teils großen Zwischen-WAVs aufräumt.
-    private static var activeTempDirs = Set<URL>()
-
-    private static func registerTempDir(_ url: URL) {
-        registryLock.lock()
-        activeTempDirs.insert(url)
-        registryLock.unlock()
+    func register(_ process: Process) {
+        lock.lock()
+        processes.insert(process)
+        let shouldTerminate = cancelled
+        lock.unlock()
+        if shouldTerminate, process.isRunning { process.terminate() }
     }
 
-    /// Entfernt ein Temp-Verzeichnis und trägt es aus der Registry aus.
-    private static func removeTempDir(_ url: URL) {
-        registryLock.lock()
-        activeTempDirs.remove(url)
-        registryLock.unlock()
+    func unregister(_ process: Process) {
+        lock.lock()
+        processes.remove(process)
+        lock.unlock()
+    }
+
+    func registerTempDirectory(_ url: URL) {
+        lock.lock()
+        tempDirectories.insert(url)
+        let shouldRemove = cancelled
+        lock.unlock()
+        if shouldRemove { try? FileManager.default.removeItem(at: url) }
+    }
+
+    func removeTempDirectory(_ url: URL) {
+        lock.lock()
+        tempDirectories.remove(url)
+        lock.unlock()
         try? FileManager.default.removeItem(at: url)
     }
 
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let ownedProcesses = processes
+        let ownedDirectories = tempDirectories
+        processes.removeAll()
+        tempDirectories.removeAll()
+        lock.unlock()
+
+        for process in ownedProcesses where process.isRunning { process.terminate() }
+        for directory in ownedDirectories { try? FileManager.default.removeItem(at: directory) }
+    }
+}
+
+public struct FFmpegWrapper {
+    /// Nur reguläre, ausführbare Dateien sind startfähige Tool-Kandidaten.
+    /// Ein gebündeltes Binary ohne x-Bit darf den funktionierenden PATH-Fallback
+    /// nicht verdecken.
+    public static func isUsableExecutable(_ url: URL) -> Bool {
+        guard FileManager.default.isExecutableFile(atPath: url.path),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              attributes[.type] as? FileAttributeType == .typeRegular else {
+            return false
+        }
+        return true
+    }
+
+    static func resolveBinaryURL(name: String, bundledURL: URL?, pathEnvironment: String?, fallbackPaths: [String]) -> URL? {
+        var candidates: [URL] = []
+        if let bundledURL { candidates.append(bundledURL) }
+        if let pathEnvironment {
+            candidates += pathEnvironment.split(separator: ":").map {
+                URL(fileURLWithPath: String($0)).appendingPathComponent(name)
+            }
+        }
+        candidates += fallbackPaths.map { URL(fileURLWithPath: $0) }
+        return candidates.first(where: isUsableExecutable)
+    }
+
     public static func getBinaryURL(name: String) -> URL? {
-        if let url = Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "bin") {
-            return url
-        }
-        
-        if let pathEnv = ProcessInfo.processInfo.environment["PATH"] {
-            let paths = pathEnv.split(separator: ":").map { String($0) }
-            for dir in paths {
-                let fileURL = URL(fileURLWithPath: dir).appendingPathComponent(name)
-                if FileManager.default.fileExists(atPath: fileURL.path) {
-                    return fileURL
-                }
-            }
-        }
-        
-        // Übliche Installationsorte: Homebrew (Apple Silicon + Intel), MacPorts, System.
+        let bundledURL = Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "bin")
         let fallbackPaths = ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "/opt/local/bin/\(name)", "/usr/bin/\(name)", "/bin/\(name)"]
-        for path in fallbackPaths {
-            if FileManager.default.fileExists(atPath: path) {
-                return URL(fileURLWithPath: path)
+        return resolveBinaryURL(
+            name: name,
+            bundledURL: bundledURL,
+            pathEnvironment: ProcessInfo.processInfo.environment["PATH"],
+            fallbackPaths: fallbackPaths
+        )
+    }
+
+    /// Liefert nur dann eine Version, wenn der Prozess wirklich startet,
+    /// erfolgreich endet und eine nichtleere Ausgabe liefert.
+    public static func toolVersion(name: String) -> (url: URL, version: String)? {
+        guard let url = getBinaryURL(name: name), let version = toolVersion(at: url, name: name) else { return nil }
+        return (url, version)
+    }
+
+    static func toolVersion(at url: URL, name: String) -> String? {
+        guard isUsableExecutable(url) else { return nil }
+        let process = Process()
+        process.executableURL = url
+        process.arguments = name == "mediainfo" ? ["--Version"] : ["-version"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0,
+                  let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !output.isEmpty else { return nil }
+            let parts = output.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
+            if let index = parts.firstIndex(where: { $0.lowercased() == "version" }), index + 1 < parts.count {
+                return parts[index + 1].replacingOccurrences(of: ",", with: "")
             }
+            if name == "mediainfo", let version = parts.first(where: { $0.hasPrefix("v") && $0.contains(".") }) {
+                return version
+            }
+            return parts.first
+        } catch {
+            return nil
         }
-        return nil
+    }
+
+    public static func makeConversionPlan(files: [AudioFile], outputURL: URL, maxDurationHours: Int?) -> ConversionPlan {
+        let groups = splitAudioFilesIfNeeded(files, maxDurationHours: maxDurationHours)
+        let outputs = groups.indices.map {
+            resolveOutputURL(outputURL, groupIndex: $0, splitGroupsCount: groups.count)
+        }
+        return ConversionPlan(groups: groups, outputURLs: outputs)
     }
 
     public static func convert(session: ConversionSession, outputURL: URL) {
-        setIsCancelled(false)
+        convert(
+            session: session,
+            plan: makeConversionPlan(
+                files: session.audioFiles,
+                outputURL: outputURL,
+                maxDurationHours: session.settings.maxDurationHours
+            )
+        )
+    }
+
+    public static func convert(session: ConversionSession, plan: ConversionPlan) {
         // Ohne Eingabedateien gar nicht erst starten — sonst leere ffmpeg-Liste
         // und Division durch die Gruppengröße bei der Fortschrittsberechnung.
-        guard !session.audioFiles.isEmpty else {
+        guard !plan.groups.isEmpty, !plan.groups.flatMap({ $0 }).isEmpty,
+              plan.groups.count == plan.outputURLs.count else {
             DispatchQueue.main.async {
                 session.isConverting = false
                 session.lastConversionSucceeded = false
@@ -90,7 +172,9 @@ public struct FFmpegWrapper {
             }
             return
         }
+        let context = session.beginConversionRun()
         DispatchQueue.main.async {
+            guard session.isCurrentConversion(context.id) else { return }
             session.showOverlay = true
             session.isConverting = true
             session.lastConversionSucceeded = nil
@@ -125,27 +209,32 @@ public struct FFmpegWrapper {
         }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let splitGroups = splitAudioFilesIfNeeded(session.audioFiles, maxDurationHours: session.settings.maxDurationHours)
             // Verfolgt, ob ALLE Gruppen erfolgreich waren -- nur dann ist der Lauf
             // wirklich erfolgreich (für CLI-Exit-Code + ehrliche Statusmeldung).
             var overallSuccess = true
 
-            for (groupIndex, fileGroup) in splitGroups.enumerated() {
+            for (groupIndex, fileGroup) in plan.groups.enumerated() {
+                if context.isCancelled {
+                    overallSuccess = false
+                    break
+                }
                 let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("HB_Temp_\(UUID().uuidString)")
                 try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-                registerTempDir(tempDir)
+                context.registerTempDirectory(tempDir)
 
-                let finalURL = resolveOutputURL(outputURL, groupIndex: groupIndex, splitGroupsCount: splitGroups.count)
+                let finalURL = plan.outputURLs[groupIndex]
+                let stagedURL = stagingOutputURL(for: finalURL)
                 var success = false
 
                 if session.settings.useParallelEncoding {
-                    success = performParallelConversion(session: session, group: fileGroup, tempDir: tempDir, finalURL: finalURL)
+                    success = performParallelConversion(session: session, context: context, group: fileGroup, tempDir: tempDir, finalURL: stagedURL)
                 } else {
-                    success = performSequentialConversion(session: session, group: fileGroup, tempDir: tempDir, finalURL: finalURL)
+                    success = performSequentialConversion(session: session, context: context, group: fileGroup, tempDir: tempDir, finalURL: stagedURL)
                 }
 
-                if success && FileManager.default.fileExists(atPath: finalURL.path) {
+                if success && !context.isCancelled && isNonEmptyRegularFile(stagedURL) {
                     do {
+                        try commitStagedOutput(stagedURL, to: finalURL)
                         let attr = try FileManager.default.attributesOfItem(atPath: finalURL.path)
                         let size = attr[.size] as? Int64 ?? 0
                         
@@ -156,8 +245,11 @@ public struct FFmpegWrapper {
                                 process.arguments = [finalURL.path]
                                 let pipe = Pipe()
                                 process.standardOutput = pipe
+                                context.register(process)
+                                defer { context.unregister(process) }
                                 do {
                                     try process.run()
+                                    if context.isCancelled { process.terminate() }
                                     // Erst die Pipe leeren, DANN auf Exit warten — sonst
                                     // Deadlock, wenn die mediainfo-Ausgabe den Pipe-Puffer füllt.
                                     let data = pipe.fileHandleForReading.readDataToEndOfFile()
@@ -183,35 +275,43 @@ public struct FFmpegWrapper {
                             session.addLog("Name: \(finalURL.lastPathComponent)", type: .info)
                             session.addLog("Pfad: \(finalURL.path)", type: .info)
                             session.addLog("Größe: \(session.formatFileSize(size))", type: .info)
-                        } else {
-                            session.addLog("❌ KRITISCHER FEHLER beim Erstellen von \(finalURL.lastPathComponent). Datei ist leer. Vorgang abgebrochen.", type: .highlight)
-                            removeTempDir(tempDir)
-                            overallSuccess = false
-                            break
-                        }
+                        } else { throw CocoaError(.fileReadCorruptFile) }
                     } catch {
-                        session.addLog("✅ Datei erstellt, aber Dateigröße konnte nicht ermittelt werden.", type: .info)
+                        try? FileManager.default.removeItem(at: stagedURL)
+                        session.addLog("❌ Ausgabe konnte nicht atomar übernommen werden: \(error.localizedDescription)", type: .highlight)
+                        context.removeTempDirectory(tempDir)
+                        overallSuccess = false
+                        break
                     }
                 } else {
-                    session.addLog("❌ KRITISCHER FEHLER beim Erstellen von \(finalURL.lastPathComponent). Vorgang abgebrochen.", type: .highlight)
-                    removeTempDir(tempDir)
+                    try? FileManager.default.removeItem(at: stagedURL)
+                    if !context.isCancelled {
+                        session.addLog("❌ KRITISCHER FEHLER beim Erstellen von \(finalURL.lastPathComponent). Vorgang abgebrochen.", type: .highlight)
+                    }
+                    context.removeTempDirectory(tempDir)
                     overallSuccess = false
                     break
                 }
-                removeTempDir(tempDir)
+                context.removeTempDirectory(tempDir)
             }
 
             DispatchQueue.main.async {
+                guard session.isCurrentConversion(context.id) else { return }
                 session.isConverting = false
-                session.progress = 1.0
+                session.progress = overallSuccess ? 1.0 : session.progress
                 session.lastConversionSucceeded = overallSuccess
-                session.conversionStatus = overallSuccess ? "Erfolgreich abgeschlossen" : "Mit Fehlern beendet"
-                session.addLog(overallSuccess ? "🏁 Alle Vorgänge beendet." : "🏁 Vorgang mit Fehlern beendet.", type: .highlight)
+                if context.isCancelled {
+                    session.conversionStatus = "Abgebrochen"
+                } else {
+                    session.conversionStatus = overallSuccess ? "Erfolgreich abgeschlossen" : "Mit Fehlern beendet"
+                    session.addLog(overallSuccess ? "🏁 Alle Vorgänge beendet." : "🏁 Vorgang mit Fehlern beendet.", type: .highlight)
+                }
+                session.endConversion(context.id)
             }
         }
     }
 
-    private static func runParallelTasks(group: [AudioFile], tempDir: URL, session: ConversionSession, progressWeight: Double,
+    private static func runParallelTasks(group: [AudioFile], tempDir: URL, session: ConversionSession, context: ConversionContext, progressWeight: Double,
                                          extensionStr: String, showIndividualPacmans: Bool,
                                          argsProvider: @escaping (Int, AudioFile, URL) -> [String]) -> [String]? {
         // ffmpeg einmal vorab auflösen. Fehlt es, die Ursache klar benennen und
@@ -237,9 +337,10 @@ public struct FFmpegWrapper {
         let tracker = ProgressTracker()
         
         DispatchQueue.main.async {
+            guard session.isCurrentConversion(context.id) else { return }
             session.segmentProgress = [:]
             if !showIndividualPacmans {
-                session.initSegmentProgress(index: 0, filename: "Audio-Dekodierung (WAV)")
+                session.initSegmentProgress(index: 0, filename: "Audio-Dekodierung (WAV)", runID: context.id)
             }
         }
 
@@ -248,7 +349,7 @@ public struct FFmpegWrapper {
             groupQueue.async {
                 semaphore.wait()
                 
-                if getIsCancelled() {
+                if context.isCancelled {
                     semaphore.signal()
                     completionGroup.leave()
                     return
@@ -258,15 +359,15 @@ public struct FFmpegWrapper {
                 let finalArgs = argsProvider(idx, file, segmentURL)
                 
                 if showIndividualPacmans {
-                    DispatchQueue.main.async { session.initSegmentProgress(index: idx, filename: file.name) }
+                    session.initSegmentProgress(index: idx, filename: file.name, runID: context.id)
                 }
 
                 let process = Process()
                 process.executableURL = ffmpegURL
                 process.arguments = finalArgs
                 
-                registerProcess(process)
-                defer { unregisterProcess(process) }
+                context.register(process)
+                defer { context.unregister(process) }
                 
                 session.logVerbose("Starte Segment \(idx+1): ffmpeg \(finalArgs.joined(separator: " "))")
                 
@@ -292,13 +393,13 @@ public struct FFmpegWrapper {
                                file.duration > 0 {
                                 let p = currentSeconds / file.duration
                                 if showIndividualPacmans {
-                                    session.updateSegmentProgress(index: idx, progress: p)
+                                    session.updateSegmentProgress(index: idx, progress: p, runID: context.id)
                                 } else {
                                     tracker.lock.lock()
                                     tracker.progresses[idx] = p
                                     let totalP = tracker.progresses.values.reduce(0, +) / Double(group.count)
                                     tracker.lock.unlock()
-                                    DispatchQueue.main.async { session.updateSegmentProgress(index: 0, progress: totalP) }
+                                    session.updateSegmentProgress(index: 0, progress: totalP, runID: context.id)
                                 }
                             }
                         }
@@ -312,7 +413,7 @@ public struct FFmpegWrapper {
                     // noch nicht laufen sehen (isRunning war false) und übersprungen.
                     // Jetzt läuft er — sofort erneut prüfen und ggf. beenden, damit kein
                     // ungetrackter ffmpeg nach dem "Abbruch" voll durchläuft.
-                    if getIsCancelled() { process.terminate() }
+                    if context.isCancelled { process.terminate() }
                     process.waitUntilExit()
                     reader.readabilityHandler = nil
                     // Letzten, evtl. noch im Puffer liegenden stderr-Rest nachlesen,
@@ -331,11 +432,12 @@ public struct FFmpegWrapper {
                             results[idx] = segmentURL.path
                             let finishedCount = results.filter { !$0.isEmpty }.count
                             DispatchQueue.main.async { 
+                                guard session.isCurrentConversion(context.id) else { return }
                                 session.progress = (Double(finishedCount) / Double(group.count)) * progressWeight 
                                 if showIndividualPacmans {
-                                    session.updateSegmentProgress(index: idx, progress: 1.0)
+                                    session.updateSegmentProgress(index: idx, progress: 1.0, runID: context.id)
                                 } else if finishedCount == group.count {
-                                    session.updateSegmentProgress(index: 0, progress: 1.0)
+                                    session.updateSegmentProgress(index: 0, progress: 1.0, runID: context.id)
                                 }
                             }
                             lock.unlock()
@@ -396,8 +498,8 @@ public struct FFmpegWrapper {
         }
     }
 
-    private static func performSequentialConversion(session: ConversionSession, group: [AudioFile], tempDir: URL, finalURL: URL) -> Bool {
-        let wavPaths = runParallelTasks(group: group, tempDir: tempDir, session: session, progressWeight: 0.2, extensionStr: "wav", showIndividualPacmans: false) { idx, file, url in
+    private static func performSequentialConversion(session: ConversionSession, context: ConversionContext, group: [AudioFile], tempDir: URL, finalURL: URL) -> Bool {
+        let wavPaths = runParallelTasks(group: group, tempDir: tempDir, session: session, context: context, progressWeight: 0.2, extensionStr: "wav", showIndividualPacmans: false) { idx, file, url in
             return FFmpegWrapper.getArgsForStandardSlicing(idx: idx, file: file, url: url, session: session)
         }
         guard let validPaths = wavPaths else { return false }
@@ -412,11 +514,11 @@ public struct FFmpegWrapper {
         args += ["-metadata", "title=\(session.title)", "-metadata", "album=\(session.title)", "-metadata", "artist=\(session.author)", "-metadata", "genre=\(session.genre)", "-map", "0:a", "-map_metadata", "1"]
         if coverInput != nil { args += ["-map", "2:0", "-c:v", "copy", "-disposition:v", "attached_pic"] }
         args.append(finalURL.path)
-        return runFinalProcess(args: args, session: session, baseProgress: 0.2, logMessage: "🛠️ Starte komplette Apple CVBR Kodierung...", pacmanTitle: "Apple AAC Encoding")
+        return runFinalProcess(args: args, session: session, context: context, baseProgress: 0.2, logMessage: "🛠️ Starte komplette Apple CVBR Kodierung...", pacmanTitle: "Apple AAC Encoding")
     }
 
-    private static func performParallelConversion(session: ConversionSession, group: [AudioFile], tempDir: URL, finalURL: URL) -> Bool {
-        let aacPaths = runParallelTasks(group: group, tempDir: tempDir, session: session, progressWeight: 0.9, extensionStr: "m4a", showIndividualPacmans: true) { idx, file, url in
+    private static func performParallelConversion(session: ConversionSession, context: ConversionContext, group: [AudioFile], tempDir: URL, finalURL: URL) -> Bool {
+        let aacPaths = runParallelTasks(group: group, tempDir: tempDir, session: session, context: context, progressWeight: 0.9, extensionStr: "m4a", showIndividualPacmans: true) { idx, file, url in
             return FFmpegWrapper.getArgsForParallelEncoding(idx: idx, file: file, url: url, session: session)
         }
         guard let validPaths = aacPaths else { return false }
@@ -431,15 +533,16 @@ public struct FFmpegWrapper {
         args += ["-metadata", "title=\(session.title)", "-metadata", "album=\(session.title)", "-metadata", "artist=\(session.author)", "-metadata", "genre=\(session.genre)"]
         if coverInput != nil { args += ["-map", "2:0", "-c:v", "copy", "-disposition:v", "attached_pic"] }
         args.append(finalURL.path)
-        return runFinalProcess(args: args, session: session, baseProgress: 0.9, logMessage: "🛠️ Finaler Stream-Copy & MP4-Muxing gestartet...", pacmanTitle: "Finaler Zusammenbau")
+        return runFinalProcess(args: args, session: session, context: context, baseProgress: 0.9, logMessage: "🛠️ Finaler Stream-Copy & MP4-Muxing gestartet...", pacmanTitle: "Finaler Zusammenbau")
     }
 
-    private static func runFinalProcess(args: [String], session: ConversionSession, baseProgress: Double, logMessage: String, pacmanTitle: String) -> Bool {
+    private static func runFinalProcess(args: [String], session: ConversionSession, context: ConversionContext, baseProgress: Double, logMessage: String, pacmanTitle: String) -> Bool {
         DispatchQueue.main.async {
+            guard session.isCurrentConversion(context.id) else { return }
             session.segmentProgress = [:]
-            session.initSegmentProgress(index: 0, filename: pacmanTitle)
+            session.initSegmentProgress(index: 0, filename: pacmanTitle, runID: context.id)
         }
-        if getIsCancelled() { return false }
+        if context.isCancelled { return false }
         session.addLog(logMessage, type: .highlight)
         
         // Fehlendes ffmpeg klar melden statt (wie früher) /usr/bin/false zu starten,
@@ -455,11 +558,12 @@ public struct FFmpegWrapper {
         process.standardError = pipe
         session.logVerbose("Führe Final-Prozess aus: ffmpeg \(args.joined(separator: " "))")
         
-        registerProcess(process)
-        defer { unregisterProcess(process) }
+        context.register(process)
+        defer { context.unregister(process) }
         
         do {
             try process.run()
+            if context.isCancelled { process.terminate() }
             let reader = pipe.fileHandleForReading
             
             reader.readabilityHandler = { fileHandle in
@@ -469,11 +573,12 @@ public struct FFmpegWrapper {
                     if let timeString = extractTimeFromFFmpeg(output),
                        let currentSeconds = timeToSeconds(timeString) {
                         DispatchQueue.main.async {
+                            guard session.isCurrentConversion(context.id) else { return }
                             let total = session.totalDuration
                             guard total > 0 else { return }
                             let p = currentSeconds / total
                             session.progress = baseProgress + (p * (1.0 - baseProgress))
-                            session.updateSegmentProgress(index: 0, progress: p)
+                            session.updateSegmentProgress(index: 0, progress: p, runID: context.id)
                         }
                     }
                 }
@@ -482,7 +587,7 @@ public struct FFmpegWrapper {
             process.waitUntilExit()
             reader.readabilityHandler = nil
             if process.terminationStatus == 0 {
-                DispatchQueue.main.async { session.updateSegmentProgress(index: 0, progress: 1.0) }
+                session.updateSegmentProgress(index: 0, progress: 1.0, runID: context.id)
                 return true
             }
             session.addLog("❌ KRITISCHER FEHLER beim finalen Zusammenfügen. Exit-Code: \(process.terminationStatus)", type: .highlight)
@@ -550,6 +655,33 @@ public struct FFmpegWrapper {
         return parentDir.appendingPathComponent("\(baseName)-\(String(format: "%02d", groupIndex + 1))").appendingPathExtension(fileExt)
     }
 
+    static func stagingOutputURL(for finalURL: URL, id: UUID = UUID()) -> URL {
+        let parent = finalURL.deletingLastPathComponent()
+        let basename = finalURL.deletingPathExtension().lastPathComponent
+        let ext = finalURL.pathExtension.isEmpty ? "m4b" : finalURL.pathExtension
+        return parent.appendingPathComponent(".\(basename).partial-\(id.uuidString)").appendingPathExtension(ext)
+    }
+
+    static func isNonEmptyRegularFile(_ url: URL) -> Bool {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              let size = attributes[.size] as? Int64 else { return false }
+        return size > 0
+    }
+
+    /// POSIX rename ersetzt eine bestehende reguläre Datei auf demselben
+    /// Dateisystem atomar. Bis zu diesem Punkt bleibt das bestätigte Original
+    /// unangetastet; bei Fehlern wird nur die eindeutige Partial-Datei entfernt.
+    static func commitStagedOutput(_ stagedURL: URL, to finalURL: URL) throws {
+        guard isNonEmptyRegularFile(stagedURL) else { throw CocoaError(.fileReadCorruptFile) }
+        let result = stagedURL.path.withCString { source in
+            finalURL.path.withCString { destination in Darwin.rename(source, destination) }
+        }
+        guard result == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
     static func splitAudioFilesIfNeeded(_ files: [AudioFile], maxDurationHours: Int?) -> [[AudioFile]] {
         guard let maxHours = maxDurationHours, maxHours > 0 else { return [files] } // KORREKTUR: [files] statt [L]
         var result: [[AudioFile]] = []; var currentGroup: [AudioFile] = []; var currentDuration: TimeInterval = 0
@@ -567,31 +699,16 @@ public struct FFmpegWrapper {
 
 
     public static func cancelConversion(session: ConversionSession) {
-        setIsCancelled(true)
-        
-        // Alle aktiven ffmpeg-Prozesse (inkl. des Final-Prozesses, der ebenfalls
-        // in activeProcesses registriert ist) beenden. Ein separater
-        // currentProcess-Zeiger ist überflüssig und war nicht gelockt.
-        registryLock.lock()
-        for process in activeProcesses {
-            if process.isRunning {
-                process.terminate()
-            }
-        }
-        activeProcesses.removeAll()
-        // Aktive Temp-Verzeichnisse (große Zwischen-WAVs!) gleich mit aufräumen —
-        // bei CLI-SIGINT beendet sich der Prozess sofort, der reguläre Cleanup in
-        // convert() käme sonst nicht mehr dazu und es blieben GBs liegen.
-        let tempDirs = activeTempDirs
-        activeTempDirs.removeAll()
-        registryLock.unlock()
-
-        for dir in tempDirs { try? FileManager.default.removeItem(at: dir) }
+        guard let context = session.currentConversionContext() else { return }
+        context.cancel()
 
         DispatchQueue.main.async {
+            guard session.isCurrentConversion(context.id) else { return }
             session.isConverting = false
             session.lastConversionSucceeded = false
+            session.conversionStatus = "Abgebrochen"
             session.addLog("🛑 Vorgang durch Nutzer abgebrochen.", type: .info)
+            session.endConversion(context.id)
         }
     }
 

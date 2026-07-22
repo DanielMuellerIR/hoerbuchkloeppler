@@ -26,10 +26,9 @@
 # Aufruf:
 #   ./install.sh                          # Profil aus NOTARY_PROFILE/Git-Config
 #   NOTARY_PROFILE=<profil> ./install.sh  # anderes Keychain-Profil
-#   ./install.sh --no-notarize            # nur Developer-ID-signiert (schneller
-#                                         #   Test; läuft sofort auf DIESEM Mac,
-#                                         #   nicht garantiert gatekeeper-frei
-#                                         #   auf anderen)
+#   ./install.sh --no-notarize            # nur Developer-ID-signierten Test-Build
+#                                         #   im Projekt erzeugen; installiert nie
+#                                         #   nach /Applications
 #   ./install.sh --help
 #
 # GPL-Hinweis: Der installierte Build bündelt ffmpeg (GPL-3.0). Das ist für den
@@ -44,7 +43,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="Hörbuchklöppler"
-DEST="/Applications/${APP_NAME}.app"
+DEST="${HOERBUCHKLOEPPLER_INSTALL_DEST:-/Applications/${APP_NAME}.app}"
 
 NOTARIZE=1
 for arg in "$@"; do
@@ -100,8 +99,25 @@ if [ "$NOTARIZE" -eq 1 ]; then
   xcrun stapler staple "$APP"
   xcrun stapler validate "$APP"
 else
-  log "⚠ --no-notarize: nur Developer-ID-signiert (kein Notary-Ticket)."
+  log "⚠ --no-notarize: nur Developer-ID-signierter Test-Build (kein Notary-Ticket)."
 fi
+
+# Die Signatur des Build-Artefakts immer prüfen. Ohne Notarisierung endet der
+# Schnellpfad HIER: Er darf weder eine laufende App beenden noch unter
+# /Applications löschen oder kopieren.
+codesign --verify --deep --strict "$APP"
+if [ "$NOTARIZE" -eq 0 ]; then
+  VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" 2>/dev/null || echo "?")"
+  echo
+  echo "TEST BUILD OK: $APP ($VERSION) — nicht installiert"
+  exit 0
+fi
+
+# Gatekeeper muss das tatsächlich zu installierende Quell-Bundle akzeptieren,
+# bevor der Installationspfad irgendeine Mutation unter /Applications ausführt.
+log "Prüfe Notarisierung und Gatekeeper-Freigabe des Build-Artefakts…"
+xcrun stapler validate "$APP"
+spctl --assess --type execute -vv "$APP" 2>&1 | sed 's/^/    /'
 
 # ── 4. Nach /Applications installieren (laufende Instanz vorher beenden) ─────
 if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
@@ -114,10 +130,8 @@ cp -R "$APP" "$DEST"
 
 # ── 5. Verifizieren: Signatur, Gatekeeper und gebündeltes ffmpeg im DEST ─────
 codesign --verify --deep --strict "$DEST"
-if [ "$NOTARIZE" -eq 1 ]; then
-  # spctl bewertet die Gatekeeper-Freigabe der tatsächlich installierten App.
-  spctl --assess --type execute -vv "$DEST" 2>&1 | sed 's/^/    /'
-fi
+# spctl bewertet zusätzlich die Gatekeeper-Freigabe der installierten Kopie.
+spctl --assess --type execute -vv "$DEST" 2>&1 | sed 's/^/    /'
 FFMPEG="$DEST/Contents/Resources/HoerbuchkloepplerCore_HoerbuchkloepplerCore.bundle/Contents/Resources/bin/ffmpeg"
 if [ -x "$FFMPEG" ]; then
   "$FFMPEG" -version >/dev/null 2>&1 \
@@ -125,6 +139,6 @@ if [ -x "$FFMPEG" ]; then
     || { echo "✗ Gebündeltes ffmpeg startet nicht — Signatur/Architektur prüfen." >&2; exit 1; }
 fi
 
-VERSION="$(defaults read "$DEST/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo "?")"
+VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/Contents/Info.plist" 2>/dev/null || echo "?")"
 echo
 echo "INSTALL OK: $DEST ($VERSION)"

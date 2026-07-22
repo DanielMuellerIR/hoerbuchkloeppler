@@ -28,3 +28,6 @@ build/
 
 # Scratch-/Testdateien
 test.txt
+
+# Prozessweite Sperre des sicheren Commit-Workflows
+.commit-lock

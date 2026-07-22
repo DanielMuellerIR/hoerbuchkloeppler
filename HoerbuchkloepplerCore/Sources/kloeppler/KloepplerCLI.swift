@@ -189,19 +189,27 @@ struct KloepplerCLI: ParsableCommand {
         }
         
         print("Starte Konvertierung...")
-        print("Zieldatei: \(outputFile.path)")
-        
-        if FileManager.default.fileExists(atPath: outputFile.path) {
+        let conversionPlan = FFmpegWrapper.makeConversionPlan(
+            files: session.audioFiles,
+            outputURL: outputFile,
+            maxDurationHours: session.settings.maxDurationHours
+        )
+        print(conversionPlan.outputURLs.count == 1 ? "Zieldatei:" : "Zieldateien:")
+        conversionPlan.outputURLs.forEach { print("  \($0.path)") }
+
+        let existingOutputs = conversionPlan.outputURLs.filter { FileManager.default.fileExists(atPath: $0.path) }
+        if !existingOutputs.isEmpty {
+            let names = existingOutputs.map(\.lastPathComponent).joined(separator: ", ")
             if force {
-                print("⚠️ Die Zieldatei '\(outputFile.lastPathComponent)' existiert bereits. Überschreibe (--force gesetzt)...")
+                print("⚠️ Vorhandene Zieldatei(en) werden überschrieben (--force): \(names)")
             } else if isatty(FileHandle.standardInput.fileDescriptor) == 0 {
                 // Nicht-interaktiv (Pipe/CI/AI-Agent): nicht blockierend nachfragen,
                 // sondern klar mit Fehlercode abbrechen und auf --force hinweisen.
-                FileHandle.standardError.write(Data("❌ Zieldatei '\(outputFile.lastPathComponent)' existiert bereits. Zum Überschreiben --force verwenden.\n".utf8))
+                FileHandle.standardError.write(Data("❌ Zieldatei(en) existieren bereits: \(names). Zum Überschreiben --force verwenden.\n".utf8))
                 throw ExitCode.failure
             } else {
-                print("⚠️ Die Zieldatei '\(outputFile.lastPathComponent)' existiert bereits.")
-                print("Möchten Sie die Datei überschreiben? (j/N): ", terminator: "")
+                print("⚠️ Diese Zieldatei(en) existieren bereits: \(names)")
+                print("Möchten Sie die Dateien überschreiben? (j/N): ", terminator: "")
                 if let input = readLine(), input.lowercased() == "j" || input.lowercased() == "y" {
                     print("Datei wird überschrieben...")
                 } else {
@@ -211,7 +219,7 @@ struct KloepplerCLI: ParsableCommand {
             }
         }
         
-        FFmpegWrapper.convert(session: session, outputURL: outputFile)
+        FFmpegWrapper.convert(session: session, plan: conversionPlan)
 
         // Print ASCII Art Cover if verbose
         if verbose, let coverPath = session.coverPath, let img = NSImage(contentsOfFile: coverPath) {
@@ -254,7 +262,8 @@ struct KloepplerCLI: ParsableCommand {
         // Ehrlicher Abschluss: nur bei echtem Erfolg Exit 0, sonst Fehler-Exit
         // (wichtig für Skripte/AI-Agenten, die den Exit-Code auswerten).
         if session.lastConversionSucceeded == true {
-            print("🎉 Vorgang beendet. Datei liegt unter: \(outputFile.path)")
+            print(conversionPlan.outputURLs.count == 1 ? "🎉 Vorgang beendet. Datei:" : "🎉 Vorgang beendet. Dateien:")
+            conversionPlan.outputURLs.forEach { print("  \($0.path)") }
         } else {
             FileHandle.standardError.write(Data("❌ Vorgang fehlgeschlagen. Es wurde keine gültige Datei erzeugt.\n".utf8))
             throw ExitCode.failure

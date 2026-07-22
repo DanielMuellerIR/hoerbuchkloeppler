@@ -34,7 +34,8 @@ Symbolnamen als Anker (bewusst **ohne** Zeilennummern — die driften bei jeder
 
 | Datei | Zuständigkeit | Schlüssel-Symbole |
 |---|---|---|
-| `FFmpegWrapper.swift` | Kommando-Bau, Prozessausführung, Concat/Muxing, Cover-/Temp-Auflösung, Cancellation, Prozess-/Temp-Registry | `convert(session:outputURL:)` · `writeConcatAndChapters` · `performSequentialConversion` · `performParallelConversion` · `runFinalProcess` · `escapeFFMetadata` · `resolveCoverInputPath` · `splitAudioFilesIfNeeded` · die `getArgsFor…`-Builder |
+| `FFmpegWrapper.swift` | Zentraler Ausgabeplan, atomare Partial→Ziel-Übernahme, Prozessausführung, Concat/Muxing, laufbezogene Cancellation | `makeConversionPlan` · `convert(session:plan:)` · `commitStagedOutput` · `performSequentialConversion` · `performParallelConversion` · `runFinalProcess` · `splitAudioFilesIfNeeded` |
+| `CLIInvocation.swift` | Vollständiger, POSIX-shell-sicherer GUI→CLI-Handoff | `CLIInvocation.arguments` · `shellCommand` |
 | `ConversionSession.swift` | Konvertierungs-Lebenszyklus, `@Published`-State, Thread-sicheres Logging, Metadaten-Fetch | `addLog` · `fetchRawMediaInfo` · `processIncomingFiles` · `importGlobalMetadata` · `addFolder` · `selectCover` |
 | `AudioSettings.swift` | Einstellungs-Struct (`Codable`) | Felder → [settings.md](settings.md) |
 | `SettingsManager.swift` | Laden/Speichern `~/.Hoerbuchkloeppler/settings.json` | `shared` · `loadSettings` · `saveSettings` |

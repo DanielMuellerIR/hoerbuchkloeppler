@@ -75,11 +75,11 @@ cd hoerbuchkloeppler
 
 ```bash
 ./install.sh                 # bauen → signieren → notarisieren → stapeln → /Applications
-./install.sh --no-notarize   # schneller: nur Developer-ID-signiert (läuft auf diesem Mac)
+./install.sh --no-notarize   # Developer-ID-Test-Build im Projekt; installiert nie
 ./install.sh --help
 ```
 
-Dafür braucht es ein **„Developer ID Application"**-Zertifikat im Schlüsselbund und ein `notarytool`-Schlüsselbund-Profil. Der Profilname kommt aus der Umgebungsvariable `NOTARY_PROFILE` oder einer clone-lokalen Git-Config — er wird nie committet, und die Zugangsdaten bleiben im Schlüsselbund (nie als Kommandozeilen-Argument). Ohne Developer ID: `./build.sh` oder `./install.sh --no-notarize` verwenden.
+Dafür braucht es ein **„Developer ID Application"**-Zertifikat im Schlüsselbund und ein `notarytool`-Schlüsselbund-Profil. Der Profilname kommt aus der Umgebungsvariable `NOTARY_PROFILE` oder einer clone-lokalen Git-Config — er wird nie committet, und die Zugangsdaten bleiben im Schlüsselbund (nie als Kommandozeilen-Argument). `--no-notarize` braucht weiterhin die Developer ID, beendet sich aber nach der Prüfung des projektlokalen Test-Builds; nach `/Applications` kommt ausschließlich ein erfolgreich notarisierter, gestapelter und von Gatekeeper akzeptierter Build. Ohne Developer ID: `./build.sh` verwenden.
 
 Lokal bauen und in das eigene `/Applications` installieren ist **keine** Weiterverteilung und bleibt damit frei von den GPL-Pflichten, die das gebündelte `ffmpeg` sonst auslösen würde (siehe [Installieren / Bauen](#installieren--bauen) oben).
 

@@ -13,8 +13,9 @@ Schalter: `AudioSettings.useParallelEncoding` (`true` = Parallel/Performance).
    (Slicing auf die Ziel-Rate statt hart 44100 vermeidet einen doppelten Resample
    beim finalen Encode; Slicing auf die Ziel-Kanalzahl statt hart Stereo halbiert
    bei Mono-Ausgabe den Temp-Bedarf.)
-2. **Ein einziger** direkter Encode: `concat` der WAVs → `aac_at`/CVBR direkt in
-   die finale `.m4b`.
+2. **Ein einziger** direkter Encode: `concat` der WAVs → `aac_at`/CVBR in eine
+   eindeutige Partial-Datei neben dem Ziel; erst nach erfolgreicher Validierung
+   wird sie per `rename(2)` atomar zur finalen `.m4b`.
 
 > **Temp-Fußabdruck:** Standard hält **alle** Slice-WAVs gleichzeitig vor (sie
 > werden erst nach dem finalen Encode gelöscht), weil der eine durchgehende Encode
@@ -102,12 +103,17 @@ sowie `album=title` (Hörbuch-Konvention: das Buch als „Album" der Kapitel).
 
 ## Auto-Split nach Dauer
 
-`splitAudioFilesIfNeeded` gruppiert Kapitel bei `maxDurationHours`;
-Ausgabe-Namen `-01`, `-02` … via `resolveOutputURL`. CLI-Steuerung:
-`--max-duration <std>`.
+`makeConversionPlan` ist die gemeinsame Quelle für Gruppen und tatsächliche
+Zielpfade. `splitAudioFilesIfNeeded` gruppiert Kapitel bei `maxDurationHours`;
+Ausgabe-Namen `-01`, `-02` … via `resolveOutputURL`. GUI und CLI prüfen und
+melden genau diese Ziele. CLI-Steuerung: `--max-duration <std>`.
+
+Finale ffmpeg-Läufe schreiben nie direkt mit `-y` auf eine bestehende Ausgabe.
+Fehler oder Abbruch entfernen nur die eindeutige Partial-Datei; das bestätigte
+Original bleibt bis zum atomaren Commit erhalten.
 
 ## Prozess-Management & Cancellation
 
-- **Thread-sichere Registry:** Alle aktiven `Process`-Instanzen (ffmpeg-Prozesse) werden zur Laufzeit in einem Set `activeProcesses` (abgesichert über `registryLock` in `FFmpegWrapper.swift`) registriert und nach Beendigung ausgetragen.
-- **Cancellation:** Bei Abbruch (GUI/CLI) wird ein `isCancelled` Flag gesetzt und alle registrierten, aktiven ffmpeg-Subprozesse werden sofort per `.terminate()` beendet. Weitere in der Queue befindliche Kapitel-Konvertierungen werden verworfen.
+- **Laufbezogener Kontext:** Jeder Konvertierungslauf besitzt seine eigenen Prozesse und Temp-Verzeichnisse in einem `ConversionContext`.
+- **Cancellation:** Ein Abbruch beendet und bereinigt ausschließlich den Kontext der betroffenen `ConversionSession`; parallele Fenster bleiben unberührt. Ein schneller Neustart macht die alte Completion per Lauf-ID ungültig.
 - **Signal-Handling:** Das CLI fängt das Abbruchsignal `SIGINT` (Ctrl+C) ab, bricht alle aktiven ffmpeg-Instanzen sauber ab und beendet sich kontrolliert.

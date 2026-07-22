@@ -10,21 +10,21 @@ struct MetadataSelectionView: View {
             Text("Metadaten vervollständigen")
                 .font(.headline).padding(.top)
             
-            Text("Wir haben verschiedene Tags gefunden. Bitte wählen Sie aus, welcher Wert verwendet werden soll.")
+            Text("Wählen Sie einen gefundenen Wert oder tragen Sie die Metadaten manuell ein.")
                 .font(.subheadline).foregroundColor(.secondary)
                 .multilineTextAlignment(.center).padding(.horizontal)
 
-            if session.title.isEmpty {
-                SelectionSection(label: "Hörbuch Titel", candidates: session.titleCandidates) { selectedValue in
-                    session.title = selectedValue
-                }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Hörbuch Titel").font(.system(size: 14, weight: .bold))
+                TextField("Titel manuell eingeben", text: $session.title).textFieldStyle(.roundedBorder)
             }
+            SelectionSection(label: "Gefundene Titel", candidates: session.titleCandidates) { session.title = $0 }
 
-            if session.author.isEmpty {
-                SelectionSection(label: "Autor / Sprecher", candidates: session.authorCandidates) { selectedValue in
-                    session.author = selectedValue
-                }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Autor / Sprecher").font(.system(size: 14, weight: .bold))
+                TextField("Autor manuell eingeben", text: $session.author).textFieldStyle(.roundedBorder)
             }
+            SelectionSection(label: "Gefundene Autoren", candidates: session.authorCandidates) { session.author = $0 }
 
             Spacer()
 

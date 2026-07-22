@@ -68,13 +68,14 @@ nicht nur „Build grün".
 ## Unit-Tests (Core)
 
 ```bash
-cd HoerbuchkloepplerCore && swift test        # 46 Tests, 9 Suites
+cd HoerbuchkloepplerCore && swift test        # 59 Tests, 13 Suites
 ```
 
 Deckt die reine Kernlogik ab: FFMETADATA-Escaping/Parsing, Kapitel-Arithmetik
 (`buildChapterMetadata`), Auto-Split, Ausgabe-Dateinamen, Zeit-Parsing,
-NaN/Infinity-Härtung. Bewusst **nicht** dabei: der ffmpeg-Aufruf selbst und das
-Encoding-Ergebnis — dafür ist das Rezept oben da.
+NaN/Infinity-Härtung sowie Ausgabeplan/atomare Übernahme, Tool-Auflösung,
+laufbezogenen Abbruch, Metadatenentscheidung und shell-sicheren CLI-Handoff.
+Bewusst **nicht** dabei: das reale Encoding-Ergebnis — dafür ist das Rezept oben da.
 
 Die geprüften Funktionen sind `internal` statt `private`, damit `@testable
 import` drankommt. Das ist Absicht, kein vergessenes `private`.

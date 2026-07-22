@@ -43,7 +43,8 @@ final class ChapterPreviewPlayer: ObservableObject {
 
 struct ContentView: View {
     @State private var showingOverwriteAlert = false
-    @State private var pendingURL: URL? = nil
+    @State private var pendingPlan: ConversionPlan? = nil
+    @State private var collidingOutputNames: [String] = []
     @StateObject var session = ConversionSession()
     @StateObject private var preview = ChapterPreviewPlayer()
     @State private var showingSettings = false
@@ -56,11 +57,7 @@ struct ContentView: View {
     func checkTools() {
         FFmpegWrapper.cleanupOldTempDirectories()
         
-        let ffmpegURL = FFmpegWrapper.getBinaryURL(name: "ffmpeg")
-        let miURL = FFmpegWrapper.getBinaryURL(name: "mediainfo")
-
-        if let fURL = ffmpegURL {
-            let version = getToolVersion(path: fURL.path)
+        if let (fURL, version) = FFmpegWrapper.toolVersion(name: "ffmpeg") {
             self.ffmpegStatus = "OK (\(version))"
             session.addLog("🛠️ FFmpeg gefunden an \(fURL.path) (Version: \(version))")
         } else {
@@ -68,8 +65,7 @@ struct ContentView: View {
             session.addLog("❌ FFmpeg NICHT gefunden!")
         }
 
-        if let mURL = miURL {
-            let version = getToolVersion(path: mURL.path)
+        if let (mURL, version) = FFmpegWrapper.toolVersion(name: "mediainfo") {
             self.miStatus = "OK (\(version))"
             session.addLog("🛠️ MediaInfo gefunden an \(mURL.path) (Version: \(version))")
         } else {
@@ -78,35 +74,6 @@ struct ContentView: View {
         }
         
         session.logCurrentSettings() // Einstellungen direkt beim Start loggen
-    }
-
-    private func getToolVersion(path: String) -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = path.contains("mediainfo") ? ["--version"] : ["-version"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe // Fehler ebenfalls abfangen
-        do {
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
-                // Suche nach dem Wort "version" und nimm das darauf folgende Wort
-                let parts = output.components(separatedBy: .whitespacesAndNewlines)
-                if let index = parts.firstIndex(of: "version"), index + 1 < parts.count {
-                    return parts[index + 1].replacingOccurrences(of: ",", with: "")
-                }
-                // Fallback für MediaInfo (oft v24.x)
-                if path.contains("mediainfo") {
-                    for part in parts {
-                        if part.starts(with: "v") && part.contains(".") { return part }
-                    }
-                }
-                return parts.first ?? "gefunden"
-            }
-        } catch { return "Fehler" }
-        return "leer"
     }
 
     private func saveAndExport() {
@@ -121,9 +88,19 @@ struct ContentView: View {
         let handleResponse: (NSApplication.ModalResponse) -> Void = { response in
             if response == .OK, let url = savePanel.url {
                 let finalURL = url.pathExtension.isEmpty ? url.appendingPathExtension("m4b") : url.deletingPathExtension().appendingPathExtension("m4b")
-                if FileManager.default.fileExists(atPath: finalURL.path) {
-                    self.pendingURL = finalURL; self.showingOverwriteAlert = true
-                } else { FFmpegWrapper.convert(session: session, outputURL: finalURL) }
+                let plan = FFmpegWrapper.makeConversionPlan(
+                    files: session.audioFiles,
+                    outputURL: finalURL,
+                    maxDurationHours: session.settings.maxDurationHours
+                )
+                let collisions = plan.outputURLs.filter { FileManager.default.fileExists(atPath: $0.path) }
+                if !collisions.isEmpty {
+                    self.pendingPlan = plan
+                    self.collidingOutputNames = collisions.map(\.lastPathComponent)
+                    self.showingOverwriteAlert = true
+                } else {
+                    FFmpegWrapper.convert(session: session, plan: plan)
+                }
             }
         }
         // Kein Force-Unwrap auf NSApp.mainWindow (kann nil sein -> Crash).
@@ -144,7 +121,7 @@ struct ContentView: View {
                         CoverView(image: $session.coverImage, onDropped: { url in session.selectCover(url: url) })
                             .frame(width: 180, height: 180).shadow(radius: 5)
                         if session.coverImage != nil || session.coverPath != nil {
-                            Button(action: { session.coverImage = nil; session.coverPath = nil; session.embeddedCoverData = nil }) {
+                            Button(action: { session.removeCover() }) {
                                 Label("Cover entfernen", systemImage: "trash").font(.system(size: 11)).foregroundColor(.red)
                             }.buttonStyle(.plain).padding(.top, 5)
                         }
@@ -227,7 +204,7 @@ struct ContentView: View {
                             Text("Hörbuch erzeugen").frame(width: 200, height: 35)
                         }
                         .keyboardShortcut("r", modifiers: .command).buttonStyle(.borderedProminent).controlSize(.large)
-                        .disabled(session.isConverting || session.audioFiles.isEmpty)
+                        .disabled(session.isConverting || session.audioFiles.isEmpty || session.isPreparingArtwork)
                         Spacer()
                         
                         HStack {
@@ -242,8 +219,10 @@ struct ContentView: View {
                                     .cornerRadius(4)
                             }
                             .buttonStyle(PlainButtonStyle())
-                            .disabled(session.audioFiles.isEmpty)
-                            .help("Öffnet das Terminal mit dem passenden Befehl für die aktuellen Einstellungen.")
+                            .disabled(session.cliFolderIfRepresentable == nil)
+                            .help(session.cliFolderIfRepresentable == nil
+                                  ? "Nur verfügbar, wenn die aktuelle Liste vollständig aus einem einzelnen Ordner-Import stammt."
+                                  : "Öffnet das Terminal mit dem vollständigen Befehl für die aktuellen Einstellungen.")
                         }
                         .padding(.trailing, 20)
                         .padding(.bottom, 10)
@@ -272,8 +251,12 @@ struct ContentView: View {
         .sheet(isPresented: $showingSettings) { SettingsView(session: session, isPresented: $showingSettings) }
         .alert("Datei existiert bereits", isPresented: $showingOverwriteAlert) {
             Button("Abbrechen", role: .cancel) { }
-            Button("Drüberklöppeln", role: .destructive) { if let url = pendingURL { FFmpegWrapper.convert(session: session, outputURL: url) } }
-        } message: { Text("Möchten Sie die vorhandene Datei wirklich überklöppeln?") }
+            Button("Drüberklöppeln", role: .destructive) {
+                if let plan = pendingPlan { FFmpegWrapper.convert(session: session, plan: plan) }
+            }
+        } message: {
+            Text("Diese tatsächlichen Zieldateien existieren bereits:\n\(collidingOutputNames.joined(separator: "\n"))\n\nMöchten Sie sie wirklich überklöppeln?")
+        }
         .sheet(isPresented: $session.showSelectionUI) { MetadataSelectionView(session: session) }
         .sheet(isPresented: $session.showInfoSheet) {
             VStack(spacing: 0) {
@@ -288,10 +271,17 @@ struct ContentView: View {
     }
 
     private func handleDroppedProviders(_ providers: [NSItemProvider]) {
-        for provider in providers { _ = provider.loadObject(ofClass: URL.self) { url, error in DispatchQueue.main.async { if let url = url { self.processDroppedURL(url) } } } }
+        let importToken = session.beginImport()
+        for provider in providers {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                DispatchQueue.main.async {
+                    if let url { self.processDroppedURL(url, importToken: importToken) }
+                }
+            }
+        }
     }
 
-    private func processDroppedURL(_ url: URL) {
+    private func processDroppedURL(_ url: URL, importToken: ImportToken) {
         var isDir: ObjCBool = false
         if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
             // Ordner-Scan (ffmpeg-Kapitel-Extraktion + AVAsset-Reads über viele Dateien)
@@ -299,12 +289,12 @@ struct ContentView: View {
             // Nur das Übernehmen in den @Published-State läuft danach auf Main.
             DispatchQueue.global(qos: .userInitiated).async {
                 let scanned = session.scanFolder(url)
-                DispatchQueue.main.async { session.applyScannedFolder(scanned) }
+                DispatchQueue.main.async { session.applyScannedFolder(scanned, importToken: importToken) }
             }
-        } else { processSingleFile(url) }
+        } else { processSingleFile(url, importToken: importToken) }
     }
 
-    private func processSingleFile(_ url: URL) {
+    private func processSingleFile(_ url: URL, importToken: ImportToken) {
         let ext = url.pathExtension.lowercased()
         // Auch Einzeldatei-Import (Kapitel-Extraktion / Dauer-Lesen) im Hintergrund;
         // der @Published-Zugriff (processIncomingFiles) danach auf Main.
@@ -314,7 +304,7 @@ struct ContentView: View {
             else if ["mp3", "m4a", "wav", "flac"].contains(ext) { files = [AudioFile(url: url)] }
             else { files = nil }
             if let files = files {
-                DispatchQueue.main.async { session.processIncomingFiles(files) }
+                DispatchQueue.main.async { session.processIncomingFiles(files, importToken: importToken) }
             }
         }
     }
@@ -327,9 +317,10 @@ struct ContentView: View {
     }
 
     private func copyAndOpenCLI() {
-        let mode = session.settings.useParallelEncoding ? "parallel" : "standard"
-        let mono = session.settings.isMono ? "--mono" : "--stereo"
-        let folderPath = session.audioFiles.first?.url.deletingLastPathComponent().path ?? "/Pfad/zum/Hoerbuch"
+        guard let folderURL = session.cliFolderIfRepresentable else {
+            session.addLog("⚠️ CLI-Übergabe nicht möglich: Die aktuelle Liste stammt nicht vollständig aus einem einzelnen Ordner-Import.")
+            return
+        }
 
         // Das kloeppler-Binary wirklich auflösen statt blind "./kloeppler"
         // anzunehmen: In einem installierten Build (z.B. /Applications) liegt
@@ -341,17 +332,22 @@ struct ContentView: View {
             appDir.appendingPathComponent("kloeppler"),
             appDir.appendingPathComponent("HoerbuchkloepplerCore/.build/release/kloeppler")
         ]
-        let kloepplerURL = candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
+        let kloepplerURL = candidates.first(where: FFmpegWrapper.isUsableExecutable)
             ?? FFmpegWrapper.getBinaryURL(name: "kloeppler")
 
         // Ohne Fund bleibt der nackte Befehl (kloeppler liegt evtl. im PATH der
         // Login-Shell); der absolute Pfad steht in Anführungszeichen, damit
         // Leerzeichen/Umlaute im Repo-Pfad nicht stören.
-        let kloepplerCmd = kloepplerURL.map { "\"\($0.path)\"" } ?? "kloeppler"
-        let cmd = "\(kloepplerCmd) \"\(folderPath)\" --mode \(mode) --bitrate \(session.settings.bitrate) --samplerate \(session.settings.sampleRate) \(mono)"
+        let invocation = CLIInvocation(
+            executable: kloepplerURL?.path ?? "kloeppler",
+            folderURL: folderURL,
+            settings: session.settings,
+            title: session.title,
+            author: session.author
+        )
 
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(cmd, forType: .string)
+        NSPasteboard.general.setString(invocation.shellCommand, forType: .string)
 
         // Terminal dort öffnen, wo das Binary liegt; ohne Fund im Home statt in
         // einem App-Verzeichnis ohne Binary.
