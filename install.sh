@@ -46,12 +46,17 @@ APP_NAME="Hörbuchklöppler"
 DEST="${HOERBUCHKLOEPPLER_INSTALL_DEST:-/Applications/${APP_NAME}.app}"
 
 NOTARIZE=1
+INSTALL=1
 for arg in "$@"; do
   case "$arg" in
     --no-notarize) NOTARIZE=0 ;;
+    # --no-install liefert genau das, was release.sh braucht: ein fertig
+    # signiertes und notarisiertes Bundle im Projekt-Root, ohne /Applications
+    # anzufassen.
+    --no-install) INSTALL=0 ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Unbekannte Option: $arg" >&2
-       echo "Aufruf: ./install.sh [--no-notarize] [--help]" >&2; exit 64 ;;
+       echo "Aufruf: ./install.sh [--no-notarize] [--no-install] [--help]" >&2; exit 64 ;;
   esac
 done
 
@@ -119,14 +124,45 @@ log "Prüfe Notarisierung und Gatekeeper-Freigabe des Build-Artefakts…"
 xcrun stapler validate "$APP"
 spctl --assess --type execute -vv "$APP" 2>&1 | sed 's/^/    /'
 
+# Ausstieg für release.sh: notarisiert, aber /Applications bleibt unberührt.
+if [ "$INSTALL" -eq 0 ]; then
+  VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" 2>/dev/null || echo "?")"
+  echo
+  echo "BUILD OK: $APP ($VERSION) — notarisiert, nicht installiert"
+  exit 0
+fi
+
 # ── 4. Nach /Applications installieren (laufende Instanz vorher beenden) ─────
 if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
   log "Beende laufende ${APP_NAME}-Instanz"
   pkill -x "$APP_NAME" || true
   sleep 1
 fi
-rm -rf "$DEST"
-cp -R "$APP" "$DEST"
+# Atomar austauschen: erst neben das Ziel legen, dann in einem Schritt
+# eintauschen. Ein Abbruch mittendrin darf keine halb ersetzte App unter
+# /Applications hinterlassen — genau das konnte `rm -rf` + `cp -R` erzeugen.
+STAGED="$(dirname "$DEST")/.$(basename "$DEST").install-$$"
+rm -rf "$STAGED"
+trap 'rm -rf "$STAGED"' EXIT
+ditto "$APP" "$STAGED"
+/usr/bin/swift - "$STAGED" "$DEST" <<'SWIFT'
+import Foundation
+
+let fileManager = FileManager.default
+let source = URL(fileURLWithPath: CommandLine.arguments[1])
+let destination = URL(fileURLWithPath: CommandLine.arguments[2])
+if fileManager.fileExists(atPath: destination.path) {
+    _ = try fileManager.replaceItemAt(
+        destination,
+        withItemAt: source,
+        backupItemName: nil,
+        options: [.usingNewMetadataOnly]
+    )
+} else {
+    try fileManager.moveItem(at: source, to: destination)
+}
+SWIFT
+trap - EXIT
 
 # ── 5. Verifizieren: Signatur, Gatekeeper und gebündeltes ffmpeg im DEST ─────
 codesign --verify --deep --strict "$DEST"

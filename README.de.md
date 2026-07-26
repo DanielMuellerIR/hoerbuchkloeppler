@@ -76,8 +76,18 @@ cd hoerbuchkloeppler
 ```bash
 ./install.sh                 # bauen → signieren → notarisieren → stapeln → /Applications
 ./install.sh --no-notarize   # Developer-ID-Test-Build im Projekt; installiert nie
+./install.sh --no-install    # notarisiert, bleibt aber im Projekt (Unterbau von release.sh)
 ./install.sh --help
 ```
+
+Für einen weiteren **eigenen** Mac gibt es zusätzlich `release.sh`. Es packt denselben notarisierten Stand in ein DMG:
+
+```bash
+./release.sh                     # → build/dmg/Hörbuchklöppler-<version>.dmg
+./release.sh --no-finder-layout  # ohne Finder-Fensterlayout (headless)
+```
+
+> **Dieses DMG wird nie veröffentlicht.** Es ist der bequeme Weg, denselben Build auf einen weiteren eigenen Mac zu bringen — nicht mehr. Weitergabe würde die GPL-Pflichten des gebündelten `ffmpeg` auslösen, deshalb hat `release.sh` bewusst keinen `--publish`-Pfad, keinen GitHub-Upload und keinen Tag. Bitte auch keinen nachrüsten.
 
 Dafür braucht es ein **„Developer ID Application"**-Zertifikat im Schlüsselbund und ein `notarytool`-Schlüsselbund-Profil. Der Profilname kommt aus der Umgebungsvariable `NOTARY_PROFILE` oder einer clone-lokalen Git-Config — er wird nie committet, und die Zugangsdaten bleiben im Schlüsselbund (nie als Kommandozeilen-Argument). `--no-notarize` braucht weiterhin die Developer ID, beendet sich aber nach der Prüfung des projektlokalen Test-Builds; nach `/Applications` kommt ausschließlich ein erfolgreich notarisierter, gestapelter und von Gatekeeper akzeptierter Build. Ohne Developer ID: `./build.sh` verwenden.
 

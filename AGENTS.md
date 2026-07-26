@@ -34,6 +34,14 @@ gezielt das passende Dokument greppen/lesen statt alles laden.
   [docs/dependencies.md](docs/dependencies.md) + [docs/operations.md](docs/operations.md).
 - **Encoder bleibt `cvbr`**, nicht auf echtes `vbr` umstellen — Begründung in
   [docs/encoding.md](docs/encoding.md).
+- **Drei Einstiegspunkte:** `build.sh` baut nur (ad-hoc), `install.sh` baut,
+  notarisiert und installiert nach `/Applications`, `release.sh` packt daraus ein
+  DMG und installiert nie. Profilname aus `NOTARY_PROFILE` oder
+  `git config hoerbuchkloeppler.notaryProfile`.
+- **Das DMG aus `release.sh` wird nie veröffentlicht.** Es ist nur der Weg auf
+  einen weiteren eigenen Mac; Weitergabe würde die GPL-Pflichten des gebündelten
+  `ffmpeg` auslösen. Deshalb hat `release.sh` bewusst keinen `--publish`-Pfad,
+  keinen GitHub-Upload und keinen Tag — bitte auch keinen nachrüsten.
 
 ## Vorgänger-Versionen (Archiv-Tags)
 
