@@ -5,14 +5,12 @@ extension AudioFile {
     /// Extrahiert das eingebettete Cover aus einer Audiodatei.
     /// Nutzt sowohl Common-Keys als auch Raw-Keys für maximale Kompatibilität (MP3, M4A, etc.)
     public static func extractEmbeddedArtwork(from url: URL) -> Data? {
-        print("🎨 Cover-Extraktion gestartet für: \(url.lastPathComponent)")
         let asset = AVAsset(url: url)
         
         for item in asset.metadata {
             // 1. Prüfung über CommonKey (Standardweg)
             if let commonKey = item.commonKey?.rawValue, (commonKey == "artwork" || commonKey == "cover") {
                 if let data = item.value as? Data {
-                    print("✅ Cover gefunden via CommonKey (\(commonKey))")
                     return data
                 }
             }
@@ -20,12 +18,10 @@ extension AudioFile {
             // 2. Prüfung über den rohen Key (oft nötig für ID3/MP3)
             if let key = item.key as? String, (key.contains("artwork") || key.contains("cover")) {
                 if let data = item.value as? Data {
-                    print("✅ Cover gefunden via RawKey (\(key))")
                     return data
                 }
             }
         }
-        print("❌ Kein eingebettetes Cover in \(url.lastPathComponent) gefunden.")
         return nil
     }
 
@@ -35,10 +31,24 @@ extension AudioFile {
     /// in der verteilten App verloren gingen. `ffmpeg -f ffmetadata -` schreibt
     /// die Metadaten (inkl. `[CHAPTER]`-Blöcke) nach stdout.
     public static func extractChapters(from url: URL) -> [AudioFile]? {
+        extractChaptersControlled(from: url)
+    }
+
+    /// Variante für `ConversionSession`: Sie registriert den gestarteten
+    /// ffmpeg-Prozess beim laufbezogenen Vorbereitungs-Context und leitet
+    /// Meldungen in das gemeinsame Session-Log statt direkt auf stdout.
+    static func extractChaptersControlled(
+        from url: URL,
+        shouldCancel: () -> Bool = { false },
+        registerProcess: (Process) -> Bool = { _ in true },
+        unregisterProcess: (Process) -> Void = { _ in },
+        log: (String) -> Void = { _ in }
+    ) -> [AudioFile]? {
         guard ["m4b", "mp4"].contains(url.pathExtension.lowercased()) else { return nil }
+        guard !shouldCancel() else { return [] }
 
         guard let ffmpegURL = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else {
-            print("⚠️ ffmpeg wurde auf diesem System nicht gefunden. Kapitel-Extraktion übersprungen.")
+            log("⚠️ ffmpeg wurde nicht gefunden. Kapitel-Extraktion übersprungen.")
             return [AudioFile(url: url)]
         }
 
@@ -50,35 +60,58 @@ extension AudioFile {
         process.standardOutput = pipe
         // stderr getrennt verwerfen, damit es die Metadaten-Ausgabe nicht stört.
         process.standardError = Pipe()
+        guard registerProcess(process) else { return [] }
+        defer { unregisterProcess(process) }
 
         do {
+            guard !shouldCancel() else { return [] }
             try process.run()
+            // Cancel kann genau zwischen dem letzten Check und `run()` liegen.
+            // Der Context hat den damals noch nicht laufenden Process dann nicht
+            // beendet; nach dem Start deshalb nochmals prüfen.
+            if shouldCancel() { process.terminate() }
             // Erst die Pipe leeren, DANN auf Exit warten — sonst Deadlock, wenn
             // die Kapitelliste den Pipe-Puffer (~64 KB) füllt.
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
+            guard !shouldCancel() else { return [] }
 
             guard let text = String(data: data, encoding: .utf8) else {
-                print("⚠️ FFMETADATA von \(url.lastPathComponent) nicht lesbar. Fallback auf Einzelfile.")
+                log("⚠️ FFMETADATA von \(url.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
                 return [AudioFile(url: url)]
             }
             var chapters = parseFFMetadataChapters(text)
             guard !chapters.isEmpty else {
-                print("⚠️ Keine Kapitel in \(url.lastPathComponent) gefunden. Fallback auf Einzelfile.")
+                log("⚠️ Keine Kapitel in \(url.lastPathComponent) gefunden. Nutze die Datei als ein Kapitel.")
                 return [AudioFile(url: url)]
             }
 
+            let totalDuration = CMTimeGetSeconds(AVURLAsset(url: url).duration)
             // Das LETZTE Kapitel hat in FFMETADATA oft keine END-Zeit — es gibt kein
             // Folgekapitel, aus dem sie (wie in parseFFMetadataChapters) abgeleitet
             // werden könnte. Ohne Korrektur bliebe es ein Null-Dauer-Kapitel, das ein
             // leeres Segment erzeugt und die GANZE Konvertierung scheitern lässt.
             // Deshalb die fehlende letzte END-Zeit aus der Gesamtdauer der Datei ableiten.
             if let last = chapters.indices.last, chapters[last].end <= chapters[last].start {
-                let totalDuration = CMTimeGetSeconds(AVURLAsset(url: url).duration)
                 if totalDuration.isFinite, totalDuration > chapters[last].start {
                     chapters[last].end = totalDuration
                 }
             }
+
+            // Eine teilweise kaputte Kapitelliste nicht in garantiert leere
+            // `ffmpeg -t 0`-Segmente übersetzen. Der sichere Fallback ist die
+            // komplette Datei als ein Kapitel; so scheitert nicht das ganze Buch.
+            guard chaptersAreValid(chapters, totalDuration: totalDuration) else {
+                log("⚠️ Unvollständige Kapitelzeiten in \(url.lastPathComponent). Nutze die Datei als ein Kapitel.")
+                return [AudioFile(url: url)]
+            }
+            // Rundungsdifferenzen im FFMETADATA-Container lückenlos an die
+            // tatsächliche Dateidauer anlegen.
+            chapters[0].start = 0
+            for index in chapters.indices.dropFirst() {
+                chapters[index].start = chapters[index - 1].end
+            }
+            if let last = chapters.indices.last { chapters[last].end = totalDuration }
 
             var audioFiles: [AudioFile] = []
             for (index, ch) in chapters.enumerated() {
@@ -91,10 +124,11 @@ extension AudioFile {
                     chapterTitle: title
                 ))
             }
-            print("✅ \(audioFiles.count) Kapitel aus \(url.lastPathComponent) extrahiert.")
+            log("✅ \(audioFiles.count) Kapitel aus \(url.lastPathComponent) extrahiert.")
             return audioFiles
         } catch {
-            print("❌ ffmpeg Fehler bei \(url.lastPathComponent): \(error)")
+            if shouldCancel() { return [] }
+            log("⚠️ Kapitel aus \(url.lastPathComponent) konnten nicht gelesen werden: \(error.localizedDescription)")
             return [AudioFile(url: url)]
         }
     }
@@ -157,6 +191,32 @@ extension AudioFile {
             chapters[i].end = chapters[i + 1].start
         }
         return chapters
+    }
+
+    static func chaptersAreValid(
+        _ chapters: [FFChapter],
+        totalDuration: TimeInterval,
+        tolerance: TimeInterval = 0.25
+    ) -> Bool {
+        guard !chapters.isEmpty, totalDuration.isFinite, totalDuration > 0,
+              abs(chapters[0].start) <= tolerance else { return false }
+        var previousEnd: TimeInterval = 0
+        let lastIndex = chapters.index(before: chapters.endIndex)
+        for (index, chapter) in chapters.enumerated() {
+            // Genau diese Grenzen verwendet die anschließende Normalisierung:
+            // Start wird auf das vorherige Ende, das letzte Ende auf die echte
+            // Dateidauer gesetzt. Auch dieses normalisierte Kapitel muss positiv
+            // bleiben, nicht nur die ursprüngliche FFMETADATA-Spanne.
+            let normalizedEnd = index == lastIndex ? totalDuration : chapter.end
+            guard chapter.start.isFinite, chapter.end.isFinite,
+                  chapter.start >= 0, chapter.end > chapter.start,
+                  chapter.start < totalDuration,
+                  abs(chapter.start - previousEnd) <= tolerance,
+                  normalizedEnd > previousEnd,
+                  chapter.end <= totalDuration + tolerance else { return false }
+            previousEnd = chapter.end
+        }
+        return abs(previousEnd - totalDuration) <= tolerance
     }
 
     /// Macht FFMETADATA-Escapes rückgängig (`\=`, `\;`, `\#`, `\\` → Klartext).

@@ -102,12 +102,14 @@ Die CLI ist ein vollwertiger Weg, Hörbuchklöppler zu nutzen — ideal für Skr
 ```
 kloeppler <ordner> [--mode parallel|standard] [--bitrate 48k] \
           [--samplerate 32000] [--max-duration 0] [--mono|--stereo] \
-          [--title <titel>] [--author <autor>] [--output <ziel>] \
+          [--title <titel>] [--author <autor>] [--genre <genre>] \
+          [--cover <bild>|--no-cover] [--output <ziel>] \
           [--verbose] [--force]
 ```
 
 - `<ordner>` — ein Ordner mit Audiodateien (eine Datei = ein Kapitel). Cover = größtes Bild / `folder.jpg`.
 - `--title` / `--author` überschreiben die aus den Datei-Tags erkannten Werte (`--title` bestimmt auch den Dateinamen).
+- `--genre`, `--cover` und `--no-cover` übergeben die entsprechenden Metadaten der GUI an den CLI-Lauf.
 - `--output` — Zielordner oder voller `.m4b`-Pfad. Ohne Angabe landet die Datei neben der Quelle.
 - `--max-duration <std>` — lange Bücher aufteilen (`0` = unbegrenzt).
 - **Exit-Codes:** `0` nur bei echtem Erfolg, sonst `≠ 0` (SIGINT / Ctrl-C liefert `130`) — automatisierungstauglich.

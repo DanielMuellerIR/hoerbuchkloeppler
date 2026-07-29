@@ -40,7 +40,7 @@ Symbolnamen als Anker (bewusst **ohne** Zeilennummern — die driften bei jeder
 | `AudioSettings.swift` | Einstellungs-Struct (`Codable`) | Felder → [settings.md](settings.md) |
 | `SettingsManager.swift` | Laden/Speichern `~/.Hoerbuchkloeppler/settings.json` | `shared` · `loadSettings` · `saveSettings` |
 | `AudioFile+Extensions.swift` | Artwork-Extraktion, Kapitel-Extraktion via **gebündeltem ffmpeg** (`-f ffmetadata`) | `extractEmbeddedArtwork` · `extractChapters` · `parseFFMetadataChapters` |
-| `KloepplerCLI.swift` | CLI: ArgumentParser (diverse `@Option`/`@Flag`, `validate()`), ANSI-Animation, ASCII-Cover — Optionen siehe [build-and-test.md](build-and-test.md) | `KloepplerCLI` (`@main`) · `validate()` · `sanitizeFilename` · `buildPacmanBar` · `generateAsciiArt` |
+| `KloepplerCLI.swift` | CLI: ArgumentParser, TTY-abhängige ANSI-Animation, Klartextstatus in Pipes, SIGINT-Phasen, ASCII-Cover — Optionen siehe [build-and-test.md](build-and-test.md) | `KloepplerCLI` (`@main`) · `validate()` · `sanitizeFilename` · `buildPacmanBar` · `generateAsciiArt` |
 
 App-Views (`Hörbuchklöppler/`): `ContentView`, `ConversionOverlayView`,
 `MetadataSelectionView`, `SettingsView`, `Hörbuchklöppler.swift` (App-Entry).

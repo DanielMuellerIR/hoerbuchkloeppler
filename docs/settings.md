@@ -22,6 +22,12 @@ gewählt (kleine Dateien, praktisch unhörbar vs. hohe Qualität) — Begründun
   umgeht Binding-Bugs).
 - `SettingsManager.shared.loadSettings()` / `saveSettings(_:)`; der Einstellungs-
   Ordner wird bei Bedarf angelegt.
+- Beim Laden und Speichern werden ungültige Bitrate, Abtastrate und maximale
+  Dauer feldweise auf ihre Defaults zurückgesetzt.
+- Fehlende oder falsch typisierte JSON-Felder werden ebenfalls einzeln ersetzt;
+  gültige Nachbarfelder bleiben erhalten.
+- `saveSettings(_:)` meldet Schreibfehler an die GUI; sie zeigt den Fehler an,
+  statt einen nicht gespeicherten Wert still zu akzeptieren.
 
 ## Parallel-Mode-Regel
 

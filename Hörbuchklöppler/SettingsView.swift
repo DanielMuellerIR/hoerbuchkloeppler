@@ -6,10 +6,25 @@ struct SettingsView: View {
     @Binding var isPresented: Bool
     @State private var isUnlimited = true
     @State private var maxHours: Int = 10
+    @State private var maxSliderUpperBound: Int = 24
+    @State private var saveError: String?
 
     let monoBitrates = ["24k", "32k", "48k", "64k", "96k", "128k"]
     let stereoBitrates = ["48k", "64k", "96k", "128k", "160k", "192k", "256k"]
     let sampleRates = [8000, 16000, 22050, 32000, 44100, 48000]
+
+    private var visibleBitrates: [String] {
+        let supported = session.settings.isMono ? monoBitrates : stereoBitrates
+        return supported.contains(session.settings.bitrate)
+            ? supported
+            : [session.settings.bitrate] + supported
+    }
+
+    private var visibleSampleRates: [Int] {
+        sampleRates.contains(session.settings.sampleRate)
+            ? sampleRates
+            : [session.settings.sampleRate] + sampleRates
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -21,8 +36,7 @@ struct SettingsView: View {
                     }.pickerStyle(.segmented)
 
                     Picker("Bitrate", selection: $session.settings.bitrate) {
-                        let currentList = session.settings.isMono ? monoBitrates : stereoBitrates
-                        ForEach(currentList, id: \.self) { Text($0).tag($0) }
+                        ForEach(visibleBitrates, id: \.self) { Text($0).tag($0) }
                     }
                     // Alte Ein-Parameter-onChange-Signatur (statt der Sonoma-
                     // Formen), damit macOS 13 als Deployment-Target reicht.
@@ -34,7 +48,7 @@ struct SettingsView: View {
                     }
 
                     Picker("Abtastrate", selection: $session.settings.sampleRate) {
-                        ForEach(sampleRates, id: \.self) { Text("\($0) Hz").tag($0) }
+                        ForEach(visibleSampleRates, id: \.self) { Text("\($0) Hz").tag($0) }
                     }
                 }
 
@@ -58,7 +72,7 @@ struct SettingsView: View {
                             Slider(value: Binding(
                                 get: { Double(maxHours) },
                                 set: { maxHours = Int($0) }
-                            ), in: 1...24, step: 1)
+                            ), in: 1...Double(maxSliderUpperBound), step: 1)
                             .onChange(of: maxHours) { newValue in
                                 session.settings.maxDurationHours = max(1, newValue)
                             }
@@ -68,17 +82,29 @@ struct SettingsView: View {
             }.formStyle(.grouped).padding()
 
             Button("Fertig") {
-                // SettingsManager nutzen für Persistenz
-                SettingsManager.shared.saveSettings(session.settings)
-                isPresented = false
+                do {
+                    try SettingsManager.shared.saveSettings(session.settings)
+                    isPresented = false
+                } catch {
+                    saveError = error.localizedDescription
+                }
             }
             .padding().keyboardShortcut(.defaultAction)
         }
         .frame(width: 450)
+        .alert("Einstellungen konnten nicht gespeichert werden", isPresented: Binding(
+            get: { saveError != nil },
+            set: { if !$0 { saveError = nil } }
+        )) {
+            Button("OK") { saveError = nil }
+        } message: {
+            Text(saveError ?? "Unbekannter Fehler")
+        }
         .onAppear {
             // Local state sync
             isUnlimited = session.settings.maxDurationHours == nil
             maxHours = session.settings.maxDurationHours ?? 10
+            maxSliderUpperBound = max(24, maxHours)
         }
     }
 }

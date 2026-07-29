@@ -7,22 +7,21 @@ public class SettingsManager {
     private init() {
         let homeDir = FileManager.default.homeDirectoryForCurrentUser
         let appDir = homeDir.appendingPathComponent(".Hoerbuchkloeppler")
-        if !FileManager.default.fileExists(atPath: appDir.path) {
-            try? FileManager.default.createDirectory(at: appDir, withIntermediateDirectories: true)
-        }
         self.settingsURL = appDir.appendingPathComponent("settings.json")
+    }
+
+    /// Separater Pfad nur für Tests; die öffentliche App verwendet `shared`.
+    init(settingsURL: URL) {
+        self.settingsURL = settingsURL
     }
     
     public func loadSettings() -> AudioSettings {
         guard let data = try? Data(contentsOf: settingsURL),
               var settings = try? JSONDecoder().decode(AudioSettings.self, from: data) else {
-            // Default settings if file doesn't exist or is corrupted.
-            // sampleRate MUSS mit dem deklarierten Default in AudioSettings (32 kHz)
-            // übereinstimmen — sonst bekämen Erst-Nutzer beim ersten Start
-            // versehentlich 48 kHz statt der bewussten 32-kHz-Voreinstellung.
-            return AudioSettings(isMono: true, bitrate: "48k", sampleRate: 32000, maxDurationHours: nil, useParallelEncoding: true)
+            return AudioSettings()
         }
-        
+        settings = settings.normalized()
+
         // Bewusste Design-Regel (docs/settings.md, „Parallel-Mode-Regel"):
         // Parallel-Encoding ist beim Start IMMER an. Der Toggle gilt nur für die
         // laufende Session; ein persistiertes "aus" überlebt den Neustart
@@ -31,9 +30,10 @@ public class SettingsManager {
         return settings
     }
     
-    public func saveSettings(_ settings: AudioSettings) {
-        if let data = try? JSONEncoder().encode(settings) {
-            try? data.write(to: settingsURL, options: .atomic)
-        }
+    public func saveSettings(_ settings: AudioSettings) throws {
+        let directory = settingsURL.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(settings.normalized())
+        try data.write(to: settingsURL, options: .atomic)
     }
 }

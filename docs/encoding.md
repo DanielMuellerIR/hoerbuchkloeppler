@@ -116,4 +116,7 @@ Original bleibt bis zum atomaren Commit erhalten.
 
 - **Laufbezogener Kontext:** Jeder Konvertierungslauf besitzt seine eigenen Prozesse und Temp-Verzeichnisse in einem `ConversionContext`.
 - **Cancellation:** Ein Abbruch beendet und bereinigt ausschließlich den Kontext der betroffenen `ConversionSession`; parallele Fenster bleiben unberührt. Ein schneller Neustart macht die alte Completion per Lauf-ID ungültig.
-- **Signal-Handling:** Das CLI fängt das Abbruchsignal `SIGINT` (Ctrl+C) ab, bricht alle aktiven ffmpeg-Instanzen sauber ab und beendet sich kontrolliert.
+- **Signal-Handling:** Das CLI fängt `SIGINT` (Ctrl+C) bereits während Ordnerscan
+  und Metadatenanalyse ab, beendet seine laufbezogenen externen Prozesse und
+  wartet beim Encoding auf das vollständige Temp-/Partial-Cleanup. Ein Signal
+  nach dem letzten atomaren Commit ändert einen erfolgreichen Exit nicht mehr.

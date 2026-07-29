@@ -28,7 +28,8 @@ in `Resources/bin/` liegen (sonst greift zur Laufzeit der Homebrew-Fallback).
 ```
 kloeppler <ordner> [--mode parallel|standard] [--bitrate 48k] \
           [--samplerate 32000] [--max-duration 0] [--mono|--stereo] \
-          [--title <titel>] [--author <autor>] [--output <ziel>] \
+          [--title <titel>] [--author <autor>] [--genre <genre>] \
+          [--cover <bild>|--no-cover] [--output <ziel>] \
           [--verbose] [--force]
 ```
 
@@ -38,6 +39,8 @@ kloeppler <ordner> [--mode parallel|standard] [--bitrate 48k] \
   unbegrenzt). Pendant zur GUI-Einstellung „Maximale Dauer".
 - `--title` / `--author` setzen Buchtitel/Autor explizit und gewinnen gegen die
   aus den Datei-Tags erkannten Kandidaten (`--title` bestimmt auch den Dateinamen).
+- `--genre`, `--cover` und `--no-cover` bilden die entsprechenden GUI-Werte im
+  kopierten CLI-Handoff vollständig ab.
 - `--output <ziel>` = Zielordner (Datei heißt dann `<Titel>.m4b`) **oder** voller
   `.m4b`-Pfad. Ohne Angabe landet die `.m4b` im **Eltern**-Ordner der Quelle,
   benannt nach Titel-Tag bzw. Ordnername (sanitisiert) — `--output` ist nötig,
@@ -68,7 +71,7 @@ nicht nur „Build grün".
 ## Unit-Tests (Core)
 
 ```bash
-cd HoerbuchkloepplerCore && swift test        # 59 Tests, 13 Suites
+cd HoerbuchkloepplerCore && swift test        # 76 Tests, 16 Suites
 ```
 
 Deckt die reine Kernlogik ab: FFMETADATA-Escaping/Parsing, Kapitel-Arithmetik

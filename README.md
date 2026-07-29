@@ -92,12 +92,14 @@ The CLI is a first-class way to use Hörbuchklöppler — ideal for scripts and 
 ```
 kloeppler <folder> [--mode parallel|standard] [--bitrate 48k] \
           [--samplerate 32000] [--max-duration 0] [--mono|--stereo] \
-          [--title <title>] [--author <author>] [--output <target>] \
+          [--title <title>] [--author <author>] [--genre <genre>] \
+          [--cover <image>|--no-cover] [--output <target>] \
           [--verbose] [--force]
 ```
 
 - `<folder>` — a folder of audio files (one file = one chapter). Cover = largest image / `folder.jpg`.
 - `--title` / `--author` override the tags detected from the files (`--title` also names the output file).
+- `--genre`, `--cover`, and `--no-cover` transfer the matching GUI metadata into the CLI run.
 - `--output` — a target folder or a full `.m4b` path. Without it the file lands next to the source.
 - `--max-duration <hours>` — split long books (`0` = unlimited).
 - **Exit codes:** `0` only on real success, `≠ 0` otherwise (SIGINT / Ctrl-C returns `130`) — safe for automation.

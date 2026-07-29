@@ -48,32 +48,33 @@ struct ContentView: View {
     @StateObject var session = ConversionSession()
     @StateObject private var preview = ChapterPreviewPlayer()
     @State private var showingSettings = false
-    @State private var selectedFile: AudioFile? = nil
     @State private var ffmpegStatus = "Prüfe..."
     @State private var miStatus = "Prüfe..."
     @State private var showingToolErrorAlert = false
 
-    // ... (checkTools und getToolVersion bleiben identisch zum Original)
     func checkTools() {
-        FFmpegWrapper.cleanupOldTempDirectories()
-        
-        if let (fURL, version) = FFmpegWrapper.toolVersion(name: "ffmpeg") {
-            self.ffmpegStatus = "OK (\(version))"
-            session.addLog("🛠️ FFmpeg gefunden an \(fURL.path) (Version: \(version))")
-        } else {
-            self.ffmpegStatus = "Nicht gefunden"
-            session.addLog("❌ FFmpeg NICHT gefunden!")
+        session.logCurrentSettings()
+        DispatchQueue.global(qos: .utility).async {
+            FFmpegWrapper.cleanupOldTempDirectories()
+            let ffmpeg = FFmpegWrapper.toolVersion(name: "ffmpeg")
+            let mediaInfo = FFmpegWrapper.toolVersion(name: "mediainfo")
+            DispatchQueue.main.async {
+                if let (url, version) = ffmpeg {
+                    self.ffmpegStatus = "OK (\(version))"
+                    session.addLog("🛠️ FFmpeg gefunden an \(url.path) (Version: \(version))")
+                } else {
+                    self.ffmpegStatus = "Nicht gefunden"
+                    session.addLog("❌ FFmpeg NICHT gefunden!")
+                }
+                if let (url, version) = mediaInfo {
+                    self.miStatus = "OK (\(version))"
+                    session.addLog("🛠️ MediaInfo gefunden an \(url.path) (Version: \(version))")
+                } else {
+                    self.miStatus = "Nicht gefunden"
+                    session.addLog("❌ MediaInfo NICHT gefunden!")
+                }
+            }
         }
-
-        if let (mURL, version) = FFmpegWrapper.toolVersion(name: "mediainfo") {
-            self.miStatus = "OK (\(version))"
-            session.addLog("🛠️ MediaInfo gefunden an \(mURL.path) (Version: \(version))")
-        } else {
-            self.miStatus = "Nicht gefunden"
-            session.addLog("❌ MediaInfo NICHT gefunden!")
-        }
-        
-        session.logCurrentSettings() // Einstellungen direkt beim Start loggen
     }
 
     private func saveAndExport() {
@@ -113,7 +114,7 @@ struct ContentView: View {
     }
 
     var body: some View {
-        ZStack { // NEU: ZStack für das Overlay
+        ZStack {
             HSplitView {
                 // --- Linke Sidebar (Cover & Metadaten) ---
                 VStack(spacing: 20) {
@@ -170,7 +171,10 @@ struct ContentView: View {
                         VStack(spacing: 0) {
                             HStack {
                                 Spacer()
-                                Button("Alle löschen") { preview.stop(); session.audioFiles.removeAll() }
+                                Button("Alle löschen") {
+                                    preview.stop()
+                                    session.audioFiles.removeAll()
+                                }
                                     .foregroundColor(.red).buttonStyle(.bordered)
                             }.padding([.top, .horizontal])
                             List {
@@ -204,7 +208,12 @@ struct ContentView: View {
                             Text("Hörbuch erzeugen").frame(width: 200, height: 35)
                         }
                         .keyboardShortcut("r", modifiers: .command).buttonStyle(.borderedProminent).controlSize(.large)
-                        .disabled(session.isConverting || session.audioFiles.isEmpty || session.isPreparingArtwork)
+                        .disabled(
+                            session.isConverting
+                                || session.isImporting
+                                || session.audioFiles.isEmpty
+                                || session.isPreparingArtwork
+                        )
                         Spacer()
                         
                         HStack {
@@ -219,10 +228,11 @@ struct ContentView: View {
                                     .cornerRadius(4)
                             }
                             .buttonStyle(PlainButtonStyle())
-                            .disabled(session.cliFolderIfRepresentable == nil)
-                            .help(session.cliFolderIfRepresentable == nil
-                                  ? "Nur verfügbar, wenn die aktuelle Liste vollständig aus einem einzelnen Ordner-Import stammt."
-                                  : "Öffnet das Terminal mit dem vollständigen Befehl für die aktuellen Einstellungen.")
+                            .disabled(
+                                session.cliFolderIfRepresentable == nil
+                                    || resolveKloepplerURL() == nil
+                            )
+                            .help(cliHandoffHelp)
                         }
                         .padding(.trailing, 20)
                         .padding(.bottom, 10)
@@ -231,8 +241,8 @@ struct ContentView: View {
                 }
             }
 
-            // NEU: Das Konversions-Overlay
-            if session.showOverlay { // GEÄNDERT von session.isConverting
+            // Das Overlay bleibt bis zum definitiven Abschluss sichtbar.
+            if session.showOverlay {
                 ConversionOverlayView(session: session)
                     .transition(.opacity)
                     .zIndex(10)
@@ -271,11 +281,15 @@ struct ContentView: View {
     }
 
     private func handleDroppedProviders(_ providers: [NSItemProvider]) {
-        let importToken = session.beginImport()
+        let importToken = session.beginImport(expectedItemCount: providers.count)
         for provider in providers {
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
                 DispatchQueue.main.async {
-                    if let url { self.processDroppedURL(url, importToken: importToken) }
+                    guard let url else {
+                        session.finishImport(importToken)
+                        return
+                    }
+                    self.processDroppedURL(url, importToken: importToken)
                 }
             }
         }
@@ -289,7 +303,10 @@ struct ContentView: View {
             // Nur das Übernehmen in den @Published-State läuft danach auf Main.
             DispatchQueue.global(qos: .userInitiated).async {
                 let scanned = session.scanFolder(url)
-                DispatchQueue.main.async { session.applyScannedFolder(scanned, importToken: importToken) }
+                DispatchQueue.main.async {
+                    session.applyScannedFolder(scanned, importToken: importToken)
+                    session.finishImport(importToken)
+                }
             }
         } else { processSingleFile(url, importToken: importToken) }
     }
@@ -300,11 +317,14 @@ struct ContentView: View {
         // der @Published-Zugriff (processIncomingFiles) danach auf Main.
         DispatchQueue.global(qos: .userInitiated).async {
             let files: [AudioFile]?
-            if ["m4b", "mp4"].contains(ext) { files = AudioFile.extractChapters(from: url) }
+            if ["m4b", "mp4"].contains(ext) { files = session.extractChapters(from: url) }
             else if ["mp3", "m4a", "wav", "flac"].contains(ext) { files = [AudioFile(url: url)] }
             else { files = nil }
-            if let files = files {
-                DispatchQueue.main.async { session.processIncomingFiles(files, importToken: importToken) }
+            DispatchQueue.main.async {
+                if let files {
+                    session.processIncomingFiles(files, importToken: importToken)
+                }
+                session.finishImport(importToken)
             }
         }
     }
@@ -321,41 +341,56 @@ struct ContentView: View {
             session.addLog("⚠️ CLI-Übergabe nicht möglich: Die aktuelle Liste stammt nicht vollständig aus einem einzelnen Ordner-Import.")
             return
         }
+        guard let kloepplerURL = resolveKloepplerURL() else {
+            session.addLog("⚠️ CLI-Übergabe nicht möglich: Das Programm „kloeppler“ wurde nicht gefunden.")
+            return
+        }
 
-        // Das kloeppler-Binary wirklich auflösen statt blind "./kloeppler"
-        // anzunehmen: In einem installierten Build (z.B. /Applications) liegt
-        // neben der App kein Binary. Reihenfolge: neben der App (Testbuild im
-        // Repo-Root), Entwicklungs-Build im Repo, dann PATH/übliche
-        // Installationsorte (getBinaryURL).
-        let appDir = Bundle.main.bundleURL.deletingLastPathComponent()
-        let candidates = [
-            appDir.appendingPathComponent("kloeppler"),
-            appDir.appendingPathComponent("HoerbuchkloepplerCore/.build/release/kloeppler")
-        ]
-        let kloepplerURL = candidates.first(where: FFmpegWrapper.isUsableExecutable)
-            ?? FFmpegWrapper.getBinaryURL(name: "kloeppler")
-
-        // Ohne Fund bleibt der nackte Befehl (kloeppler liegt evtl. im PATH der
-        // Login-Shell); der absolute Pfad steht in Anführungszeichen, damit
-        // Leerzeichen/Umlaute im Repo-Pfad nicht stören.
         let invocation = CLIInvocation(
-            executable: kloepplerURL?.path ?? "kloeppler",
+            executable: kloepplerURL.path,
             folderURL: folderURL,
             settings: session.settings,
             title: session.title,
-            author: session.author
+            author: session.author,
+            genre: session.genre,
+            coverPath: session.coverPath,
+            suppressCover: session.isCoverSuppressed
         )
 
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(invocation.shellCommand, forType: .string)
 
-        // Terminal dort öffnen, wo das Binary liegt; ohne Fund im Home statt in
-        // einem App-Verzeichnis ohne Binary.
-        let openDirectory = kloepplerURL?.deletingLastPathComponent().path ?? NSHomeDirectory()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-a", "Terminal", openDirectory]
-        try? process.run()
+        process.arguments = ["-a", "Terminal", kloepplerURL.deletingLastPathComponent().path]
+        do {
+            try process.run()
+        } catch {
+            session.addLog("⚠️ Terminal konnte nicht geöffnet werden: \(error.localizedDescription)")
+        }
+    }
+
+    private func resolveKloepplerURL() -> URL? {
+        // In Entwicklungs-Builds liegt die CLI neben der App oder im
+        // SwiftPM-Release-Verzeichnis. Installierte Builds bieten den Handoff nur
+        // an, wenn eine ausführbare CLI im PATH/üblichen Installationsort liegt.
+        let appDir = Bundle.main.bundleURL.deletingLastPathComponent()
+        let candidates = [
+            appDir.appendingPathComponent("kloeppler"),
+            appDir.appendingPathComponent("HoerbuchkloepplerCore/.build/release/kloeppler")
+        ]
+        return candidates.first(where: FFmpegWrapper.isUsableExecutable)
+            ?? FFmpegWrapper.getBinaryURL(name: "kloeppler")
+    }
+
+    private var cliHandoffHelp: String {
+        if session.cliFolderIfRepresentable == nil {
+            return "Nur verfügbar, wenn die aktuelle Liste vollständig aus einem einzelnen Ordner-Import stammt."
+        }
+        if resolveKloepplerURL() == nil {
+            return "Nicht verfügbar, weil das Programm „kloeppler“ nicht gefunden wurde."
+        }
+        return "Öffnet das Terminal mit dem vollständigen Befehl für die aktuellen Einstellungen, Metadaten und das Cover."
     }
 }
 

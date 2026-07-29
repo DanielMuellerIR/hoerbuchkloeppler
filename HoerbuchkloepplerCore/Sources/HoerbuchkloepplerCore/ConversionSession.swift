@@ -43,14 +43,68 @@ struct MetadataResolution: Equatable {
     let shouldShowSelection: Bool
 }
 
+/// Besitzt nur die externen Prozesse des Imports (Kapitel- und Metadatenanalyse).
+/// Damit kann die CLI schon vor dem eigentlichen Konvertierungs-Context auf
+/// Ctrl-C reagieren, ohne Prozesse eines anderen Fensters anzufassen.
+private final class PreparationContext: @unchecked Sendable {
+    private let lock = NSLock()
+    private var processes: [ObjectIdentifier: Process] = [:]
+    private var cancelled = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    func register(_ process: Process) -> Bool {
+        lock.lock()
+        guard !cancelled else {
+            lock.unlock()
+            return false
+        }
+        processes[ObjectIdentifier(process)] = process
+        lock.unlock()
+        return true
+    }
+
+    func unregister(_ process: Process) {
+        lock.lock()
+        processes.removeValue(forKey: ObjectIdentifier(process))
+        lock.unlock()
+    }
+
+    @discardableResult
+    func cancel() -> Bool {
+        lock.lock()
+        guard !cancelled else {
+            lock.unlock()
+            return false
+        }
+        cancelled = true
+        let activeProcesses = Array(processes.values)
+        processes.removeAll()
+        lock.unlock()
+        activeProcesses.forEach { if $0.isRunning { $0.terminate() } }
+        return true
+    }
+}
+
 public class ConversionSession: ObservableObject, Identifiable {
     public let id = UUID()
     public let metadataGroup = DispatchGroup()
-    public init() {}
-    @Published public var settings = SettingsManager.shared.loadSettings()
+    @Published public var settings: AudioSettings
+    public init(settings: AudioSettings = SettingsManager.shared.loadSettings()) {
+        self.settings = settings.normalized()
+    }
     
     @Published public var audioFiles: [AudioFile] = [] {
-        didSet { if audioFiles.isEmpty { clearMetadata() } }
+        didSet {
+            if audioFiles.isEmpty {
+                invalidateImportWork()
+                clearMetadata()
+            }
+        }
     }
     
     @Published public var coverImage: NSImage?
@@ -64,9 +118,14 @@ public class ConversionSession: ObservableObject, Identifiable {
     private var importGeneration = UUID()
     private var artworkRequest = UUID()
     private var coverRevision: UInt = 0
+    public private(set) var isCoverSuppressed = false
+    private var pendingImportOperations = 0
+    @Published public private(set) var isImporting = false
     private var cliSourceFolderURL: URL?
     private var cliRepresentedFileIDs = Set<UUID>()
     private var cliRepresentedChapterTitles: [UUID: String] = [:]
+    private let preparationContextLock = NSLock()
+    private var preparationContext: PreparationContext?
     @Published public var title: String = ""
     @Published public var author: String = ""
     @Published public var genre: String = "Hörbuch"
@@ -76,6 +135,7 @@ public class ConversionSession: ObservableObject, Identifiable {
     @Published public var showOverlay: Bool = false
     @Published public var progress: Double = 0.0
     @Published public var conversionStatus: String = "Bereit"
+    @Published public internal(set) var completedOutputURLs: [URL] = []
     /// Ergebnis des letzten Konvertierungslaufs (nil = noch nicht beendet,
     /// true = erfolgreich, false = mit Fehler/abgebrochen). Erlaubt der CLI
     /// einen korrekten Exit-Code statt blind "Erfolg" zu melden.
@@ -83,6 +143,45 @@ public class ConversionSession: ObservableObject, Identifiable {
 
     private let conversionContextLock = NSLock()
     private var activeConversionContext: ConversionContext?
+    private var conversionHasFinished = false
+
+    /// Beginnt einen abbrechbaren Import-/Metadatenlauf. Die GUI braucht das
+    /// derzeit nicht; die CLI startet ihn vor dem synchronen Ordnerscan.
+    public func beginPreparation() {
+        let context = PreparationContext()
+        preparationContextLock.lock()
+        let previous = preparationContext
+        preparationContext = context
+        preparationContextLock.unlock()
+        previous?.cancel()
+    }
+
+    @discardableResult
+    public func cancelPreparation() -> Bool {
+        preparationContextLock.lock()
+        let context = preparationContext
+        preparationContextLock.unlock()
+        return context?.cancel() ?? false
+    }
+
+    private func currentPreparationContext() -> PreparationContext? {
+        preparationContextLock.lock()
+        defer { preparationContextLock.unlock() }
+        return preparationContext
+    }
+
+    /// Liest Kapitel mit einem optional laufenden Vorbereitungs-Context. Die
+    /// öffentliche Methode hält diese Prozessverwaltung aus `ContentView`.
+    public func extractChapters(from url: URL) -> [AudioFile]? {
+        let context = currentPreparationContext()
+        return AudioFile.extractChaptersControlled(
+            from: url,
+            shouldCancel: { context?.isCancelled ?? false },
+            registerProcess: { context?.register($0) ?? true },
+            unregisterProcess: { context?.unregister($0) },
+            log: { [weak self] in self?.addLog($0) }
+        )
+    }
 
     /// Startet einen neuen Lauf und macht einen eventuell noch auslaufenden
     /// Vorgänger ungültig. Dessen spätere Completion darf den neuen UI-State
@@ -92,6 +191,7 @@ public class ConversionSession: ObservableObject, Identifiable {
         conversionContextLock.lock()
         let previous = activeConversionContext
         activeConversionContext = context
+        conversionHasFinished = false
         conversionContextLock.unlock()
         previous?.cancel()
         return context
@@ -109,13 +209,22 @@ public class ConversionSession: ObservableObject, Identifiable {
         return activeConversionContext?.id == id
     }
 
+    func hasFinishedConversion() -> Bool {
+        conversionContextLock.lock()
+        defer { conversionContextLock.unlock() }
+        return conversionHasFinished
+    }
+
     func endConversion(_ id: UUID) {
         conversionContextLock.lock()
-        if activeConversionContext?.id == id { activeConversionContext = nil }
+        if activeConversionContext?.id == id {
+            activeConversionContext = nil
+            conversionHasFinished = true
+        }
         conversionContextLock.unlock()
     }
     
-    // KORREKTUR: Strukturierte Logs für das Terminal-Interface
+    // Strukturierte Logs für GUI und Terminal
     @Published public var eventLogs: [LogEntry] = []
     @Published public var logString: String = "" // Für Legacy/Fallback
     @Published public var segmentProgress: [Int: SegmentStatus] = [:]
@@ -154,11 +263,11 @@ public class ConversionSession: ObservableObject, Identifiable {
         if let logSink = logSink { logSink(line) } else { print(line) }
     }
 
-    // NEU: Thread-sicheres Loggen mit Typen und Reverse-Order
+    // Thread-sicheres Loggen mit Darstellungstypen
     public func addLog(_ message: String, type: LogType = .info) {
         let entry = LogEntry(type: type, message: message, date: Date())
         DispatchQueue.main.async {
-            self.eventLogs.append(entry) // KORREKTUR: Jetzt anhängen (unten), nicht oben einfügen
+            self.eventLogs.append(entry)
             self.logString = self.eventLogs.map { $0.message }.joined(separator: "\n")
             let timeStr = ConversionSession.logDateFormatter.string(from: entry.date)
             self.emit("[\(timeStr)] \(message)")
@@ -208,10 +317,11 @@ public class ConversionSession: ObservableObject, Identifiable {
     public func resetSession() {
         invalidateImportWork()
         self.audioFiles.removeAll()
-        clearMetadata()
         self.showOverlay = false
         self.isConverting = false
         self.progress = 0.0
+        self.conversionStatus = "Bereit"
+        self.lastConversionSucceeded = nil
         self.eventLogs = []
         self.logString = ""
         self.segmentProgress = [:]
@@ -256,17 +366,10 @@ public class ConversionSession: ObservableObject, Identifiable {
                     self.updateInfoText("MediaInfo hat keine Informationen geliefert.", token: token)
                     return
                 }
-                let encodingsToTry: [(name: String, encoding: String.Encoding)] = [
-                    ("UTF-8", .utf8), ("Mac OS Roman", String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(0x0800)))),
-                    ("ISO-8859-1 / Windows-1252", .isoLatin1), ("ASCII", .ascii)
-                ]
-                var decodedText: String?
-                for attempt in encodingsToTry {
-                    if let text = String(data: data, encoding: attempt.encoding) {
-                        decodedText = text; break
-                    }
-                }
-                self.updateInfoText(decodedText ?? "Dekodierung fehlgeschlagen.", token: token)
+                self.updateInfoText(
+                    Self.decodeMediaInfoText(from: data) ?? "Dekodierung fehlgeschlagen.",
+                    token: token
+                )
             } catch {
                 self.updateInfoText("Fehler: \(error.localizedDescription)", token: token)
             }
@@ -283,13 +386,21 @@ public class ConversionSession: ObservableObject, Identifiable {
         }
     }
 
-    public var startTime: Date?
-    public var processedSecondsAtStart: TimeInterval?
+    static func decodeMediaInfoText(from data: Data) -> String? {
+        let bytes = [UInt8](data.prefix(2))
+        let hasUTF16BOM = bytes == [0xFF, 0xFE] || bytes == [0xFE, 0xFF]
+        let encodings: [String.Encoding] = hasUTF16BOM
+            ? [.utf16, .utf8, .macOSRoman, .isoLatin1]
+            : [.utf8, .macOSRoman, .isoLatin1]
+        return encodings.lazy.compactMap { String(data: data, encoding: $0) }.first
+    }
+
     public var totalDuration: TimeInterval { audioFiles.reduce(0) { $0 + $1.duration } }
 
     public func clearMetadata() {
         self.title = ""; self.author = ""; self.genre = "Hörbuch"
         self.coverImage = nil; self.coverPath = nil; self.embeddedCoverData = nil
+        self.isCoverSuppressed = false
         self.titleCandidates = []; self.authorCandidates = []
         self.showSelectionUI = false
         invalidateArtworkWork()
@@ -298,8 +409,10 @@ public class ConversionSession: ObservableObject, Identifiable {
     /// Markiert einen neuen GUI-Import. Langsame Antworten eines vorherigen
     /// Datei-/Ordner-Drops verlieren damit sofort ihre Schreibberechtigung.
     /// Nur auf dem Main-Thread aufrufen.
-    public func beginImport() -> ImportToken {
+    public func beginImport(expectedItemCount: Int = 1) -> ImportToken {
         importGeneration = UUID()
+        pendingImportOperations = max(0, expectedItemCount)
+        isImporting = pendingImportOperations > 0
         cliSourceFolderURL = nil
         cliRepresentedFileIDs = []
         cliRepresentedChapterTitles = [:]
@@ -307,8 +420,40 @@ public class ConversionSession: ObservableObject, Identifiable {
         return ImportToken(generation: importGeneration, coverRevision: coverRevision)
     }
 
+    /// Meldet genau einen Provider/Scan als abgeschlossen. Erst wenn alle Teile
+    /// desselben Drops übernommen sind, beginnt eine einzige Metadatenabfrage.
+    public func finishImport(_ token: ImportToken) {
+        guard isCurrentImport(token), pendingImportOperations > 0 else { return }
+        pendingImportOperations -= 1
+        guard pendingImportOperations == 0 else { return }
+        if (title.isEmpty || author.isEmpty), let first = audioFiles.first {
+            importGlobalMetadata(from: first, importToken: token) { [weak self] in
+                self?.finishMetadataImport(token: token, sourceFileID: first.id)
+            }
+        } else {
+            isImporting = false
+        }
+    }
+
+    private func finishMetadataImport(token: ImportToken, sourceFileID: UUID) {
+        guard isCurrentImport(token) else { return }
+        // Wurde gerade die Datei entfernt, deren Tags gelesen wurden, darf ihr
+        // Ergebnis nicht gewinnen. Ein verbleibendes erstes Kapitel bekommt
+        // genau einen neuen Versuch.
+        if !audioFiles.contains(where: { $0.id == sourceFileID }),
+           let first = audioFiles.first {
+            importGlobalMetadata(from: first, importToken: token) { [weak self] in
+                self?.finishMetadataImport(token: token, sourceFileID: first.id)
+            }
+            return
+        }
+        isImporting = false
+    }
+
     private func invalidateImportWork() {
         importGeneration = UUID()
+        pendingImportOperations = 0
+        isImporting = false
         cliSourceFolderURL = nil
         cliRepresentedFileIDs = []
         cliRepresentedChapterTitles = [:]
@@ -349,6 +494,10 @@ public class ConversionSession: ObservableObject, Identifiable {
         sourceFolderForCLI: URL? = nil
     ) {
         if let importToken, !isCurrentImport(importToken) { return }
+        // `append(contentsOf: [])` und sogar `sort()` lösen `didSet` aus. Bei
+        // weiterhin leerer Liste sähe das sonst wie ein ausdrückliches
+        // „Alle löschen“ aus und würde den gemeinsamen Mehrfach-Drop entwerten.
+        guard !newFiles.isEmpty else { return }
         let canRepresentFolder = audioFiles.isEmpty && sourceFolderForCLI != nil
         addLog("📥 Importiere \(newFiles.count) Datei(en)...")
         self.audioFiles.append(contentsOf: newFiles)
@@ -368,7 +517,7 @@ public class ConversionSession: ObservableObject, Identifiable {
             cliRepresentedFileIDs = []
             cliRepresentedChapterTitles = [:]
         }
-        if !skipCoverExtraction && coverImage == nil && coverPath == nil {
+        if !skipCoverExtraction && !isCoverSuppressed && coverImage == nil && coverPath == nil {
             // Artwork-Suche (schwere AVAsset-Zugriffe) in den Hintergrund — beim
             // Einzeldatei-Drop lief sie sonst synchron auf dem Main-Thread und
             // ließ die UI haken (der Ordner-Pfad erledigt das bereits im
@@ -393,11 +542,15 @@ public class ConversionSession: ObservableObject, Identifiable {
                 }
                 DispatchQueue.main.async {
                     guard let self,
-                          self.artworkRequest == request,
+                          self.artworkRequest == request else { return }
+                    // Der aktuelle Request ist in jedem Fall beendet. Weitere
+                    // Guards entscheiden nur noch, ob sein Ergebnis anwendbar ist.
+                    self.isPreparingArtwork = false
+                    guard
                           self.coverRevision == expectedCoverRevision,
+                          !self.isCoverSuppressed,
                           importToken.map(self.isCurrentImport) ?? true,
                           importedFileIDs.isSubset(of: Set(self.audioFiles.map(\.id))) else { return }
-                    self.isPreparingArtwork = false
                     // Ein zwischenzeitlich manuell gesetztes Cover gewinnt.
                     guard self.coverImage == nil, self.coverPath == nil,
                           let foundArtwork else { return }
@@ -407,122 +560,134 @@ public class ConversionSession: ObservableObject, Identifiable {
                 }
             }
         }
-        if title.isEmpty || author.isEmpty {
+        // GUI-Drops sammeln erst alle Provider und starten danach in
+        // `finishImport` genau eine Metadatenabfrage. Der synchrone CLI-Pfad hat
+        // keinen Import-Token und beginnt hier sofort.
+        if importToken == nil, (title.isEmpty || author.isEmpty) {
             if let first = audioFiles.first { importGlobalMetadata(from: first, importToken: importToken) }
         }
     }
 
-    private func importGlobalMetadata(from file: AudioFile, importToken: ImportToken?) {
+    private func importGlobalMetadata(
+        from file: AudioFile,
+        importToken: ImportToken?,
+        completion: (() -> Void)? = nil
+    ) {
         metadataGroup.enter()
-        // Die Group STARK fassen (nicht über self): wäre self beim Ausführen des
-        // Blocks bereits dealloziert, liefe self?.metadataGroup.leave() ins Leere
-        // → enter() ohne leave() → metadataGroup.wait() (CLI) hinge für immer.
         let group = metadataGroup
+        let preparation = currentPreparationContext()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            defer { group.leave() }
-            guard let self = self else { return }
-            
-            guard let miURL = FFmpegWrapper.getBinaryURL(name: "mediainfo") else {
-                self.showMetadataSelection(ifCurrent: importToken)
+            guard let self else {
+                group.leave()
                 return
             }
 
-            let process = Process()
-            process.executableURL = miURL
-            process.arguments = ["--Output=JSON", file.url.path]
-            
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            
-            do {
-                try process.run()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                
-                if data.isEmpty {
-                    self.showMetadataSelection(ifCurrent: importToken)
-                    return
-                }
-                
-                guard let startIdx = data.firstIndex(of: 123), let endIdx = data.lastIndex(of: 125) else {
-                    self.showMetadataSelection(ifCurrent: importToken)
-                    return
-                }
-                let jsonDataSegment = data.subdata(in: startIdx..<(endIdx + 1))
-                
-                var finalJSONData: Data?
-                let encodingsToTry: [(name: String, encoding: String.Encoding)] = [
-                    ("UTF-8", .utf8), 
-                    ("Mac OS Roman", String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(0x0800)))), 
-                    ("ISO-8859-1 / Windows-1252", .isoLatin1), 
-                    ("UTF-16", .utf16)
-                ]
-                for attempt in encodingsToTry {
-                    if let decodedString = String(data: jsonDataSegment, encoding: attempt.encoding), let dataBack = decodedString.data(using: .utf8) {
-                        finalJSONData = dataBack
-                        break
+            var candidates: (titles: [TagCandidate], authors: [TagCandidate])?
+            if preparation?.isCancelled != true,
+               let miURL = FFmpegWrapper.getBinaryURL(name: "mediainfo") {
+                let process = Process()
+                process.executableURL = miURL
+                process.arguments = ["--Output=JSON", file.url.path]
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = pipe
+
+                if preparation?.register(process) ?? true {
+                    defer { preparation?.unregister(process) }
+                    do {
+                        guard preparation?.isCancelled != true else { throw CancellationError() }
+                        try process.run()
+                        // Dasselbe Start-Race wie bei Encoding-Prozessen: Ein
+                        // Cancel unmittelbar vor `run()` sah den Process noch
+                        // nicht laufen. Nach dem Start sofort erneut prüfen.
+                        if preparation?.isCancelled == true { process.terminate() }
+                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                        process.waitUntilExit()
+                        guard process.terminationStatus == 0,
+                              preparation?.isCancelled != true,
+                              let general = Self.decodeMediaInfoGeneralTrack(from: data) else {
+                            throw CocoaError(.fileReadCorruptFile)
+                        }
+                        candidates = Self.metadataCandidates(from: general)
+                    } catch {
+                        // Ein fehlender/kaputter Tag-Lauf fällt unten auf die
+                        // manuelle Auswahl zurück. Abbruch zeigt keine neue UI.
                     }
                 }
-                
-                guard let validUTF8Data = finalJSONData else {
-                    self.showMetadataSelection(ifCurrent: importToken)
-                    return
-                }
-                
-                let jsonObject = try JSONSerialization.jsonObject(with: validUTF8Data, options: [])
-                var generalTrack: [String: Any]?
-                if let dict = jsonObject as? [String: Any], 
-                   let media = dict["media"] as? [String: Any], 
-                   let tracks = media["track"] as? [[String: Any]] {
-                    generalTrack = tracks.first(where: { $0["@type"] as? String == "General" })
-                }
-                
-                guard let finalGeneral = generalTrack else {
-                    self.showMetadataSelection(ifCurrent: importToken)
-                    return
-                }
-                
-                var foundTitles: [TagCandidate] = []
-                var foundAuthors: [TagCandidate] = []
-                func extractValue(for key: String) -> String? {
-                    return finalGeneral[key] as? String ?? (finalGeneral[key] as? [String])?.first
-                }
-                
-                if let album = extractValue(for: "Album") { foundTitles.append(TagCandidate(type: "MediaInfo", key: "Album", value: album)) }
-                if let titleVal = extractValue(for: "Title") { foundTitles.append(TagCandidate(type: "MediaInfo", key: "Title", value: titleVal)) }
-                if let performer = extractValue(for: "Performer") { foundAuthors.append(TagCandidate(type: "MediaInfo", key: "Performer", value: performer)) }
-                if let albumPerf = extractValue(for: "Album_Performer") { foundAuthors.append(TagCandidate(type: "MediaInfo", key: "Album_Performer", value: albumPerf)) }
-                
-                DispatchQueue.main.async {
-                    guard importToken.map(self.isCurrentImport) ?? true else { return }
-                    self.titleCandidates = foundTitles
-                    self.authorCandidates = foundAuthors
+            }
 
-                    // Erst entscheiden, ob eine Auswahl nötig ist, dann genau
-                    // einen eindeutigen Kandidaten automatisch übernehmen.
-                    // Der frühere Ablauf füllte zuerst das Feld und prüfte danach
-                    // auf "leer" — dadurch war die Auswahl-UI unerreichbar.
-                    let resolution = Self.resolveMetadata(
-                        currentTitle: self.title,
-                        currentAuthor: self.author,
-                        titleCandidates: foundTitles,
-                        authorCandidates: foundAuthors
-                    )
-                    self.title = resolution.title
-                    self.author = resolution.author
-                    self.showSelectionUI = resolution.shouldShowSelection
+            DispatchQueue.main.async {
+                defer {
+                    completion?()
+                    group.leave()
                 }
-            } catch {
-                self.showMetadataSelection(ifCurrent: importToken)
+                guard importToken.map(self.isCurrentImport) ?? true,
+                      importToken == nil || self.audioFiles.contains(where: { $0.id == file.id }),
+                      preparation?.isCancelled != true else {
+                    return
+                }
+                guard let candidates else {
+                    self.showSelectionUI = true
+                    return
+                }
+                self.titleCandidates = candidates.titles
+                self.authorCandidates = candidates.authors
+                let resolution = Self.resolveMetadata(
+                    currentTitle: self.title,
+                    currentAuthor: self.author,
+                    titleCandidates: candidates.titles,
+                    authorCandidates: candidates.authors
+                )
+                self.title = resolution.title
+                self.author = resolution.author
+                self.showSelectionUI = resolution.shouldShowSelection
             }
         }
     }
 
-    private func showMetadataSelection(ifCurrent importToken: ImportToken?) {
-        DispatchQueue.main.async {
-            guard importToken.map(self.isCurrentImport) ?? true else { return }
-            self.showSelectionUI = true
+    static func decodeMediaInfoGeneralTrack(from data: Data) -> [String: Any]? {
+        // Pro Zeichensatz erst den JSON-Parse prüfen. MacRoman/Latin-1 können
+        // fast jede Bytefolge als Text darstellen und dürfen einen später
+        // tatsächlich passenden UTF-16-Versuch nicht vorzeitig verdrängen.
+        for encoding in [String.Encoding.utf8, .utf16, .macOSRoman, .isoLatin1] {
+            guard let text = String(data: data, encoding: encoding),
+                  let start = text.firstIndex(of: "{"),
+                  let end = text.lastIndex(of: "}"),
+                  start <= end,
+                  let jsonData = String(text[start...end]).data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: jsonData),
+                  let root = object as? [String: Any],
+                  let media = root["media"] as? [String: Any],
+                  let tracks = media["track"] as? [[String: Any]],
+                  let general = tracks.first(where: { $0["@type"] as? String == "General" }) else {
+                continue
+            }
+            return general
         }
+        return nil
+    }
+
+    private static func metadataCandidates(
+        from general: [String: Any]
+    ) -> (titles: [TagCandidate], authors: [TagCandidate]) {
+        func value(for key: String) -> String? {
+            general[key] as? String ?? (general[key] as? [String])?.first
+        }
+        var titles: [TagCandidate] = []
+        var authors: [TagCandidate] = []
+        if let album = value(for: "Album") {
+            titles.append(TagCandidate(type: "MediaInfo", key: "Album", value: album))
+        }
+        if let title = value(for: "Title") {
+            titles.append(TagCandidate(type: "MediaInfo", key: "Title", value: title))
+        }
+        if let performer = value(for: "Performer") {
+            authors.append(TagCandidate(type: "MediaInfo", key: "Performer", value: performer))
+        }
+        if let albumPerformer = value(for: "Album_Performer") {
+            authors.append(TagCandidate(type: "MediaInfo", key: "Album_Performer", value: albumPerformer))
+        }
+        return (titles, authors)
     }
 
     static func resolveMetadata(
@@ -535,7 +700,11 @@ public class ConversionSession: ObservableObject, Identifiable {
             guard current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 return (current, false)
             }
-            let uniqueValues = Array(Set(candidates.map(\.value))).sorted()
+            let uniqueValues = Array(Set(
+                candidates
+                    .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+            )).sorted()
             return uniqueValues.count == 1 ? (uniqueValues[0], false) : (current, true)
         }
 
@@ -569,14 +738,16 @@ public class ConversionSession: ObservableObject, Identifiable {
         }
         var foundAudio: [AudioFile] = []; var foundImages: [URL] = []
         for case let fileURL as URL in enumerator {
+            if currentPreparationContext()?.isCancelled == true { break }
             let ext = fileURL.pathExtension.lowercased()
             if ["mp3", "m4a", "wav", "flac", "m4b", "mp4"].contains(ext) {
-                if ["m4b", "mp4"].contains(ext), let chapters = AudioFile.extractChapters(from: fileURL) { foundAudio.append(contentsOf: chapters) }
+                if ["m4b", "mp4"].contains(ext), let chapters = extractChapters(from: fileURL) { foundAudio.append(contentsOf: chapters) }
                 else { foundAudio.append(AudioFile(url: fileURL)) }
             } else if ["jpg", "jpeg", "png"].contains(ext) { foundImages.append(fileURL) }
         }
         var embedded: Data? = nil
         for audioFile in foundAudio {
+            if currentPreparationContext()?.isCancelled == true { break }
             if let artworkData = AudioFile.extractEmbeddedArtwork(from: audioFile.url) { embedded = artworkData; break }
         }
         return ScannedFolder(sourceURL: url, audioFiles: foundAudio, imageURLs: foundImages, embeddedArtwork: embedded)
@@ -587,13 +758,15 @@ public class ConversionSession: ObservableObject, Identifiable {
     public func applyScannedFolder(_ scanned: ScannedFolder, importToken: ImportToken? = nil) {
         if let importToken, !isCurrentImport(importToken) { return }
         let expectedCoverRevision = importToken?.coverRevision ?? coverRevision
-        if coverRevision == expectedCoverRevision, coverImage == nil, coverPath == nil,
+        if coverRevision == expectedCoverRevision, !isCoverSuppressed,
+           coverImage == nil, coverPath == nil,
            let artworkData = scanned.embeddedArtwork {
             coverImage = NSImage(data: artworkData)
             coverPath = nil
             // Rohdaten merken (siehe processIncomingFiles): nur so landet ein
             // eingebettetes Cover ohne separate Bilddatei auch im Output.
             embeddedCoverData = artworkData
+            isCoverSuppressed = false
         }
         // Cover-Suche nicht erneut (schon im Scan erledigt) — sonst liefe sie hier
         // auf dem Main-Thread über alle Dateien.
@@ -604,6 +777,7 @@ public class ConversionSession: ObservableObject, Identifiable {
             sourceFolderForCLI: scanned.sourceURL
         )
         if coverRevision == expectedCoverRevision,
+           !isCoverSuppressed,
            !scanned.imageURLs.isEmpty,
            let url = findLargestImage(from: scanned.imageURLs) {
             selectCover(url: url)
@@ -627,14 +801,16 @@ public class ConversionSession: ObservableObject, Identifiable {
         return largestURL
     }
 
-    public func selectCover(url: URL) {
-        if let image = NSImage(contentsOf: url) {
-            coverRevision &+= 1
-            invalidateArtworkWork()
-            self.coverImage = resizeImage(image, maxDimension: 2000); self.coverPath = url.path
-            // Gewählte Datei hat Vorrang vor eingebettetem Artwork.
-            self.embeddedCoverData = nil
-        }
+    @discardableResult
+    public func selectCover(url: URL) -> Bool {
+        guard let image = NSImage(contentsOf: url) else { return false }
+        coverRevision &+= 1
+        invalidateArtworkWork()
+        self.coverImage = resizeImage(image, maxDimension: 2000); self.coverPath = url.path
+        // Gewählte Datei hat Vorrang vor eingebettetem Artwork.
+        self.embeddedCoverData = nil
+        self.isCoverSuppressed = false
+        return true
     }
 
     public func removeCover() {
@@ -643,6 +819,7 @@ public class ConversionSession: ObservableObject, Identifiable {
         coverImage = nil
         coverPath = nil
         embeddedCoverData = nil
+        isCoverSuppressed = true
     }
 
     private func resizeImage(_ image: NSImage, maxDimension: CGFloat) -> NSImage {

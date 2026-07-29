@@ -12,7 +12,10 @@ public struct CLIInvocation {
         folderURL: URL,
         settings: AudioSettings,
         title: String,
-        author: String
+        author: String,
+        genre: String = "Hörbuch",
+        coverPath: String? = nil,
+        suppressCover: Bool = false
     ) {
         self.executable = executable
         self.folderURL = folderURL
@@ -32,6 +35,14 @@ public struct CLIInvocation {
         }
         if !author.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             arguments += ["--author", author]
+        }
+        if !genre.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            arguments += ["--genre", genre]
+        }
+        if suppressCover {
+            arguments.append("--no-cover")
+        } else if let coverPath {
+            arguments += ["--cover", coverPath]
         }
         self.arguments = arguments
     }

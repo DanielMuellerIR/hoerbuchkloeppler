@@ -2,6 +2,86 @@ import Foundation
 import AppKit
 import ArgumentParser
 import HoerbuchkloepplerCore
+import Darwin
+
+private func writeStandardError(_ message: String) {
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+}
+
+private final class InterruptState {
+    private enum Phase {
+        case preparing
+        case converting
+        case finished
+    }
+
+    private let lock = NSLock()
+    private var received = false
+    private var phase: Phase = .preparing
+
+    var shouldCancelPreparation: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return phase == .preparing
+    }
+
+    /// Akzeptiert das Signal nur, solange noch Arbeit abgebrochen werden kann.
+    /// Ein vom Core nach dem letzten atomaren Commit abgelehnter Cancel darf
+    /// keinen falschen Exit 130 mehr erzeugen.
+    func recordSignal(
+        conversionOutcome: ConversionCancellationOutcome,
+        preparationCancelled: Bool
+    ) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard phase != .finished else { return false }
+        switch conversionOutcome {
+        case .cancelled:
+            received = true
+        case .noActiveConversion:
+            // In der Vorbereitung oder in der winzigen Lücke direkt vor dem
+            // synchronen Anlegen des Conversion-Contexts bleibt das Signal offen.
+            received = true
+        case .rejected:
+            if phase == .preparing, preparationCancelled { received = true }
+        }
+        return received
+    }
+
+    func beginConversion() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !received else { return false }
+        phase = .converting
+        return true
+    }
+
+    func finishConversion() {
+        lock.lock()
+        phase = .finished
+        lock.unlock()
+    }
+
+    var wasReceived: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return received
+    }
+}
+
+private func readLine(unlessInterrupted state: InterruptState) -> String? {
+    var descriptor = pollfd(
+        fd: FileHandle.standardInput.fileDescriptor,
+        events: Int16(POLLIN),
+        revents: 0
+    )
+    while !state.wasReceived {
+        let result = Darwin.poll(&descriptor, 1, 100)
+        if result > 0 { return Swift.readLine() }
+        if result < 0, errno != EINTR { return nil }
+    }
+    return nil
+}
 
 /// Hält den Pacman-Statusblock am unteren Rand des Terminals und trennt ihn
 /// sauber von den Logzeilen.
@@ -20,10 +100,17 @@ import HoerbuchkloepplerCore
 final class TerminalRenderer {
     /// Zeilenzahl des aktuell sichtbaren Statusblocks; 0 = kein Block auf dem Schirm.
     private var blockLines = 0
+    private var lastPlainStatus = ""
+    private let usesANSI: Bool
+
+    init(outputFileDescriptor: Int32 = FileHandle.standardOutput.fileDescriptor) {
+        usesANSI = isatty(outputFileDescriptor) != 0
+    }
 
     /// Entfernt den Statusblock vom Bildschirm. Danach steht der Cursor wieder
     /// dort, wo der Block begann.
     func clearBlock() {
+        guard usesANSI else { return }
         guard blockLines > 0 else { return }
         // Je Blockzeile: eine Zeile hoch (1A) und diese löschen (2K); zum Schluss
         // an den Zeilenanfang (G).
@@ -33,12 +120,24 @@ final class TerminalRenderer {
 
     /// Schreibt eine dauerhafte Logzeile oberhalb des Statusblocks.
     func emitLog(_ line: String) {
-        clearBlock()
+        if usesANSI { clearBlock() }
         print(line)
     }
 
     /// Zeichnet den Statusblock neu. `text` muss jede Zeile mit "\n" abschließen.
     func drawBlock(_ text: String) {
+        guard usesANSI else {
+            // In Pipes/CI weder Escape-Sequenzen noch 10 Statusblöcke pro
+            // Sekunde ausgeben. Nur echte Statuswechsel bleiben als Klartext.
+            let status = text.split(separator: "\n", maxSplits: 1)
+                .first
+                .map(String.init) ?? ""
+            if !status.isEmpty, status != lastPlainStatus {
+                print(status)
+                lastPlainStatus = status
+            }
+            return
+        }
         clearBlock()
         print(text, terminator: "")
         blockLines = text.filter { $0 == "\n" }.count
@@ -73,6 +172,15 @@ struct KloepplerCLI: ParsableCommand {
     @Option(name: .long, help: "Setzt den Autor explizit (überschreibt die aus den Tags erkannten Kandidaten, z.B. wenn dort Übersetzer mit drinstehen).")
     var author: String?
 
+    @Option(name: .long, help: "Setzt das Genre explizit.")
+    var genre: String?
+
+    @Option(name: .long, help: "Verwendet die angegebene Bilddatei als Cover.")
+    var cover: String?
+
+    @Flag(name: .long, help: "Erzeugt das Hörbuch ohne Cover, auch wenn die Quelle eines enthält.")
+    var noCover: Bool = false
+
     @Flag(name: .long, help: "Kodiert das Hörbuch in Mono.")
     var mono: Bool = false
     
@@ -94,11 +202,20 @@ struct KloepplerCLI: ParsableCommand {
         if let mode = mode, !["parallel", "standard"].contains(mode.lowercased()) {
             throw ValidationError("Ungültiger --mode '\(mode)'. Erlaubt: 'parallel' oder 'standard'.")
         }
-        if let bitrate = bitrate, bitrate.range(of: "^[0-9]+k?$", options: .regularExpression) == nil {
-            throw ValidationError("Ungültige --bitrate '\(bitrate)'. Format: Zahl mit optionalem 'k', z.B. '48k' oder '64000'.")
+        if let bitrate = bitrate, !AudioSettings.isValidBitrate(bitrate) {
+            throw ValidationError("Ungültige --bitrate '\(bitrate)'. Erwartet wird eine positive Zahl mit optionalem 'k', z.B. '48k' oder '64000'.")
         }
         if let samplerate = samplerate, !(8000...192000).contains(samplerate) {
             throw ValidationError("Ungültige --samplerate \(samplerate). Erlaubt: 8000–192000 Hz (z.B. 32000, 44100, 48000).")
+        }
+        if let maxDuration, maxDuration < 0 {
+            throw ValidationError("Ungültige --max-duration \(maxDuration). Erlaubt: 0 (unbegrenzt) oder eine positive Stundenzahl.")
+        }
+        if mono && stereo {
+            throw ValidationError("--mono und --stereo schließen sich gegenseitig aus.")
+        }
+        if cover != nil && noCover {
+            throw ValidationError("--cover und --no-cover schließen sich gegenseitig aus.")
         }
     }
 
@@ -106,12 +223,14 @@ struct KloepplerCLI: ParsableCommand {
         let url = URL(fileURLWithPath: folderPath)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: folderPath, isDirectory: &isDir), isDir.boolValue else {
-            print("Fehler: Der Pfad \(folderPath) existiert nicht oder ist kein Ordner.")
+            writeStandardError("Fehler: Der Pfad \(folderPath) existiert nicht oder ist kein Ordner.")
             throw ExitCode.failure
         }
         
         FFmpegWrapper.cleanupOldTempDirectories()
-        let session = ConversionSession()
+        // CLI-Aufrufe sind reproduzierbar: nicht gesetzte Optionen verwenden die
+        // dokumentierten Defaults und hängen nicht von GUI-settings.json ab.
+        let session = ConversionSession(settings: AudioSettings())
 
         // Ab hier gehört das Terminal dem Renderer: Alle Session-Logs laufen über
         // ihn, damit sie nicht in die Pacman-Fortschrittsanzeige hineinschreiben.
@@ -119,33 +238,46 @@ struct KloepplerCLI: ParsableCommand {
         session.logSink = { renderer.emitLog($0) }
 
         // Setup SIGINT handler
-        let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        let interruptState = InterruptState()
+        let signalQueue = DispatchQueue(label: "de.hoerbuchkloeppler.sigint")
+        let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: signalQueue)
         sigintSource.setEventHandler {
-            // Läuft auf der Main-Queue, also mitten in der Redraw-Schleife: erst
-            // die Fortschrittsanzeige abräumen, damit die Meldung lesbar bleibt.
-            renderer.emitLog("🛑 Abbruchsignal (SIGINT) empfangen. Bereinige und beende...")
-            FFmpegWrapper.cancelConversion(session: session)
-            // Exit 130 = "durch SIGINT beendet" (128 + Signalnummer 2), Shell-Konvention.
-            // NICHT 0: sonst würden aufrufende Skripte/AI-Agenten den Abbruch als Erfolg
-            // werten, obwohl keine fertige Datei erzeugt wurde.
-            Darwin.exit(130)
+            let preparationCancelled = interruptState.shouldCancelPreparation
+                ? session.cancelPreparation()
+                : false
+            let outcome = FFmpegWrapper.cancelConversion(session: session)
+            if interruptState.recordSignal(
+                conversionOutcome: outcome,
+                preparationCancelled: preparationCancelled
+            ) {
+                DispatchQueue.main.async {
+                    renderer.emitLog("🛑 Abbruchsignal (SIGINT) empfangen. Bereinige und beende...")
+                }
+            }
         }
         signal(SIGINT, SIG_IGN)
         sigintSource.resume()
-        
+        defer { sigintSource.cancel() }
+
+        session.beginPreparation()
+        if interruptState.wasReceived {
+            session.cancelPreparation()
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
+            throw ExitCode(130)
+        }
         session.addFolder(url)
         
-        // Wait for metadata fetching to complete
-        session.metadataGroup.wait()
-        // Der Titel/Autor wird vom Metadaten-Fetch per DispatchQueue.main.async
-        // gesetzt. metadataGroup.wait() kehrt zurück, sobald der Hintergrund-Task
-        // fertig ist — der main-Block, der den Titel setzt, ist dann zwar in der
-        // Queue, aber noch nicht ausgeführt. Kurz den RunLoop drehen, damit der
-        // Titel bereitsteht, BEVOR der Ausgabe-Dateiname daraus gebildet wird.
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.2))
+        // Nicht die Main-Queue mit metadataGroup.wait() blockieren: Die Group ist
+        // erst fertig, nachdem der sichtbare Titel/Autor auf Main übernommen ist.
+        var metadataFinished = false
+        session.metadataGroup.notify(queue: .main) { metadataFinished = true }
+        while !metadataFinished && !interruptState.wasReceived {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+        }
+        if interruptState.wasReceived { throw ExitCode(130) }
 
         guard !session.audioFiles.isEmpty else {
-            print("Fehler: Keine gültigen Audiodateien im Ordner gefunden.")
+            writeStandardError("Fehler: Keine gültigen Audiodateien im Ordner gefunden.")
             throw ExitCode.failure
         }
         
@@ -165,6 +297,17 @@ struct KloepplerCLI: ParsableCommand {
         // der Metadaten-Fetch die Werte wieder überschreiben.
         if let title = title { session.title = title }
         if let author = author { session.author = author }
+        if let genre = genre { session.genre = genre }
+        if noCover {
+            session.removeCover()
+        } else if let cover {
+            let coverURL = URL(fileURLWithPath: cover)
+            guard session.selectCover(url: coverURL) else {
+                writeStandardError("❌ Cover-Datei ist nicht als Bild lesbar: \(cover)")
+                throw ExitCode.failure
+            }
+        }
+        if interruptState.wasReceived { throw ExitCode(130) }
 
         let rawTitle = session.title.isEmpty ? url.lastPathComponent : session.title
         let finalTitle = KloepplerCLI.sanitizeFilename(rawTitle)
@@ -178,10 +321,18 @@ struct KloepplerCLI: ParsableCommand {
             } else if output.lowercased().hasSuffix(".m4b") {
                 // Voller Zielpfad: Eltern-Ordner muss existieren (bei Bedarf anlegen)
                 let target = URL(fileURLWithPath: output)
-                try? FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+                do {
+                    try FileManager.default.createDirectory(
+                        at: target.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                } catch {
+                    writeStandardError("❌ Ausgabeordner konnte nicht angelegt werden: \(error.localizedDescription)")
+                    throw ExitCode.failure
+                }
                 outputFile = target
             } else {
-                FileHandle.standardError.write(Data("❌ --output muss ein existierender Ordner oder ein .m4b-Pfad sein: \(output)\n".utf8))
+                writeStandardError("❌ --output muss ein existierender Ordner oder ein .m4b-Pfad sein: \(output)")
                 throw ExitCode.failure
             }
         } else {
@@ -205,21 +356,30 @@ struct KloepplerCLI: ParsableCommand {
             } else if isatty(FileHandle.standardInput.fileDescriptor) == 0 {
                 // Nicht-interaktiv (Pipe/CI/AI-Agent): nicht blockierend nachfragen,
                 // sondern klar mit Fehlercode abbrechen und auf --force hinweisen.
-                FileHandle.standardError.write(Data("❌ Zieldatei(en) existieren bereits: \(names). Zum Überschreiben --force verwenden.\n".utf8))
+                writeStandardError("❌ Zieldatei(en) existieren bereits: \(names). Zum Überschreiben --force verwenden.")
                 throw ExitCode.failure
             } else {
                 print("⚠️ Diese Zieldatei(en) existieren bereits: \(names)")
                 print("Möchten Sie die Dateien überschreiben? (j/N): ", terminator: "")
-                if let input = readLine(), input.lowercased() == "j" || input.lowercased() == "y" {
+                if let input = readLine(unlessInterrupted: interruptState),
+                   input.lowercased() == "j" || input.lowercased() == "y" {
                     print("Datei wird überschrieben...")
+                } else if interruptState.wasReceived {
+                    throw ExitCode(130)
                 } else {
                     print("Vorgang abgebrochen.")
                     throw ExitCode(2)
                 }
             }
         }
-        
+
+        guard interruptState.beginConversion() else { throw ExitCode(130) }
         FFmpegWrapper.convert(session: session, plan: conversionPlan)
+        // Ein Signal kann genau zwischen Phasenwechsel und dem synchronen
+        // Erzeugen des Contexts eintreffen. Dann jetzt den neuen Context stoppen.
+        if interruptState.wasReceived {
+            _ = FFmpegWrapper.cancelConversion(session: session)
+        }
 
         // Print ASCII Art Cover if verbose
         if verbose, let coverPath = session.coverPath, let img = NSImage(contentsOfFile: coverPath) {
@@ -259,13 +419,25 @@ struct KloepplerCLI: ParsableCommand {
         // Fortschrittsanzeige abräumen — die Schlussmeldung soll allein stehen.
         renderer.clearBlock()
 
+        // Exit 130 erst NACH dem definitiven Worker-Abschluss. So sind Prozesse,
+        // Temp-Verzeichnisse und große .partial-Dateien sicher bereinigt.
+        let wasInterrupted = interruptState.wasReceived
+        interruptState.finishConversion()
+        if wasInterrupted { throw ExitCode(130) }
+
         // Ehrlicher Abschluss: nur bei echtem Erfolg Exit 0, sonst Fehler-Exit
         // (wichtig für Skripte/AI-Agenten, die den Exit-Code auswerten).
         if session.lastConversionSucceeded == true {
             print(conversionPlan.outputURLs.count == 1 ? "🎉 Vorgang beendet. Datei:" : "🎉 Vorgang beendet. Dateien:")
             conversionPlan.outputURLs.forEach { print("  \($0.path)") }
         } else {
-            FileHandle.standardError.write(Data("❌ Vorgang fehlgeschlagen. Es wurde keine gültige Datei erzeugt.\n".utf8))
+            let completedOutputs = session.completedOutputURLs
+            if completedOutputs.isEmpty {
+                writeStandardError("❌ Vorgang fehlgeschlagen. Es wurde keine gültige Datei erzeugt.")
+            } else {
+                writeStandardError("❌ Vorgang unvollständig. Erfolgreich erzeugte Datei(en):")
+                completedOutputs.forEach { writeStandardError("  \($0.path)") }
+            }
             throw ExitCode.failure
         }
     }

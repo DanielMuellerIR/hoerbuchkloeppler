@@ -56,6 +56,20 @@ struct OutputSafetyTests {
         #expect(throws: (any Error).self) { try FFmpegWrapper.commitStagedOutput(staged, to: final) }
         #expect(try String(contentsOf: final, encoding: .utf8) == "behalten")
     }
+
+    @Test("Fortschritt mehrerer Split-Gruppen bleibt monoton")
+    func splitProgressIsMonotonic() {
+        let values = [
+            FFmpegWrapper.mappedProgress(base: 0, weight: 0.5, phaseProgress: 0),
+            FFmpegWrapper.mappedProgress(base: 0, weight: 0.5, phaseProgress: 0.5),
+            FFmpegWrapper.mappedProgress(base: 0, weight: 0.5, phaseProgress: 1),
+            FFmpegWrapper.mappedProgress(base: 0.5, weight: 0.5, phaseProgress: 0),
+            FFmpegWrapper.mappedProgress(base: 0.5, weight: 0.5, phaseProgress: 1)
+        ]
+
+        #expect(zip(values, values.dropFirst()).allSatisfy { $0 <= $1 })
+        #expect(values.last == 1)
+    }
 }
 
 @Suite("Review-Fixes – Tool-Auflösung")
@@ -130,6 +144,89 @@ struct CancellationIsolationTests {
         session.endConversion(first.id)
         #expect(session.isCurrentConversion(second.id))
     }
+
+    @Test("Abbruch entfernt auch die laufbezogene Partial-Datei")
+    func cancellationRemovesStagedOutput() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staged = directory.appendingPathComponent(".Buch.partial-test.m4b")
+        try Data("unvollständig".utf8).write(to: staged)
+        let context = ConversionContext()
+        context.registerStagedOutput(staged)
+
+        #expect(context.cancel())
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+    }
+
+    @Test("Cancel und Commit haben eine eindeutige Reihenfolge")
+    func commitAndCancellationAreSerialized() throws {
+        let cancelledContext = ConversionContext()
+        #expect(cancelledContext.cancel())
+        var mutationRan = false
+        let committedAfterCancel = try cancelledContext.performCommit(isLastOutput: true) {
+            mutationRan = true
+        }
+        #expect(!committedAfterCancel)
+        #expect(!mutationRan)
+
+        let finishedContext = ConversionContext()
+        let committedBeforeCancel = try finishedContext.performCommit(isLastOutput: true) {
+            mutationRan = true
+        }
+        #expect(committedBeforeCancel)
+        #expect(!finishedContext.cancel())
+    }
+
+    @Test("Temporäres Verzeichnis erkennt den lebenden Besitzer")
+    func temporaryDirectoryRecognizesLiveOwner() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HB_Temp_Test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try FFmpegWrapper.createOwnedTempDirectory(directory)
+
+        #expect(FFmpegWrapper.temporaryDirectoryHasLiveOwner(directory))
+    }
+}
+
+@Suite("Review-Fixes – Kapitelvalidierung")
+struct ChapterValidationTests {
+    @Test("Nur lückenlose Kapitel über die vollständige Dateidauer sind gültig")
+    func validatesChapterRanges() {
+        let valid = [
+            AudioFile.FFChapter(start: 0, end: 10, title: "Eins"),
+            AudioFile.FFChapter(start: 10, end: 20, title: "Zwei")
+        ]
+        #expect(AudioFile.chaptersAreValid(valid, totalDuration: 20))
+        #expect(!AudioFile.chaptersAreValid([
+            AudioFile.FFChapter(start: 0, end: 0, title: "Leer")
+        ], totalDuration: 20))
+        #expect(!AudioFile.chaptersAreValid([
+            AudioFile.FFChapter(start: 0, end: 10, title: "Eins"),
+            AudioFile.FFChapter(start: 9, end: 20, title: "Überlappt")
+        ], totalDuration: 20))
+        #expect(!AudioFile.chaptersAreValid([
+            AudioFile.FFChapter(start: .nan, end: 10, title: "Ungültig")
+        ], totalDuration: 20))
+        #expect(!AudioFile.chaptersAreValid([
+            AudioFile.FFChapter(start: 1, end: 10, title: "Vorlauf fehlt"),
+            AudioFile.FFChapter(start: 10, end: 20, title: "Zwei")
+        ], totalDuration: 20))
+        #expect(!AudioFile.chaptersAreValid([
+            AudioFile.FFChapter(start: 0, end: 9, title: "Eins"),
+            AudioFile.FFChapter(start: 10, end: 20, title: "Lücke")
+        ], totalDuration: 20))
+        #expect(!AudioFile.chaptersAreValid(valid, totalDuration: 25))
+        #expect(!AudioFile.chaptersAreValid(valid, totalDuration: 19))
+        #expect(!AudioFile.chaptersAreValid([
+            AudioFile.FFChapter(start: 0, end: 20.1, title: "Eins"),
+            AudioFile.FFChapter(start: 20.1, end: 20.2, title: "Nach Dateiende")
+        ], totalDuration: 20))
+        #expect(!AudioFile.chaptersAreValid([
+            AudioFile.FFChapter(start: 0, end: 20.1, title: "Eins"),
+            AudioFile.FFChapter(start: 19.9, end: 20.2, title: "Würde beim Runden invertiert")
+        ], totalDuration: 20))
+    }
 }
 
 @Suite("Review-Fixes – Metadaten und CLI-Handoff")
@@ -197,6 +294,24 @@ struct MetadataAndCLITests {
         #expect(resolution.shouldShowSelection)
     }
 
+    @Test("Metadatenwerte werden vor der Entscheidung bereinigt")
+    func metadataValuesAreNormalized() {
+        let resolution = ConversionSession.resolveMetadata(
+            currentTitle: "",
+            currentAuthor: "",
+            titleCandidates: [
+                TagCandidate(type: "Tag", key: "Album", value: " Buch "),
+                TagCandidate(type: "Tag", key: "Title", value: "Buch")
+            ],
+            authorCandidates: [
+                TagCandidate(type: "Tag", key: "Artist", value: "   ")
+            ]
+        )
+        #expect(resolution.title == "Buch")
+        #expect(resolution.author.isEmpty)
+        #expect(resolution.shouldShowSelection)
+    }
+
     @Test("Je ein eindeutiger Tag wird automatisch übernommen")
     func uniqueMetadataIsFilled() {
         let resolution = ConversionSession.resolveMetadata(
@@ -223,15 +338,205 @@ struct MetadataAndCLITests {
             folderURL: URL(fileURLWithPath: "/tmp/Buch $HOME's"),
             settings: settings,
             title: "Titel `touch /tmp/nope`",
-            author: "O'Brien"
+            author: "O'Brien",
+            genre: "Roman & Lesung",
+            coverPath: "/tmp/Cover Bild.jpg"
         )
 
         #expect(invocation.arguments.contains("--max-duration"))
         #expect(invocation.arguments.contains("--title"))
         #expect(invocation.arguments.contains("--author"))
+        #expect(invocation.arguments.contains("--genre"))
+        #expect(invocation.arguments.contains("--cover"))
         #expect(invocation.arguments.contains("--stereo"))
         #expect(invocation.shellCommand.contains("'$HOME'" ) == false)
         #expect(invocation.shellCommand.contains("'\\''"))
         #expect(invocation.shellCommand.contains("'Titel `touch /tmp/nope`'"))
+        #expect(invocation.shellCommand.contains("'/tmp/Cover Bild.jpg'"))
+    }
+
+    @Test("CLI-Handoff kann ein automatisch gefundenes Cover bewusst unterdrücken")
+    func cliInvocationCanSuppressCover() {
+        let invocation = CLIInvocation(
+            executable: "kloeppler",
+            folderURL: URL(fileURLWithPath: "/tmp/Buch"),
+            settings: AudioSettings(),
+            title: "Buch",
+            author: "Autor",
+            suppressCover: true
+        )
+
+        #expect(invocation.arguments.contains("--no-cover"))
+        #expect(!invocation.arguments.contains("--cover"))
+    }
+
+    @Test("UTF-16-MediaInfo-JSON wird erst nach erfolgreichem JSON-Parse akzeptiert")
+    func utf16MediaInfoJSONIsDecoded() throws {
+        let json = """
+        {"media":{"track":[{"@type":"General","Album":"Buch","Performer":"Autor"}]}}
+        """
+        let data = try #require(json.data(using: .utf16))
+        let general = try #require(ConversionSession.decodeMediaInfoGeneralTrack(from: data))
+
+        #expect(general["Album"] as? String == "Buch")
+        #expect(general["Performer"] as? String == "Autor")
+    }
+
+    @Test("Rohe UTF-16-MediaInfo-Ausgabe wird nicht als MacRoman-Zeichensalat akzeptiert")
+    func utf16MediaInfoTextIsDecoded() throws {
+        let text = "Titel: Hörbuch"
+        let data = try #require(text.data(using: .utf16))
+
+        #expect(ConversionSession.decodeMediaInfoText(from: data) == text)
+    }
+}
+
+@Suite("Review-Fixes – Import-Lebenszyklus")
+struct ImportLifecycleTests {
+    @Test("Alle löschen entwertet noch laufende Drop-Ergebnisse")
+    func clearingFilesInvalidatesPendingImport() {
+        let session = ConversionSession(settings: AudioSettings())
+        let token = session.beginImport(expectedItemCount: 1)
+        let source = URL(fileURLWithPath: "/tmp/aktuell")
+        let file = AudioFile(
+            url: source.appendingPathComponent("01.mp3"),
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Kapitel"
+        )
+        session.processIncomingFiles([file], skipCoverExtraction: true, importToken: token)
+        #expect(session.isImporting)
+
+        session.audioFiles.removeAll()
+        session.applyScannedFolder(.init(
+            sourceURL: URL(fileURLWithPath: "/tmp/veraltet"),
+            audioFiles: [file],
+            imageURLs: [],
+            embeddedArtwork: nil
+        ), importToken: token)
+        session.finishImport(token)
+
+        #expect(session.audioFiles.isEmpty)
+        #expect(!session.isImporting)
+    }
+
+    @Test("Mehrteiliger Drop bleibt bis zum letzten Provider im Importzustand")
+    func pendingImportCountsAllProviders() {
+        let session = ConversionSession(settings: AudioSettings())
+        let token = session.beginImport(expectedItemCount: 2)
+
+        session.finishImport(token)
+        #expect(session.isImporting)
+        session.finishImport(token)
+        #expect(!session.isImporting)
+    }
+
+    @Test("Leerer Provider entwertet gültigen Teil eines Mehrfach-Drops nicht")
+    func emptyProviderDoesNotInvalidateDrop() {
+        let session = ConversionSession(settings: AudioSettings())
+        let token = session.beginImport(expectedItemCount: 2)
+        session.processIncomingFiles([], skipCoverExtraction: true, importToken: token)
+        session.finishImport(token)
+
+        let file = AudioFile(
+            url: URL(fileURLWithPath: "/tmp/gueltig.mp3"),
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Gültig"
+        )
+        session.processIncomingFiles([file], skipCoverExtraction: true, importToken: token)
+        session.finishImport(token)
+
+        #expect(session.audioFiles.map(\.id) == [file.id])
+    }
+
+    @Test("Bewusst entferntes Cover wird nicht automatisch wieder eingesetzt")
+    func suppressedCoverStaysRemoved() {
+        let session = ConversionSession(settings: AudioSettings())
+        session.removeCover()
+        session.applyScannedFolder(.init(
+            sourceURL: URL(fileURLWithPath: "/tmp/Buch"),
+            audioFiles: [],
+            imageURLs: [URL(fileURLWithPath: "/tmp/folder.jpg")],
+            embeddedArtwork: Data("kein echtes Bild".utf8)
+        ))
+
+        #expect(session.coverImage == nil)
+        #expect(session.coverPath == nil)
+        #expect(session.embeddedCoverData == nil)
+        #expect(session.isCoverSuppressed)
+    }
+}
+
+@Suite("Review-Fixes – Einstellungen")
+struct SettingsPersistenceTests {
+    @Test("Ungültige gespeicherte Werte fallen feldweise auf Defaults zurück")
+    func invalidSettingsAreNormalized() {
+        let invalid = AudioSettings(
+            isMono: false,
+            bitrate: "kaputt",
+            sampleRate: 0,
+            maxDurationHours: -4,
+            useParallelEncoding: false,
+            isVerbose: true
+        )
+
+        let normalized = invalid.normalized()
+
+        #expect(!normalized.isMono)
+        #expect(normalized.bitrate == "48k")
+        #expect(normalized.sampleRate == 32_000)
+        #expect(normalized.maxDurationHours == nil)
+        #expect(!normalized.useParallelEncoding)
+        #expect(normalized.isVerbose)
+    }
+
+    @Test("Laden nutzt AudioSettings als einzige Default-Quelle")
+    func missingSettingsUseDefaults() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let manager = SettingsManager(settingsURL: directory.appendingPathComponent("settings.json"))
+
+        #expect(manager.loadSettings() == AudioSettings())
+    }
+
+    @Test("Ein fehlendes oder falsch typisiertes JSON-Feld verwirft keine gültigen Nachbarn")
+    func malformedJSONFieldFallsBackIndividually() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settingsURL = directory.appendingPathComponent("settings.json")
+        let json = """
+        {
+          "isMono": false,
+          "bitrate": "64k",
+          "sampleRate": "falsch",
+          "maxDurationHours": 12,
+          "useParallelEncoding": false
+        }
+        """
+        try Data(json.utf8).write(to: settingsURL)
+        let settings = SettingsManager(settingsURL: settingsURL).loadSettings()
+
+        #expect(!settings.isMono)
+        #expect(settings.bitrate == "64k")
+        #expect(settings.sampleRate == 32_000)
+        #expect(settings.maxDurationHours == 12)
+        #expect(settings.useParallelEncoding)
+        #expect(!settings.isVerbose)
+    }
+
+    @Test("Schreibfehler werden an den Aufrufer gemeldet")
+    func saveErrorsAreReported() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pathBlockingDirectory = directory.appendingPathComponent("keine-directory")
+        try Data("Datei".utf8).write(to: pathBlockingDirectory)
+        let manager = SettingsManager(
+            settingsURL: pathBlockingDirectory.appendingPathComponent("settings.json")
+        )
+
+        #expect(throws: (any Error).self) {
+            try manager.saveSettings(AudioSettings())
+        }
     }
 }
