@@ -89,16 +89,22 @@ APP="./${APP_NAME}.app"
 [ -d "$APP" ] || { echo "✗ Build-Ergebnis fehlt: $APP" >&2; exit 1; }
 
 # ── 2. Mit Developer ID + Hardened Runtime signieren (innen→außen) ───────────
-log "Signiere Bundle mit Developer ID + Hardened Runtime (ffmpeg/mediainfo → Framework → App)…"
+log "Signiere Bundle mit Developer ID + Hardened Runtime (eingebettete Programme → App)…"
 ./sign-bundle.sh "$APP" "$SIGN_IDENTITY"
 
 # ── 3. Notarisieren (optional): als ZIP hochladen, --wait blockt bis fertig ──
 if [ "$NOTARIZE" -eq 1 ]; then
-  TMP="$(mktemp -d)"; ZIP="$TMP/${APP_NAME}.zip"
   log "Notarisiere via Profil '$NOTARY_PROFILE' (wartet auf Apple, ~1–10 Min)…"
-  ditto -c -k --keepParent "$APP" "$ZIP"
-  xcrun notarytool submit "$ZIP" --keychain-profile "$NOTARY_PROFILE" --wait
-  rm -rf "$TMP"
+  notarize_app() (
+    set -euo pipefail
+    local temp_dir zip
+    temp_dir="$(mktemp -d)"
+    zip="$temp_dir/${APP_NAME}.zip"
+    trap 'rm -rf "$temp_dir"' EXIT
+    ditto -c -k --keepParent "$APP" "$zip"
+    xcrun notarytool submit "$zip" --keychain-profile "$NOTARY_PROFILE" --wait
+  )
+  notarize_app
   # Ticket ans Bundle heften → validiert auch OFFLINE (ohne Netz).
   log "Hefte Notarisierungs-Ticket ans Bundle…"
   xcrun stapler staple "$APP"
@@ -123,6 +129,21 @@ fi
 log "Prüfe Notarisierung und Gatekeeper-Freigabe des Build-Artefakts…"
 xcrun stapler validate "$APP"
 spctl --assess --type execute -vv "$APP" 2>&1 | sed 's/^/    /'
+
+# Vor jeder Mutation unter /Applications beide tatsächlich eingebetteten
+# Laufzeitprogramme starten. Ein bloß vorhandenes oder signiertes Binary kann
+# trotzdem durch eine falsche Architektur oder beschädigte Payload unbrauchbar
+# sein.
+RESOURCE_BIN="$APP/Contents/Resources/HoerbuchkloepplerCore_HoerbuchkloepplerCore.bundle/Contents/Resources/bin"
+APP_FFMPEG="$RESOURCE_BIN/ffmpeg"
+APP_MEDIAINFO="$RESOURCE_BIN/mediainfo"
+[ -x "$APP_FFMPEG" ] || { echo "✗ Gebündeltes ffmpeg fehlt oder ist nicht ausführbar." >&2; exit 1; }
+[ -x "$APP_MEDIAINFO" ] || { echo "✗ Gebündeltes mediainfo fehlt oder ist nicht ausführbar." >&2; exit 1; }
+"$APP_FFMPEG" -version >/dev/null 2>&1 \
+  || { echo "✗ Gebündeltes ffmpeg startet im Build-Artefakt nicht." >&2; exit 1; }
+"$APP_MEDIAINFO" --Version >/dev/null 2>&1 \
+  || { echo "✗ Gebündeltes mediainfo startet im Build-Artefakt nicht." >&2; exit 1; }
+log "Gebündelte Laufzeitprogramme im Build-Artefakt sind ausführbar."
 
 # Ausstieg für release.sh: notarisiert, aber /Applications bleibt unberührt.
 if [ "$INSTALL" -eq 0 ]; then
@@ -168,12 +189,12 @@ trap - EXIT
 codesign --verify --deep --strict "$DEST"
 # spctl bewertet zusätzlich die Gatekeeper-Freigabe der installierten Kopie.
 spctl --assess --type execute -vv "$DEST" 2>&1 | sed 's/^/    /'
-FFMPEG="$DEST/Contents/Resources/HoerbuchkloepplerCore_HoerbuchkloepplerCore.bundle/Contents/Resources/bin/ffmpeg"
-if [ -x "$FFMPEG" ]; then
-  "$FFMPEG" -version >/dev/null 2>&1 \
-    && log "Gebündeltes ffmpeg im installierten Bundle ist ausführbar." \
-    || { echo "✗ Gebündeltes ffmpeg startet nicht — Signatur/Architektur prüfen." >&2; exit 1; }
-fi
+DEST_RESOURCE_BIN="$DEST/Contents/Resources/HoerbuchkloepplerCore_HoerbuchkloepplerCore.bundle/Contents/Resources/bin"
+"$DEST_RESOURCE_BIN/ffmpeg" -version >/dev/null 2>&1 \
+  || { echo "✗ Gebündeltes ffmpeg startet nach der Installation nicht." >&2; exit 1; }
+"$DEST_RESOURCE_BIN/mediainfo" --Version >/dev/null 2>&1 \
+  || { echo "✗ Gebündeltes mediainfo startet nach der Installation nicht." >&2; exit 1; }
+log "Gebündelte Laufzeitprogramme im installierten Bundle sind ausführbar."
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/Contents/Info.plist" 2>/dev/null || echo "?")"
 echo

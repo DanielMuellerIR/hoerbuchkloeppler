@@ -12,8 +12,12 @@
 | `mediainfo` | Metadaten-/Bitraten-Auslesen | `…/Resources/bin/mediainfo` | ~14M |
 
 - Statische macOS-Binaries. **Nicht im Repo getrackt** — sie werden vom
-  Build-Skript vom offiziellen Upstream in `Resources/bin/` geladen. Grund: `ffmpeg`
+  Build-Skript vom jeweiligen Anbieter in `Resources/bin/` geladen. Grund: `ffmpeg`
   ist GPL (nicht mitverteilen, wenn vermeidbar) und ~76 MB würden das Repo aufblähen.
+- `build.sh` verwendet feste Artefakte (`ffmpeg` 8.1.2, `mediainfo` 26.05).
+  SHA-256-Prüfsummen für Archiv **und** entpacktes Programm werden vor dem Einbau
+  geprüft. Bei einem Upgrade müssen Version, URL und beide Prüfsummen gemeinsam
+  aktualisiert und mit einem realen Konvertierungslauf verifiziert werden.
 - Beim Build bindet das Package sie via `resources: [.copy("Resources/bin")]`
   (`Package.swift`) → sie landen im `Bundle.module`.
 - Laufzeit-Auflösung: `FFmpegWrapper.getBinaryURL` sucht erst im `Bundle.module`,

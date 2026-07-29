@@ -39,7 +39,6 @@ VERSION="$(cat VERSION)"
 DIST="build/dmg"
 DMG="$DIST/${APP_NAME}-${VERSION}.dmg"
 RW_DMG="$DIST/${APP_NAME}-${VERSION}-rw.dmg"
-MOUNT_DIR="/Volumes/$VOLNAME"
 
 FINDER_LAYOUT=1
 for arg in "$@"; do
@@ -53,11 +52,30 @@ done
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
 
+MOUNT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/hoerbuchkloeppler-release.XXXXXX")"
+# `hdiutil info` meldet macOS-Symlinks kanonisch (`/private/var/...` statt
+# `/var/...`). Derselbe kanonische Pfad ist deshalb Voraussetzung dafür, einen
+# aktiven Mount im Cleanup zuverlässig zu erkennen.
+MOUNT_ROOT="$(cd "$MOUNT_ROOT" && pwd -P)"
+MOUNT_DIR="$MOUNT_ROOT/volume"
+
+mount_is_active() {
+  hdiutil info | grep -Fq "$MOUNT_DIR"
+}
+
 cleanup() {
-  if hdiutil info | grep -Fq "$MOUNT_DIR"; then
+  # Der private Mountpoint gehört eindeutig diesem Lauf. Solange er noch aktiv
+  # ist, dürfen weder sein Verzeichnis noch das zugrunde liegende RW-DMG
+  # gelöscht werden.
+  if mount_is_active; then
     hdiutil detach "$MOUNT_DIR" -force >/dev/null 2>&1 || true
   fi
+  if mount_is_active; then
+    echo "Warnung: DMG blieb eingehängt; temporäre Daten bleiben erhalten: $MOUNT_ROOT" >&2
+    return
+  fi
   rm -f "$RW_DMG"
+  rm -rf "$MOUNT_ROOT"
 }
 trap cleanup EXIT
 
@@ -73,12 +91,13 @@ xcrun stapler validate "$APP"
 log "Packe DMG…"
 mkdir -p "$DIST"
 rm -f "$DMG" "$RW_DMG"
-[ -d "$MOUNT_DIR" ] && hdiutil detach "$MOUNT_DIR" -force >/dev/null 2>&1 || true
 
 SIZE=$(( $(du -sm "$APP" | cut -f1) + 60 ))
 hdiutil create -srcfolder "$APP" -volname "$VOLNAME" -fs HFS+ \
   -fsargs "-c c=64,a=16,e=16" -format UDRW -size "${SIZE}m" "$RW_DMG"
-hdiutil attach "$RW_DMG" -mountpoint "$MOUNT_DIR" -nobrowse -noverify -noautoopen
+mkdir -p "$MOUNT_DIR"
+hdiutil attach "$RW_DMG" -mountpoint "$MOUNT_DIR" -nobrowse -noverify \
+  -noautoopen >/dev/null
 
 ln -s /Applications "$MOUNT_DIR/Applications"
 # Die GPL-Hinweise reisen mit: Wer das Image auf einem anderen eigenen Mac
@@ -91,23 +110,23 @@ cp THIRD-PARTY-NOTICES.md "$MOUNT_DIR/THIRD-PARTY-NOTICES.md" 2>/dev/null || tru
 if [ "$FINDER_LAYOUT" -eq 1 ]; then
 osascript <<APPLESCRIPT
 tell application "Finder"
-  tell disk "$VOLNAME"
-    open
-    set current view of container window to icon view
-    set toolbar visible of container window to false
-    set statusbar visible of container window to false
-    set the bounds of container window to {200, 120, 800, 520}
-    set theViewOptions to the icon view options of container window
+  set targetFolder to POSIX file "$MOUNT_DIR" as alias
+  open targetFolder
+  set targetWindow to container window of targetFolder
+  set current view of targetWindow to icon view
+  set toolbar visible of targetWindow to false
+  set statusbar visible of targetWindow to false
+  set the bounds of targetWindow to {200, 120, 800, 520}
+  set theViewOptions to the icon view options of targetWindow
     set arrangement of theViewOptions to not arranged
     set icon size of theViewOptions to 128
-    set position of item "${APP_NAME}.app" of container window to {150, 190}
-    set position of item "Applications" of container window to {450, 190}
+    set position of item "${APP_NAME}.app" of targetFolder to {150, 190}
+    set position of item "Applications" of targetFolder to {450, 190}
     try
-      set position of item "THIRD-PARTY-NOTICES.md" of container window to {300, 340}
+      set position of item "THIRD-PARTY-NOTICES.md" of targetFolder to {300, 340}
     end try
-    update without registering applications
-    close
-  end tell
+  update targetFolder without registering applications
+  close targetWindow
 end tell
 APPLESCRIPT
 else
@@ -115,7 +134,10 @@ else
 fi
 
 sync; sleep 2                       # Race: DS_Store-Schreibpuffer vs. detach
-hdiutil detach "$MOUNT_DIR" -force
+if ! hdiutil detach "$MOUNT_DIR"; then
+  hdiutil detach "$MOUNT_DIR" -force
+fi
+mount_is_active && { echo "Fehler: privates DMG konnte nicht ausgehängt werden." >&2; exit 1; }
 
 hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG"
 rm -f "$RW_DMG"

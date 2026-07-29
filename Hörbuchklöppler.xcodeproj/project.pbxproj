@@ -8,7 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		34E0E2982FAA8E3100EBB737 /* HoerbuchkloepplerCore in Frameworks */ = {isa = PBXBuildFile; productRef = 34E0E2972FAA8E3100EBB737 /* HoerbuchkloepplerCore */; };
-		34E0E29A2FAA8E3100EBB737 /* kloeppler in Frameworks */ = {isa = PBXBuildFile; productRef = 34E0E2992FAA8E3100EBB737 /* kloeppler */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -42,7 +41,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				34E0E2982FAA8E3100EBB737 /* HoerbuchkloepplerCore in Frameworks */,
-				34E0E29A2FAA8E3100EBB737 /* kloeppler in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -78,7 +76,6 @@
 			name = "Hörbuchklöppler";
 			packageProductDependencies = (
 				34E0E2972FAA8E3100EBB737 /* HoerbuchkloepplerCore */,
-				34E0E2992FAA8E3100EBB737 /* kloeppler */,
 			);
 			productName = "Hörbuchklöppler";
 			productReference = EAEA1F3E2FA63B2600432AC0 /* Hörbuchklöppler.app */;
@@ -352,10 +349,6 @@
 		34E0E2972FAA8E3100EBB737 /* HoerbuchkloepplerCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = HoerbuchkloepplerCore;
-		};
-		34E0E2992FAA8E3100EBB737 /* kloeppler */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = kloeppler;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
