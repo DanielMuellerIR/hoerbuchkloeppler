@@ -10,6 +10,7 @@ import Combine
 /// Funktioniert einheitlich für Einzeldateien (startTime 0, ganze Datei) und für
 /// interne m4b-Kapitel (Abschnitt [startTime, startTime+duration] der großen Datei).
 /// Es läuft immer nur ein Preview gleichzeitig.
+@MainActor
 final class ChapterPreviewPlayer: ObservableObject {
     @Published var playingID: AudioFile.ID?
     private var player: AVPlayer?
@@ -26,11 +27,15 @@ final class ChapterPreviewPlayer: ObservableObject {
         let p = AVPlayer(playerItem: item)
         // Am Kapitel-Ende Icon/Status zurücksetzen.
         endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
-            self?.stop()
+            Task { @MainActor in self?.stop() }
         }
         player = p
         playingID = file.id
-        p.seek(to: CMTime(seconds: file.startTime, preferredTimescale: 600)) { [weak p] _ in p?.play() }
+        Task {
+            await p.seek(to: CMTime(seconds: file.startTime, preferredTimescale: 600))
+            guard player === p else { return }
+            p.play()
+        }
     }
 
     func stop() {
@@ -54,25 +59,27 @@ struct ContentView: View {
 
     func checkTools() {
         session.logCurrentSettings()
-        DispatchQueue.global(qos: .utility).async {
-            FFmpegWrapper.cleanupOldTempDirectories()
-            let ffmpeg = FFmpegWrapper.toolVersion(name: "ffmpeg")
-            let mediaInfo = FFmpegWrapper.toolVersion(name: "mediainfo")
-            DispatchQueue.main.async {
-                if let (url, version) = ffmpeg {
-                    self.ffmpegStatus = "OK (\(version))"
-                    session.addLog("🛠️ FFmpeg gefunden an \(url.path) (Version: \(version))")
-                } else {
-                    self.ffmpegStatus = "Nicht gefunden"
-                    session.addLog("❌ FFmpeg NICHT gefunden!")
-                }
-                if let (url, version) = mediaInfo {
-                    self.miStatus = "OK (\(version))"
-                    session.addLog("🛠️ MediaInfo gefunden an \(url.path) (Version: \(version))")
-                } else {
-                    self.miStatus = "Nicht gefunden"
-                    session.addLog("❌ MediaInfo NICHT gefunden!")
-                }
+        Task {
+            let (ffmpeg, mediaInfo) = await Task.detached {
+                FFmpegWrapper.cleanupOldTempDirectories()
+                return (
+                    FFmpegWrapper.toolVersion(name: "ffmpeg"),
+                    FFmpegWrapper.toolVersion(name: "mediainfo")
+                )
+            }.value
+            if let (url, version) = ffmpeg {
+                ffmpegStatus = "OK (\(version))"
+                session.addLog("🛠️ FFmpeg gefunden an \(url.path) (Version: \(version))")
+            } else {
+                ffmpegStatus = "Nicht gefunden"
+                session.addLog("❌ FFmpeg NICHT gefunden!")
+            }
+            if let (url, version) = mediaInfo {
+                miStatus = "OK (\(version))"
+                session.addLog("🛠️ MediaInfo gefunden an \(url.path) (Version: \(version))")
+            } else {
+                miStatus = "Nicht gefunden"
+                session.addLog("❌ MediaInfo NICHT gefunden!")
             }
         }
     }
@@ -247,7 +254,7 @@ struct ContentView: View {
                     .transition(.opacity)
                     .zIndex(10)
                     .onAppear {
-                        DispatchQueue.main.async {
+                        Task { @MainActor in
                             NSApp.keyWindow?.makeFirstResponder(nil)
                         }
                     }
@@ -282,51 +289,59 @@ struct ContentView: View {
 
     private func handleDroppedProviders(_ providers: [NSItemProvider]) {
         let importToken = session.beginImport(expectedItemCount: providers.count)
+        let currentSession = session
         for provider in providers {
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                DispatchQueue.main.async {
+                Task { @MainActor in
                     guard let url else {
-                        session.finishImport(importToken)
+                        await currentSession.finishImport(importToken)
                         return
                     }
-                    self.processDroppedURL(url, importToken: importToken)
+                    await Self.processDroppedURL(
+                        url,
+                        session: currentSession,
+                        importToken: importToken
+                    )
                 }
             }
         }
     }
 
-    private func processDroppedURL(_ url: URL, importToken: ImportToken) {
+    @MainActor
+    private static func processDroppedURL(
+        _ url: URL,
+        session: ConversionSession,
+        importToken: ImportToken
+    ) async {
         var isDir: ObjCBool = false
         if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
-            // Ordner-Scan (ffmpeg-Kapitel-Extraktion + AVAsset-Reads über viele Dateien)
-            // im Hintergrund, damit die UI beim Drop großer Ordner nicht einfriert.
-            // Nur das Übernehmen in den @Published-State läuft danach auf Main.
-            DispatchQueue.global(qos: .userInitiated).async {
-                let scanned = session.scanFolder(url)
-                DispatchQueue.main.async {
-                    session.applyScannedFolder(scanned, importToken: importToken)
-                    session.finishImport(importToken)
-                }
-            }
-        } else { processSingleFile(url, importToken: importToken) }
+            let scanned = await session.scanFolder(url)
+            await session.applyScannedFolder(scanned, importToken: importToken)
+            await session.finishImport(importToken)
+        } else {
+            await processSingleFile(url, session: session, importToken: importToken)
+        }
     }
 
-    private func processSingleFile(_ url: URL, importToken: ImportToken) {
+    @MainActor
+    private static func processSingleFile(
+        _ url: URL,
+        session: ConversionSession,
+        importToken: ImportToken
+    ) async {
         let ext = url.pathExtension.lowercased()
-        // Auch Einzeldatei-Import (Kapitel-Extraktion / Dauer-Lesen) im Hintergrund;
-        // der @Published-Zugriff (processIncomingFiles) danach auf Main.
-        DispatchQueue.global(qos: .userInitiated).async {
-            let files: [AudioFile]?
-            if ["m4b", "mp4"].contains(ext) { files = session.extractChapters(from: url) }
-            else if ["mp3", "m4a", "wav", "flac"].contains(ext) { files = [AudioFile(url: url)] }
-            else { files = nil }
-            DispatchQueue.main.async {
-                if let files {
-                    session.processIncomingFiles(files, importToken: importToken)
-                }
-                session.finishImport(importToken)
-            }
+        let files: [AudioFile]?
+        if ["m4b", "mp4"].contains(ext) {
+            files = await session.extractChapters(from: url)
+        } else if ["mp3", "m4a", "wav", "flac"].contains(ext) {
+            files = [await AudioFile(url: url)]
+        } else {
+            files = nil
         }
+        if let files {
+            await session.processIncomingFiles(files, importToken: importToken)
+        }
+        await session.finishImport(importToken)
     }
     
     /// Kapitel-Dauer als `m:ss` bzw. `h:mm:ss` (ab einer Stunde).
@@ -408,7 +423,13 @@ struct CoverView: View {
         }
         .frame(width: 180, height: 180).cornerRadius(12).clipped()
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-            if let provider = providers.first { _ = provider.loadObject(ofClass: URL.self) { url, _ in DispatchQueue.main.async { if let url = url { self.onDropped(url) } } } }
+            if let provider = providers.first {
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    Task { @MainActor in
+                        if let url { self.onDropped(url) }
+                    }
+                }
+            }
             return true
         }
     }

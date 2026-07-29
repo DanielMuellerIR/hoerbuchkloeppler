@@ -71,13 +71,14 @@ nicht nur „Build grün".
 ## Unit-Tests (Core)
 
 ```bash
-cd HoerbuchkloepplerCore && swift test        # 76 Tests, 16 Suites
+cd HoerbuchkloepplerCore && swift test        # 77 Tests, 17 Suites
 ```
 
 Deckt die reine Kernlogik ab: FFMETADATA-Escaping/Parsing, Kapitel-Arithmetik
 (`buildChapterMetadata`), Auto-Split, Ausgabe-Dateinamen, Zeit-Parsing,
 NaN/Infinity-Härtung sowie Ausgabeplan/atomare Übernahme, Tool-Auflösung,
-laufbezogenen Abbruch, Metadatenentscheidung und shell-sicheren CLI-Handoff.
+laufbezogenen Abbruch, Metadatenentscheidung, echte asynchrone
+AVFoundation-Analyse einer WAV-Datei und shell-sicheren CLI-Handoff.
 Bewusst **nicht** dabei: das reale Encoding-Ergebnis — dafür ist das Rezept oben da.
 
 Die geprüften Funktionen sind `internal` statt `private`, damit `@testable

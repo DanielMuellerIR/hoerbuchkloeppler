@@ -4,7 +4,7 @@ import Combine
 import AVFoundation
 import AppKit
 
-public struct TagCandidate: Identifiable, Equatable {
+public struct TagCandidate: Identifiable, Equatable, Sendable {
     public let id = UUID()
     public let type: String
     public let key: String
@@ -12,13 +12,13 @@ public struct TagCandidate: Identifiable, Equatable {
     public init(type: String, key: String, value: String) { self.type = type; self.key = key; self.value = value }
 }
 
-public enum LogType {
+public enum LogType: Sendable {
     case info      // Standardtext (Primary Color)
     case highlight // Pfade, Tool-Outputs, Befehle (AccentColor)
     case dim       // Light gray (MediaInfo output)
 }
 
-public struct LogEntry: Identifiable {
+public struct LogEntry: Identifiable, Sendable {
     public let id = UUID()
     public let type: LogType
     public let message: String
@@ -26,18 +26,18 @@ public struct LogEntry: Identifiable {
     public init(type: LogType, message: String, date: Date) { self.type = type; self.message = message; self.date = date }
 }
 
-public struct SegmentStatus: Equatable {
+public struct SegmentStatus: Equatable, Sendable {
     public let filename: String
     public var progress: Double
     public init(filename: String, progress: Double) { self.filename = filename; self.progress = progress }
 }
 
-public struct ImportToken: Equatable {
+public struct ImportToken: Equatable, Sendable {
     fileprivate let generation: UUID
     fileprivate let coverRevision: UInt
 }
 
-struct MetadataResolution: Equatable {
+struct MetadataResolution: Equatable, Sendable {
     let title: String
     let author: String
     let shouldShowSelection: Bool
@@ -90,9 +90,83 @@ private final class PreparationContext: @unchecked Sendable {
     }
 }
 
-public class ConversionSession: ObservableObject, Identifiable {
+/// Verwaltet den jeweils aktuellen Vorbereitungslauf außerhalb des Main Actors.
+/// Der Signal-Handler der CLI muss Prozesse synchron abbrechen können, während
+/// der sichtbare Sitzungszustand konsequent auf dem Main Actor bleibt.
+private final class PreparationCoordinator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current: PreparationContext?
+
+    func begin() {
+        let next = PreparationContext()
+        lock.lock()
+        let previous = current
+        current = next
+        lock.unlock()
+        previous?.cancel()
+    }
+
+    func context() -> PreparationContext? {
+        lock.lock()
+        defer { lock.unlock() }
+        return current
+    }
+
+    func cancel() -> Bool {
+        context()?.cancel() ?? false
+    }
+}
+
+/// Thread-sicherer Besitz des aktuellen Konvertierungslaufs. Diese kleine
+/// Synchronisationsschicht enthält keinen UI-Zustand; dadurch kann SIGINT den
+/// Worker abbrechen, ohne die Main-Actor-Isolation der Session zu umgehen.
+private final class ConversionCoordinator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active: ConversionContext?
+    private var finished = false
+
+    func begin() -> ConversionContext {
+        let next = ConversionContext()
+        lock.lock()
+        let previous = active
+        active = next
+        finished = false
+        lock.unlock()
+        previous?.cancel()
+        return next
+    }
+
+    func current() -> ConversionContext? {
+        lock.lock()
+        defer { lock.unlock() }
+        return active
+    }
+
+    func isCurrent(_ id: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return active?.id == id
+    }
+
+    func hasFinished() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return finished
+    }
+
+    func end(_ id: UUID) {
+        lock.lock()
+        if active?.id == id {
+            active = nil
+            finished = true
+        }
+        lock.unlock()
+    }
+}
+
+@MainActor
+public final class ConversionSession: ObservableObject, Identifiable {
     public let id = UUID()
-    public let metadataGroup = DispatchGroup()
     @Published public var settings: AudioSettings
     public init(settings: AudioSettings = SettingsManager.shared.loadSettings()) {
         self.settings = settings.normalized()
@@ -124,8 +198,7 @@ public class ConversionSession: ObservableObject, Identifiable {
     private var cliSourceFolderURL: URL?
     private var cliRepresentedFileIDs = Set<UUID>()
     private var cliRepresentedChapterTitles: [UUID: String] = [:]
-    private let preparationContextLock = NSLock()
-    private var preparationContext: PreparationContext?
+    private nonisolated let preparationCoordinator = PreparationCoordinator()
     @Published public var title: String = ""
     @Published public var author: String = ""
     @Published public var genre: String = "Hörbuch"
@@ -141,87 +214,59 @@ public class ConversionSession: ObservableObject, Identifiable {
     /// einen korrekten Exit-Code statt blind "Erfolg" zu melden.
     public var lastConversionSucceeded: Bool?
 
-    private let conversionContextLock = NSLock()
-    private var activeConversionContext: ConversionContext?
-    private var conversionHasFinished = false
+    private nonisolated let conversionCoordinator = ConversionCoordinator()
 
-    /// Beginnt einen abbrechbaren Import-/Metadatenlauf. Die GUI braucht das
-    /// derzeit nicht; die CLI startet ihn vor dem synchronen Ordnerscan.
-    public func beginPreparation() {
-        let context = PreparationContext()
-        preparationContextLock.lock()
-        let previous = preparationContext
-        preparationContext = context
-        preparationContextLock.unlock()
-        previous?.cancel()
+    /// Beginnt einen abbrechbaren Import-/Metadatenlauf. Die CLI startet ihn vor
+    /// dem asynchron erwarteten Ordnerscan.
+    public nonisolated func beginPreparation() {
+        preparationCoordinator.begin()
     }
 
     @discardableResult
-    public func cancelPreparation() -> Bool {
-        preparationContextLock.lock()
-        let context = preparationContext
-        preparationContextLock.unlock()
-        return context?.cancel() ?? false
+    public nonisolated func cancelPreparation() -> Bool {
+        preparationCoordinator.cancel()
     }
 
-    private func currentPreparationContext() -> PreparationContext? {
-        preparationContextLock.lock()
-        defer { preparationContextLock.unlock() }
-        return preparationContext
+    private nonisolated func currentPreparationContext() -> PreparationContext? {
+        preparationCoordinator.context()
     }
 
     /// Liest Kapitel mit einem optional laufenden Vorbereitungs-Context. Die
     /// öffentliche Methode hält diese Prozessverwaltung aus `ContentView`.
-    public func extractChapters(from url: URL) -> [AudioFile]? {
+    public nonisolated func extractChapters(from url: URL) async -> [AudioFile]? {
         let context = currentPreparationContext()
-        return AudioFile.extractChaptersControlled(
+        return await AudioFile.extractChaptersControlled(
             from: url,
             shouldCancel: { context?.isCancelled ?? false },
             registerProcess: { context?.register($0) ?? true },
             unregisterProcess: { context?.unregister($0) },
-            log: { [weak self] in self?.addLog($0) }
+            log: { [weak self] message in
+                Task { @MainActor in self?.addLog(message) }
+            }
         )
     }
 
     /// Startet einen neuen Lauf und macht einen eventuell noch auslaufenden
     /// Vorgänger ungültig. Dessen spätere Completion darf den neuen UI-State
     /// dadurch nicht mehr überschreiben.
-    func beginConversionRun() -> ConversionContext {
-        let context = ConversionContext()
-        conversionContextLock.lock()
-        let previous = activeConversionContext
-        activeConversionContext = context
-        conversionHasFinished = false
-        conversionContextLock.unlock()
-        previous?.cancel()
-        return context
+    nonisolated func beginConversionRun() -> ConversionContext {
+        conversionCoordinator.begin()
     }
 
-    func currentConversionContext() -> ConversionContext? {
-        conversionContextLock.lock()
-        defer { conversionContextLock.unlock() }
-        return activeConversionContext
+    nonisolated func currentConversionContext() -> ConversionContext? {
+        conversionCoordinator.current()
     }
 
-    func isCurrentConversion(_ id: UUID) -> Bool {
-        conversionContextLock.lock()
-        defer { conversionContextLock.unlock() }
-        return activeConversionContext?.id == id
+    nonisolated func isCurrentConversion(_ id: UUID) -> Bool {
+        conversionCoordinator.isCurrent(id)
     }
 
-    func hasFinishedConversion() -> Bool {
-        conversionContextLock.lock()
-        defer { conversionContextLock.unlock() }
-        return conversionHasFinished
+    nonisolated func hasFinishedConversion() -> Bool {
+        conversionCoordinator.hasFinished()
     }
 
-    func endConversion(_ id: UUID) {
-        conversionContextLock.lock()
-        if activeConversionContext?.id == id {
-            activeConversionContext = nil
-            conversionHasFinished = true
-        }
-        conversionContextLock.unlock()
+    nonisolated func endConversion(_ id: UUID) {
+        conversionCoordinator.end(id)
     }
     
     // Strukturierte Logs für GUI und Terminal
@@ -253,35 +298,124 @@ public class ConversionSession: ObservableObject, Identifiable {
     /// Cursor-Buchführung stimmt danach nicht mehr, und sie löscht die falschen
     /// Zeilen.
     ///
-    /// Wird immer auf dem Main-Thread aufgerufen; der Renderer braucht deshalb
-    /// keine eigene Sperre. Setzen ebenfalls nur auf dem Main-Thread (vor dem Start).
+    /// Wird immer auf dem Main Actor aufgerufen; der Renderer braucht deshalb
+    /// keine eigene Sperre. Setzen ebenfalls nur dort (vor dem Start).
     public var logSink: ((String) -> Void)?
 
     /// Gibt eine fertige Zeile ins Terminal aus — über die Senke, falls gesetzt.
-    /// Nur auf dem Main-Thread aufrufen.
+    /// Nur auf dem Main Actor aufrufen.
     private func emit(_ line: String) {
         if let logSink = logSink { logSink(line) } else { print(line) }
     }
 
-    // Thread-sicheres Loggen mit Darstellungstypen
+    // Main-Actor-isoliertes Loggen mit Darstellungstypen.
     public func addLog(_ message: String, type: LogType = .info) {
         let entry = LogEntry(type: type, message: message, date: Date())
-        DispatchQueue.main.async {
-            self.eventLogs.append(entry)
-            self.logString = self.eventLogs.map { $0.message }.joined(separator: "\n")
-            let timeStr = ConversionSession.logDateFormatter.string(from: entry.date)
-            self.emit("[\(timeStr)] \(message)")
-        }
+        eventLogs.append(entry)
+        logString = eventLogs.map { $0.message }.joined(separator: "\n")
+        let timeStr = ConversionSession.logDateFormatter.string(from: entry.date)
+        emit("[\(timeStr)] \(message)")
     }
 
     public func logVerbose(_ message: String) {
         guard settings.isVerbose else { return }
         // Verbose-Zeilen gehen bewusst nur ins Terminal, nicht ins UI-Log — sonst
         // wird die Oberfläche zugemüllt. Die Ausgabe läuft trotzdem über den
-        // Main-Thread: Aufrufer sind u.a. die parallelen Encoding-Threads, deren
+        // Main Actor: Aufrufer sind u.a. die parallelen Encoding-Threads, deren
         // rohes print() sonst nebenläufig in die Fortschrittsanzeige der CLI
         // schreiben würde.
-        DispatchQueue.main.async { self.emit("[VERBOSE] \(message)") }
+        emit("[VERBOSE] \(message)")
+    }
+
+    /// Sichere Brücke für den blockierenden ffmpeg-Worker. Der Worker darf die
+    /// Session als Main-Actor-Objekt referenzieren, aber ihren Zustand nur über
+    /// diese gezielten Nachrichten verändern.
+    nonisolated func enqueueLog(_ message: String, type: LogType = .info) {
+        Task { @MainActor [weak self] in self?.addLog(message, type: type) }
+    }
+
+    nonisolated func enqueueVerboseLog(_ message: String) {
+        Task { @MainActor [weak self] in self?.logVerbose(message) }
+    }
+
+    nonisolated func enqueueSegmentReset(
+        title: String?,
+        runID: UUID
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self, isCurrentConversion(runID) else { return }
+            segmentProgress = [:]
+            if let title {
+                initSegmentProgress(index: 0, filename: title, runID: runID)
+            }
+        }
+    }
+
+    nonisolated func enqueueSegmentInitialization(
+        index: Int,
+        filename: String,
+        runID: UUID
+    ) {
+        Task { @MainActor [weak self] in
+            self?.initSegmentProgress(index: index, filename: filename, runID: runID)
+        }
+    }
+
+    nonisolated func enqueueProgress(
+        _ value: Double,
+        segmentIndex: Int? = nil,
+        segmentProgress: Double? = nil,
+        runID: UUID
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self, isCurrentConversion(runID) else { return }
+            progress = max(progress, value)
+            if let segmentIndex, let segmentProgress {
+                updateSegmentProgress(
+                    index: segmentIndex,
+                    progress: segmentProgress,
+                    runID: runID
+                )
+            }
+        }
+    }
+
+    nonisolated func enqueueCompletedOutput(_ url: URL, runID: UUID) {
+        Task { @MainActor [weak self] in
+            guard let self, isCurrentConversion(runID) else { return }
+            completedOutputURLs.append(url)
+        }
+    }
+
+    nonisolated func enqueueConversionFinished(
+        success: Bool,
+        cancelled: Bool,
+        runID: UUID
+    ) {
+        Task { @MainActor [weak self] in
+            guard let self, isCurrentConversion(runID) else { return }
+            isConverting = false
+            progress = success ? 1.0 : progress
+            lastConversionSucceeded = success
+            if cancelled {
+                conversionStatus = "Abgebrochen"
+            } else {
+                conversionStatus = success ? "Erfolgreich abgeschlossen" : "Mit Fehlern beendet"
+                addLog(
+                    success ? "🏁 Alle Vorgänge beendet." : "🏁 Vorgang mit Fehlern beendet.",
+                    type: .highlight
+                )
+            }
+            endConversion(runID)
+        }
+    }
+
+    nonisolated func enqueueCancellationStarted(runID: UUID) {
+        Task { @MainActor [weak self] in
+            guard let self, isCurrentConversion(runID) else { return }
+            conversionStatus = "Abbruch läuft …"
+            addLog("🛑 Vorgang wird abgebrochen und bereinigt.", type: .info)
+        }
     }
     
     public func logCurrentSettings() {
@@ -294,19 +428,18 @@ public class ConversionSession: ObservableObject, Identifiable {
     }
 
     public func initSegmentProgress(index: Int, filename: String, runID: UUID? = nil) {
-        DispatchQueue.main.async {
-            if let runID, !self.isCurrentConversion(runID) { return }
-            self.segmentProgress[index] = SegmentStatus(filename: filename, progress: 0.0)
-        }
+        if let runID, !isCurrentConversion(runID) { return }
+        segmentProgress[index] = SegmentStatus(filename: filename, progress: 0.0)
     }
 
     public func updateSegmentProgress(index: Int, progress: Double, runID: UUID? = nil) {
-        DispatchQueue.main.async {
-            if let runID, !self.isCurrentConversion(runID) { return }
-            if var status = self.segmentProgress[index] {
-                status.progress = progress
-                self.segmentProgress[index] = status
-            }
+        if let runID, !isCurrentConversion(runID) { return }
+        if var status = segmentProgress[index] {
+            // Fortschrittsmeldungen mehrerer Worker treffen nicht zwingend in
+            // derselben Reihenfolge auf dem Main Actor ein. Ein Segment darf
+            // deshalb sichtbar nie rückwärts laufen.
+            status.progress = max(status.progress, progress)
+            segmentProgress[index] = status
         }
     }
 
@@ -331,10 +464,10 @@ public class ConversionSession: ObservableObject, Identifiable {
     /// nacheinander auf mehrere Dateien, laufen mehrere mediainfo-Prozesse
     /// parallel — ohne diese Kennung könnte ein langsamer, veralteter Lauf das
     /// Ergebnis der zuletzt angefragten Datei überschreiben.
-    /// Nur auf dem Main-Thread lesen/schreiben.
+    /// Nur auf dem Main Actor lesen/schreiben.
     private var infoRequestToken = UUID()
 
-    /// Nur auf dem Main-Thread aufrufen (setzt @Published-State).
+    /// Nur auf dem Main Actor aufrufen (setzt @Published-State).
     public func fetchRawMediaInfo(for file: AudioFile) {
         let token = UUID()
         self.infoRequestToken = token
@@ -342,51 +475,51 @@ public class ConversionSession: ObservableObject, Identifiable {
         self.selectedFileInfoText = "Lade Informationen..."
         self.showInfoSheet = true
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        let fileURL = file.url
+        Task { [weak self] in
             // Gebündeltes mediainfo bevorzugen (getBinaryURL: Bundle -> PATH ->
             // Homebrew-Fallback). Vorher fest verdrahtete Homebrew-Pfade ließen
             // den Info-Dialog in der verteilten App ohne Homebrew scheitern,
             // obwohl mediainfo mitgeliefert wird.
-            guard let miURL = FFmpegWrapper.getBinaryURL(name: "mediainfo") else {
-                self.updateInfoText("❌ MediaInfo wurde auf diesem System nicht gefunden.", token: token)
-                return
-            }
-
-            let process = Process()
-            process.executableURL = miURL
-            process.arguments = [file.url.path]
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            do {
-                try process.run()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                if data.isEmpty {
-                    self.updateInfoText("MediaInfo hat keine Informationen geliefert.", token: token)
-                    return
-                }
-                self.updateInfoText(
-                    Self.decodeMediaInfoText(from: data) ?? "Dekodierung fehlgeschlagen.",
-                    token: token
-                )
-            } catch {
-                self.updateInfoText("Fehler: \(error.localizedDescription)", token: token)
-            }
+            let text = await Task.detached {
+                Self.readRawMediaInfo(for: fileURL)
+            }.value
+            self?.updateInfoText(text, token: token)
         }
     }
 
     private func updateInfoText(_ text: String, token: UUID) {
-        DispatchQueue.main.async {
-            // Veraltete Antwort verwerfen: Der Nutzer hat inzwischen die Info
-            // einer anderen Datei angefragt, deren Ergebnis gewinnen muss.
-            guard token == self.infoRequestToken else { return }
-            self.selectedFileInfoText = text
-            self.isFetchingInfo = false
+        // Veraltete Antwort verwerfen: Der Nutzer hat inzwischen die Info
+        // einer anderen Datei angefragt, deren Ergebnis gewinnen muss.
+        guard token == infoRequestToken else { return }
+        selectedFileInfoText = text
+        isFetchingInfo = false
+    }
+
+    private nonisolated static func readRawMediaInfo(for fileURL: URL) -> String {
+        guard let miURL = FFmpegWrapper.getBinaryURL(name: "mediainfo") else {
+            return "❌ MediaInfo wurde auf diesem System nicht gefunden."
+        }
+        let process = Process()
+        process.executableURL = miURL
+        process.arguments = [fileURL.path]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            guard !data.isEmpty else {
+                return "MediaInfo hat keine Informationen geliefert."
+            }
+            return decodeMediaInfoText(from: data) ?? "Dekodierung fehlgeschlagen."
+        } catch {
+            return "Fehler: \(error.localizedDescription)"
         }
     }
 
-    static func decodeMediaInfoText(from data: Data) -> String? {
+    nonisolated static func decodeMediaInfoText(from data: Data) -> String? {
         let bytes = [UInt8](data.prefix(2))
         let hasUTF16BOM = bytes == [0xFF, 0xFE] || bytes == [0xFE, 0xFF]
         let encodings: [String.Encoding] = hasUTF16BOM
@@ -408,7 +541,7 @@ public class ConversionSession: ObservableObject, Identifiable {
 
     /// Markiert einen neuen GUI-Import. Langsame Antworten eines vorherigen
     /// Datei-/Ordner-Drops verlieren damit sofort ihre Schreibberechtigung.
-    /// Nur auf dem Main-Thread aufrufen.
+    /// Nur auf dem Main Actor aufrufen.
     public func beginImport(expectedItemCount: Int = 1) -> ImportToken {
         importGeneration = UUID()
         pendingImportOperations = max(0, expectedItemCount)
@@ -422,29 +555,27 @@ public class ConversionSession: ObservableObject, Identifiable {
 
     /// Meldet genau einen Provider/Scan als abgeschlossen. Erst wenn alle Teile
     /// desselben Drops übernommen sind, beginnt eine einzige Metadatenabfrage.
-    public func finishImport(_ token: ImportToken) {
+    public func finishImport(_ token: ImportToken) async {
         guard isCurrentImport(token), pendingImportOperations > 0 else { return }
         pendingImportOperations -= 1
         guard pendingImportOperations == 0 else { return }
         if (title.isEmpty || author.isEmpty), let first = audioFiles.first {
-            importGlobalMetadata(from: first, importToken: token) { [weak self] in
-                self?.finishMetadataImport(token: token, sourceFileID: first.id)
-            }
+            await importGlobalMetadata(from: first, importToken: token)
+            await finishMetadataImport(token: token, sourceFileID: first.id)
         } else {
             isImporting = false
         }
     }
 
-    private func finishMetadataImport(token: ImportToken, sourceFileID: UUID) {
+    private func finishMetadataImport(token: ImportToken, sourceFileID: UUID) async {
         guard isCurrentImport(token) else { return }
         // Wurde gerade die Datei entfernt, deren Tags gelesen wurden, darf ihr
         // Ergebnis nicht gewinnen. Ein verbleibendes erstes Kapitel bekommt
         // genau einen neuen Versuch.
         if !audioFiles.contains(where: { $0.id == sourceFileID }),
            let first = audioFiles.first {
-            importGlobalMetadata(from: first, importToken: token) { [weak self] in
-                self?.finishMetadataImport(token: token, sourceFileID: first.id)
-            }
+            await importGlobalMetadata(from: first, importToken: token)
+            await finishMetadataImport(token: token, sourceFileID: first.id)
             return
         }
         isImporting = false
@@ -492,7 +623,7 @@ public class ConversionSession: ObservableObject, Identifiable {
         skipCoverExtraction: Bool = false,
         importToken: ImportToken? = nil,
         sourceFolderForCLI: URL? = nil
-    ) {
+    ) async {
         if let importToken, !isCurrentImport(importToken) { return }
         // `append(contentsOf: [])` und sogar `sort()` lösen `didSet` aus. Bei
         // weiterhin leerer Liste sähe das sonst wie ein ausdrückliches
@@ -532,62 +663,55 @@ public class ConversionSession: ObservableObject, Identifiable {
             let filesToSearch = audioFiles
             let importedFileIDs = Set(filesToSearch.map(\.id))
             isPreparingArtwork = true
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            Task { [weak self] in
                 var foundArtwork: (image: NSImage?, data: Data)?
                 for file in filesToSearch {
-                    if let artworkData = AudioFile.extractEmbeddedArtwork(from: file.url) {
+                    if let artworkData = await AudioFile.extractEmbeddedArtwork(from: file.url) {
                         foundArtwork = (NSImage(data: artworkData), artworkData)
                         break
                     }
                 }
-                DispatchQueue.main.async {
-                    guard let self,
-                          self.artworkRequest == request else { return }
-                    // Der aktuelle Request ist in jedem Fall beendet. Weitere
-                    // Guards entscheiden nur noch, ob sein Ergebnis anwendbar ist.
-                    self.isPreparingArtwork = false
-                    guard
-                          self.coverRevision == expectedCoverRevision,
-                          !self.isCoverSuppressed,
-                          importToken.map(self.isCurrentImport) ?? true,
-                          importedFileIDs.isSubset(of: Set(self.audioFiles.map(\.id))) else { return }
-                    // Ein zwischenzeitlich manuell gesetztes Cover gewinnt.
-                    guard self.coverImage == nil, self.coverPath == nil,
-                          let foundArtwork else { return }
-                    self.coverImage = foundArtwork.image
-                    self.coverPath = nil
-                    self.embeddedCoverData = foundArtwork.data
-                }
+                guard let self,
+                      self.artworkRequest == request else { return }
+                // Der aktuelle Request ist in jedem Fall beendet. Weitere
+                // Guards entscheiden nur noch, ob sein Ergebnis anwendbar ist.
+                self.isPreparingArtwork = false
+                guard
+                      self.coverRevision == expectedCoverRevision,
+                      !self.isCoverSuppressed,
+                      importToken.map(self.isCurrentImport) ?? true,
+                      importedFileIDs.isSubset(of: Set(self.audioFiles.map(\.id))) else { return }
+                // Ein zwischenzeitlich manuell gesetztes Cover gewinnt.
+                guard self.coverImage == nil, self.coverPath == nil,
+                      let foundArtwork else { return }
+                self.coverImage = foundArtwork.image
+                self.coverPath = nil
+                self.embeddedCoverData = foundArtwork.data
             }
         }
         // GUI-Drops sammeln erst alle Provider und starten danach in
-        // `finishImport` genau eine Metadatenabfrage. Der synchrone CLI-Pfad hat
-        // keinen Import-Token und beginnt hier sofort.
+        // `finishImport` genau eine Metadatenabfrage. Der erwartete CLI-Pfad hat
+        // keinen Import-Token und löst die Abfrage hier direkt aus.
         if importToken == nil, (title.isEmpty || author.isEmpty) {
-            if let first = audioFiles.first { importGlobalMetadata(from: first, importToken: importToken) }
+            if let first = audioFiles.first {
+                await importGlobalMetadata(from: first, importToken: importToken)
+            }
         }
     }
 
     private func importGlobalMetadata(
         from file: AudioFile,
-        importToken: ImportToken?,
-        completion: (() -> Void)? = nil
-    ) {
-        metadataGroup.enter()
-        let group = metadataGroup
+        importToken: ImportToken?
+    ) async {
         let preparation = currentPreparationContext()
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else {
-                group.leave()
-                return
-            }
-
-            var candidates: (titles: [TagCandidate], authors: [TagCandidate])?
+        let fileURL = file.url
+        let candidates = await Task.detached {
+            var result: (titles: [TagCandidate], authors: [TagCandidate])?
             if preparation?.isCancelled != true,
                let miURL = FFmpegWrapper.getBinaryURL(name: "mediainfo") {
                 let process = Process()
                 process.executableURL = miURL
-                process.arguments = ["--Output=JSON", file.url.path]
+                process.arguments = ["--Output=JSON", fileURL.path]
                 let pipe = Pipe()
                 process.standardOutput = pipe
                 process.standardError = pipe
@@ -608,44 +732,39 @@ public class ConversionSession: ObservableObject, Identifiable {
                               let general = Self.decodeMediaInfoGeneralTrack(from: data) else {
                             throw CocoaError(.fileReadCorruptFile)
                         }
-                        candidates = Self.metadataCandidates(from: general)
+                        result = Self.metadataCandidates(from: general)
                     } catch {
                         // Ein fehlender/kaputter Tag-Lauf fällt unten auf die
                         // manuelle Auswahl zurück. Abbruch zeigt keine neue UI.
                     }
                 }
             }
+            return result
+        }.value
 
-            DispatchQueue.main.async {
-                defer {
-                    completion?()
-                    group.leave()
-                }
-                guard importToken.map(self.isCurrentImport) ?? true,
-                      importToken == nil || self.audioFiles.contains(where: { $0.id == file.id }),
-                      preparation?.isCancelled != true else {
-                    return
-                }
-                guard let candidates else {
-                    self.showSelectionUI = true
-                    return
-                }
-                self.titleCandidates = candidates.titles
-                self.authorCandidates = candidates.authors
-                let resolution = Self.resolveMetadata(
-                    currentTitle: self.title,
-                    currentAuthor: self.author,
-                    titleCandidates: candidates.titles,
-                    authorCandidates: candidates.authors
-                )
-                self.title = resolution.title
-                self.author = resolution.author
-                self.showSelectionUI = resolution.shouldShowSelection
-            }
+        guard importToken.map(isCurrentImport) ?? true,
+              importToken == nil || audioFiles.contains(where: { $0.id == file.id }),
+              preparation?.isCancelled != true else {
+            return
         }
+        guard let candidates else {
+            showSelectionUI = true
+            return
+        }
+        titleCandidates = candidates.titles
+        authorCandidates = candidates.authors
+        let resolution = Self.resolveMetadata(
+            currentTitle: title,
+            currentAuthor: author,
+            titleCandidates: candidates.titles,
+            authorCandidates: candidates.authors
+        )
+        title = resolution.title
+        author = resolution.author
+        showSelectionUI = resolution.shouldShowSelection
     }
 
-    static func decodeMediaInfoGeneralTrack(from data: Data) -> [String: Any]? {
+    nonisolated static func decodeMediaInfoGeneralTrack(from data: Data) -> [String: Any]? {
         // Pro Zeichensatz erst den JSON-Parse prüfen. MacRoman/Latin-1 können
         // fast jede Bytefolge als Text darstellen und dürfen einen später
         // tatsächlich passenden UTF-16-Versuch nicht vorzeitig verdrängen.
@@ -667,7 +786,7 @@ public class ConversionSession: ObservableObject, Identifiable {
         return nil
     }
 
-    private static func metadataCandidates(
+    private nonisolated static func metadataCandidates(
         from general: [String: Any]
     ) -> (titles: [TagCandidate], authors: [TagCandidate]) {
         func value(for key: String) -> String? {
@@ -690,7 +809,7 @@ public class ConversionSession: ObservableObject, Identifiable {
         return (titles, authors)
     }
 
-    static func resolveMetadata(
+    nonisolated static func resolveMetadata(
         currentTitle: String,
         currentAuthor: String,
         titleCandidates: [TagCandidate],
@@ -717,9 +836,9 @@ public class ConversionSession: ObservableObject, Identifiable {
         )
     }
 
-    /// Ergebnis eines Ordner-Scans. Enthält KEINEN `@Published`-State und darf daher
-    /// gefahrlos auf einem Hintergrund-Thread berechnet werden.
-    public struct ScannedFolder {
+    /// Ergebnis eines Ordner-Scans. Enthält keinen `@Published`-State und kann
+    /// deshalb sicher von der Audioanalyse zum Main Actor übertragen werden.
+    public struct ScannedFolder: Sendable {
         public var sourceURL: URL
         public var audioFiles: [AudioFile]
         public var imageURLs: [URL]
@@ -728,34 +847,52 @@ public class ConversionSession: ObservableObject, Identifiable {
 
     /// Schwerer Teil des Ordner-Imports: rekursiv scannen, m4b-Kapitel via ffmpeg
     /// extrahieren, Dauern/eingebettetes Artwork lesen. Rührt **keinen**
-    /// `@Published`-State an → thread-safe. In der GUI auf einen Hintergrund-Thread
-    /// legen (sonst friert der Drop großer Ordner ein), dann `applyScannedFolder`
-    /// auf dem Main-Thread aufrufen.
-    public func scanFolder(_ url: URL) -> ScannedFolder {
-        let fileManager = FileManager.default
-        guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey]) else {
-            return ScannedFolder(sourceURL: url, audioFiles: [], imageURLs: [], embeddedArtwork: nil)
-        }
+    /// `@Published`-State an. Die AVFoundation-Aufrufe suspendieren asynchron;
+    /// der Dateisystem- und ffmpeg-Anteil läuft außerhalb des Main Actors.
+    public nonisolated func scanFolder(_ url: URL) async -> ScannedFolder {
         var foundAudio: [AudioFile] = []; var foundImages: [URL] = []
-        for case let fileURL as URL in enumerator {
+        for fileURL in Self.recursiveFileURLs(in: url) {
             if currentPreparationContext()?.isCancelled == true { break }
             let ext = fileURL.pathExtension.lowercased()
             if ["mp3", "m4a", "wav", "flac", "m4b", "mp4"].contains(ext) {
-                if ["m4b", "mp4"].contains(ext), let chapters = extractChapters(from: fileURL) { foundAudio.append(contentsOf: chapters) }
-                else { foundAudio.append(AudioFile(url: fileURL)) }
+                if ["m4b", "mp4"].contains(ext),
+                   let chapters = await extractChapters(from: fileURL) {
+                    foundAudio.append(contentsOf: chapters)
+                } else {
+                    foundAudio.append(await AudioFile(url: fileURL))
+                }
             } else if ["jpg", "jpeg", "png"].contains(ext) { foundImages.append(fileURL) }
         }
         var embedded: Data? = nil
         for audioFile in foundAudio {
             if currentPreparationContext()?.isCancelled == true { break }
-            if let artworkData = AudioFile.extractEmbeddedArtwork(from: audioFile.url) { embedded = artworkData; break }
+            if let artworkData = await AudioFile.extractEmbeddedArtwork(from: audioFile.url) {
+                embedded = artworkData
+                break
+            }
         }
         return ScannedFolder(sourceURL: url, audioFiles: foundAudio, imageURLs: foundImages, embeddedArtwork: embedded)
     }
 
-    /// Leichter Teil: das Scan-Ergebnis in den `@Published`-State übernehmen.
-    /// MUSS auf dem Main-Thread laufen.
-    public func applyScannedFolder(_ scanned: ScannedFolder, importToken: ImportToken? = nil) {
+    /// `FileManager.DirectoryEnumerator` ist absichtlich nicht aus asynchronen
+    /// Kontexten iterierbar. Deshalb wird die rein synchrone Dateiliste hier
+    /// vollständig materialisiert, bevor AVFoundation suspendieren darf.
+    private nonisolated static func recursiveFileURLs(in url: URL) -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.isRegularFileKey]
+        ) else {
+            return []
+        }
+        return enumerator.compactMap { $0 as? URL }
+    }
+
+    /// Leichter Teil: das Scan-Ergebnis in den Main-Actor-isolierten
+    /// `@Published`-State übernehmen.
+    public func applyScannedFolder(
+        _ scanned: ScannedFolder,
+        importToken: ImportToken? = nil
+    ) async {
         if let importToken, !isCurrentImport(importToken) { return }
         let expectedCoverRevision = importToken?.coverRevision ?? coverRevision
         if coverRevision == expectedCoverRevision, !isCoverSuppressed,
@@ -770,7 +907,7 @@ public class ConversionSession: ObservableObject, Identifiable {
         }
         // Cover-Suche nicht erneut (schon im Scan erledigt) — sonst liefe sie hier
         // auf dem Main-Thread über alle Dateien.
-        processIncomingFiles(
+        await processIncomingFiles(
             scanned.audioFiles,
             skipCoverExtraction: true,
             importToken: importToken,
@@ -784,11 +921,11 @@ public class ConversionSession: ObservableObject, Identifiable {
         }
     }
 
-    /// Synchroner Ordner-Import (CLI-Pfad + Abwärtskompatibilität): scannen + anwenden
-    /// am Stück auf dem aufrufenden Thread. Die CLI ruft danach `metadataGroup.wait()`
-    /// und verlässt sich darauf, dass der Import hier synchron abgeschlossen ist.
-    public func addFolder(_ url: URL) {
-        applyScannedFolder(scanFolder(url))
+    /// Vollständiger Ordner-Import für die CLI: Audioanalyse außerhalb des Main
+    /// Actors, anschließend Übernahme und Metadatenauflösung auf Main.
+    public func addFolder(_ url: URL) async {
+        let scanned = await scanFolder(url)
+        await applyScannedFolder(scanned)
     }
 
     private func findLargestImage(from urls: [URL]) -> URL? {
@@ -836,15 +973,9 @@ public class ConversionSession: ObservableObject, Identifiable {
         return newImage
     }
 
-    public func formatFileSize(_ bytes: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.allowedUnits = [.useMB, .useGB]
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: bytes)
-    }
 }
 
-public struct AudioFile: Identifiable {
+public struct AudioFile: Identifiable, Sendable {
     public let id = UUID()
     public let url: URL
     public let duration: TimeInterval
@@ -852,16 +983,21 @@ public struct AudioFile: Identifiable {
     public var chapterTitle: String
     public var name: String { url.lastPathComponent }
 
-    public init(url: URL) {
+    /// Lädt Dauer und Kapiteltitel über die seit macOS 13 vorgesehenen
+    /// AVFoundation-Async-Properties. Fehlerhafte oder nicht lesbare Tags
+    /// verhindern den Import nicht; sie fallen auf sichere Standardwerte zurück.
+    public init(url: URL) async {
         self.url = url
         let asset = AVAsset(url: url)
         // CMTimeGetSeconds kann NaN/Infinity liefern (korrupte/unlesbare Datei).
         // An der Quelle auf einen endlichen, nicht-negativen Wert klemmen — sonst
         // crashen spätere Int()-Casts (Int(NaN)) und Divisionen durch die Dauer.
-        self.duration = AudioFile.sanitizeDuration(CMTimeGetSeconds(asset.duration))
+        let loadedDuration = try? await asset.load(.duration)
+        self.duration = AudioFile.sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
         self.startTime = 0
-        if let titleTag = AudioFile.findRobustTag(for: "title", in: asset.metadata) { self.chapterTitle = titleTag }
-        else { self.chapterTitle = url.deletingPathExtension().lastPathComponent }
+        let metadata = (try? await asset.load(.metadata)) ?? []
+        self.chapterTitle = await AudioFile.findRobustTag(for: "title", in: metadata)
+            ?? url.deletingPathExtension().lastPathComponent
     }
     public init(url: URL, startTime: TimeInterval, duration: TimeInterval, chapterTitle: String) {
         self.url = url
@@ -874,14 +1010,24 @@ public struct AudioFile: Identifiable {
     static func sanitizeDuration(_ seconds: TimeInterval) -> TimeInterval {
         return (seconds.isFinite && seconds >= 0) ? seconds : 0
     }
-    private static func findRobustTag(for tagName: String, in metadata: [AVMetadataItem]) -> String? {
+    private static func findRobustTag(
+        for tagName: String,
+        in metadata: [AVMetadataItem]
+    ) async -> String? {
         if let commonItem = metadata.first(where: { $0.commonKey?.rawValue == tagName }) {
-            if let value = commonItem.stringValue, !value.isEmpty { return value }
+            if let value = try? await commonItem.load(.stringValue),
+               !value.isEmpty {
+                return value
+            }
         }
         for item in metadata {
             guard let key = item.key else { continue }
             let keyString = String(describing: key).lowercased()
-            if keyString.contains(tagName.lowercased()), let value = item.stringValue, !value.isEmpty { return value }
+            if keyString.contains(tagName.lowercased()),
+               let value = try? await item.load(.stringValue),
+               !value.isEmpty {
+                return value
+            }
         }
         return nil
     }

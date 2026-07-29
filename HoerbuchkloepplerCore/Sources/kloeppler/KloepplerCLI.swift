@@ -8,7 +8,7 @@ private func writeStandardError(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
-private final class InterruptState {
+private final class InterruptState: @unchecked Sendable {
     private enum Phase {
         case preparing
         case converting
@@ -83,6 +83,27 @@ private func readLine(unlessInterrupted state: InterruptState) -> String? {
     return nil
 }
 
+/// Sendable-Snapshot der von ArgumentParser gefüllten Optionen. Die Parser-
+/// Konformität bleibt dadurch nichtisoliert; nur die eigentliche Ausführung
+/// wechselt anschließend auf den Main Actor.
+private struct CLIOptions: Sendable {
+    let folderPath: String
+    let mode: String?
+    let bitrate: String?
+    let samplerate: Int?
+    let maxDuration: Int?
+    let title: String?
+    let author: String?
+    let genre: String?
+    let cover: String?
+    let noCover: Bool
+    let mono: Bool
+    let stereo: Bool
+    let output: String?
+    let verbose: Bool
+    let force: Bool
+}
+
 /// Hält den Pacman-Statusblock am unteren Rand des Terminals und trennt ihn
 /// sauber von den Logzeilen.
 ///
@@ -97,6 +118,7 @@ private func readLine(unlessInterrupted state: InterruptState) -> String? {
 ///
 /// Nicht thread-sicher — sämtliche Aufrufe kommen vom Main-Thread (die Log-Senke
 /// der Session stellt das sicher).
+@MainActor
 final class TerminalRenderer {
     /// Zeilenzahl des aktuell sichtbaren Statusblocks; 0 = kein Block auf dem Schirm.
     private var blockLines = 0
@@ -145,7 +167,7 @@ final class TerminalRenderer {
 }
 
 @main
-struct KloepplerCLI: ParsableCommand {
+struct KloepplerCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "kloeppler",
         abstract: "Ein Kommandozeilen-Tool zum Generieren von M4B Hörbüchern aus Audiodateien."
@@ -219,7 +241,45 @@ struct KloepplerCLI: ParsableCommand {
         }
     }
 
-    mutating func run() throws {
+    mutating func run() async throws {
+        let options = CLIOptions(
+            folderPath: folderPath,
+            mode: mode,
+            bitrate: bitrate,
+            samplerate: samplerate,
+            maxDuration: maxDuration,
+            title: title,
+            author: author,
+            genre: genre,
+            cover: cover,
+            noCover: noCover,
+            mono: mono,
+            stereo: stereo,
+            output: output,
+            verbose: verbose,
+            force: force
+        )
+        try await Self.execute(options)
+    }
+
+    @MainActor
+    private static func execute(_ options: CLIOptions) async throws {
+        let folderPath = options.folderPath
+        let mode = options.mode
+        let bitrate = options.bitrate
+        let samplerate = options.samplerate
+        let maxDuration = options.maxDuration
+        let title = options.title
+        let author = options.author
+        let genre = options.genre
+        let cover = options.cover
+        let noCover = options.noCover
+        let mono = options.mono
+        let stereo = options.stereo
+        let output = options.output
+        let verbose = options.verbose
+        let force = options.force
+
         let url = URL(fileURLWithPath: folderPath)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: folderPath, isDirectory: &isDir), isDir.boolValue else {
@@ -250,7 +310,7 @@ struct KloepplerCLI: ParsableCommand {
                 conversionOutcome: outcome,
                 preparationCancelled: preparationCancelled
             ) {
-                DispatchQueue.main.async {
+                Task { @MainActor in
                     renderer.emitLog("🛑 Abbruchsignal (SIGINT) empfangen. Bereinige und beende...")
                 }
             }
@@ -262,18 +322,10 @@ struct KloepplerCLI: ParsableCommand {
         session.beginPreparation()
         if interruptState.wasReceived {
             session.cancelPreparation()
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01))
             throw ExitCode(130)
         }
-        session.addFolder(url)
-        
-        // Nicht die Main-Queue mit metadataGroup.wait() blockieren: Die Group ist
-        // erst fertig, nachdem der sichtbare Titel/Autor auf Main übernommen ist.
-        var metadataFinished = false
-        session.metadataGroup.notify(queue: .main) { metadataFinished = true }
-        while !metadataFinished && !interruptState.wasReceived {
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
-        }
+        await session.addFolder(url)
+
         if interruptState.wasReceived { throw ExitCode(130) }
 
         guard !session.audioFiles.isEmpty else {
@@ -293,8 +345,8 @@ struct KloepplerCLI: ParsableCommand {
 
         // Explizite CLI-Angaben gewinnen IMMER gegen die aus den Datei-Tags
         // erkannten Kandidaten (die enthalten z.B. oft Übersetzer im Autor-Feld).
-        // Muss NACH metadataGroup.wait() + RunLoop-Tick passieren, sonst würde
-        // der Metadaten-Fetch die Werte wieder überschreiben.
+        // Muss NACH dem vollständig erwarteten `addFolder` passieren, sonst
+        // würde der Metadaten-Fetch die Werte wieder überschreiben.
         if let title = title { session.title = title }
         if let author = author { session.author = author }
         if let genre = genre { session.genre = genre }
@@ -388,14 +440,15 @@ struct KloepplerCLI: ParsableCommand {
             print("-----------------------\n")
         }
 
-        // RunLoop drehen, damit die DispatchQueue.main-Blöcke des Cores laufen.
+        // Asynchron warten, damit der Main Actor die Fortschrittsmeldungen des
+        // ffmpeg-Workers übernehmen kann.
         // Abbruchbedingung ist das definitive Abschluss-Signal lastConversionSucceeded
         // (vom Core genau einmal am Ende gesetzt). NICHT auf das transiente
         // isConverting==true warten -- bei sehr schnell abschließenden Läufen
-        // (z.B. sofortiger Fehler) würde der RunLoop-Tick true UND false in einem
-        // Durchlauf verarbeiten und die Schleife liefe sonst endlos.
+        // (z.B. sofortiger Fehler) könnte die Schleife den kurzen Zustand sonst
+        // vollständig verpassen.
         while session.lastConversionSucceeded == nil {
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+            try await Task.sleep(for: .milliseconds(100))
 
             var output = ""
             let currentStatus = session.conversionStatus

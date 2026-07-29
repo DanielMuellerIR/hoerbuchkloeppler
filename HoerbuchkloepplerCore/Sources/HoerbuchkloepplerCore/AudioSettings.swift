@@ -1,6 +1,6 @@
 import Foundation
 
-public struct AudioSettings: Codable, Equatable {
+public struct AudioSettings: Codable, Equatable, Sendable {
     public var isMono: Bool = true
     public var bitrate: String = "48k"
     // Standard-Abtastrate 32 kHz: Referenz für kleine Sprach-Hörbücher

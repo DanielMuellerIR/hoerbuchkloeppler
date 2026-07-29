@@ -2,7 +2,7 @@ import Foundation
 
 /// Vollständige, shell-sicher darstellbare Übergabe der aktuellen GUI-Auswahl
 /// an die ordnerbasierte CLI.
-public struct CLIInvocation {
+public struct CLIInvocation: Sendable {
     public let executable: String
     public let folderURL: URL
     public let arguments: [String]

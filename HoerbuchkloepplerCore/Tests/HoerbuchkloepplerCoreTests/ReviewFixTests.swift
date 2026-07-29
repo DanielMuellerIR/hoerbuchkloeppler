@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import AVFoundation
 @testable import HoerbuchkloepplerCore
 
 private func temporaryDirectory() throws -> URL {
@@ -11,6 +12,39 @@ private func temporaryDirectory() throws -> URL {
 private func makeExecutable(_ url: URL, contents: String) throws {
     try contents.write(to: url, atomically: true, encoding: .utf8)
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+}
+
+@Suite("Swift 6 – asynchrone AVFoundation-Analyse")
+@MainActor
+struct AsyncAVFoundationTests {
+    @Test("AudioFile lädt Dauer und Fallback-Titel asynchron aus einer echten WAV-Datei")
+    func loadsAudioPropertiesAsynchronously() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("Kapitel Eins.wav")
+
+        // Ein echtes kurzes Audio-Fixture verhindert, dass der Test nur unsere
+        // Fehler-Fallbacks bestätigt. AVAudioFile erzeugt einen gültigen Header
+        // und 0,25 Sekunden stille PCM-Samples.
+        do {
+            let format = try #require(
+                AVAudioFormat(standardFormatWithSampleRate: 8_000, channels: 1)
+            )
+            let buffer = try #require(
+                AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 2_000)
+            )
+            buffer.frameLength = 2_000
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            try file.write(from: buffer)
+        }
+
+        let audio = await AudioFile(url: url)
+        let artwork = await AudioFile.extractEmbeddedArtwork(from: url)
+
+        #expect(abs(audio.duration - 0.25) < 0.02)
+        #expect(audio.chapterTitle == "Kapitel Eins")
+        #expect(artwork == nil)
+    }
 }
 
 @Suite("Review-Fixes – Ausgabeplan und atomare Übernahme")
@@ -115,6 +149,7 @@ struct ToolResolutionTests {
 }
 
 @Suite("Review-Fixes – laufbezogener Abbruch")
+@MainActor
 struct CancellationIsolationTests {
     @Test("Abbruch räumt nur Ressourcen seines Laufs auf")
     func contextsAreIsolated() throws {
@@ -230,9 +265,10 @@ struct ChapterValidationTests {
 }
 
 @Suite("Review-Fixes – Metadaten und CLI-Handoff")
+@MainActor
 struct MetadataAndCLITests {
     @Test("Ein veralteter Ordner-Scan darf einen neuen Import nicht überschreiben")
-    func staleFolderScanIsIgnored() {
+    func staleFolderScanIsIgnored() async {
         let session = ConversionSession()
         let staleToken = session.beginImport()
         _ = session.beginImport()
@@ -249,12 +285,12 @@ struct MetadataAndCLITests {
             embeddedArtwork: nil
         )
 
-        session.applyScannedFolder(scanned, importToken: staleToken)
+        await session.applyScannedFolder(scanned, importToken: staleToken)
         #expect(session.audioFiles.isEmpty)
     }
 
     @Test("CLI-Handoff wird nach nicht darstellbarer Kapiteledition deaktiviert")
-    func cliRepresentabilityTracksChapterEdits() {
+    func cliRepresentabilityTracksChapterEdits() async {
         let session = ConversionSession()
         session.title = "Buch"
         session.author = "Autor"
@@ -265,7 +301,7 @@ struct MetadataAndCLITests {
             duration: 1,
             chapterTitle: "Kapitel 1"
         )
-        session.applyScannedFolder(.init(
+        await session.applyScannedFolder(.init(
             sourceURL: source,
             audioFiles: [file],
             imageURLs: [],
@@ -392,9 +428,10 @@ struct MetadataAndCLITests {
 }
 
 @Suite("Review-Fixes – Import-Lebenszyklus")
+@MainActor
 struct ImportLifecycleTests {
     @Test("Alle löschen entwertet noch laufende Drop-Ergebnisse")
-    func clearingFilesInvalidatesPendingImport() {
+    func clearingFilesInvalidatesPendingImport() async {
         let session = ConversionSession(settings: AudioSettings())
         let token = session.beginImport(expectedItemCount: 1)
         let source = URL(fileURLWithPath: "/tmp/aktuell")
@@ -404,39 +441,39 @@ struct ImportLifecycleTests {
             duration: 1,
             chapterTitle: "Kapitel"
         )
-        session.processIncomingFiles([file], skipCoverExtraction: true, importToken: token)
+        await session.processIncomingFiles([file], skipCoverExtraction: true, importToken: token)
         #expect(session.isImporting)
 
         session.audioFiles.removeAll()
-        session.applyScannedFolder(.init(
+        await session.applyScannedFolder(.init(
             sourceURL: URL(fileURLWithPath: "/tmp/veraltet"),
             audioFiles: [file],
             imageURLs: [],
             embeddedArtwork: nil
         ), importToken: token)
-        session.finishImport(token)
+        await session.finishImport(token)
 
         #expect(session.audioFiles.isEmpty)
         #expect(!session.isImporting)
     }
 
     @Test("Mehrteiliger Drop bleibt bis zum letzten Provider im Importzustand")
-    func pendingImportCountsAllProviders() {
+    func pendingImportCountsAllProviders() async {
         let session = ConversionSession(settings: AudioSettings())
         let token = session.beginImport(expectedItemCount: 2)
 
-        session.finishImport(token)
+        await session.finishImport(token)
         #expect(session.isImporting)
-        session.finishImport(token)
+        await session.finishImport(token)
         #expect(!session.isImporting)
     }
 
     @Test("Leerer Provider entwertet gültigen Teil eines Mehrfach-Drops nicht")
-    func emptyProviderDoesNotInvalidateDrop() {
+    func emptyProviderDoesNotInvalidateDrop() async {
         let session = ConversionSession(settings: AudioSettings())
         let token = session.beginImport(expectedItemCount: 2)
-        session.processIncomingFiles([], skipCoverExtraction: true, importToken: token)
-        session.finishImport(token)
+        await session.processIncomingFiles([], skipCoverExtraction: true, importToken: token)
+        await session.finishImport(token)
 
         let file = AudioFile(
             url: URL(fileURLWithPath: "/tmp/gueltig.mp3"),
@@ -444,17 +481,17 @@ struct ImportLifecycleTests {
             duration: 1,
             chapterTitle: "Gültig"
         )
-        session.processIncomingFiles([file], skipCoverExtraction: true, importToken: token)
-        session.finishImport(token)
+        await session.processIncomingFiles([file], skipCoverExtraction: true, importToken: token)
+        await session.finishImport(token)
 
         #expect(session.audioFiles.map(\.id) == [file.id])
     }
 
     @Test("Bewusst entferntes Cover wird nicht automatisch wieder eingesetzt")
-    func suppressedCoverStaysRemoved() {
+    func suppressedCoverStaysRemoved() async {
         let session = ConversionSession(settings: AudioSettings())
         session.removeCover()
-        session.applyScannedFolder(.init(
+        await session.applyScannedFolder(.init(
             sourceURL: URL(fileURLWithPath: "/tmp/Buch"),
             audioFiles: [],
             imageURLs: [URL(fileURLWithPath: "/tmp/folder.jpg")],

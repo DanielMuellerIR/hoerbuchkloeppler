@@ -4,20 +4,21 @@ import AVFoundation
 extension AudioFile {
     /// Extrahiert das eingebettete Cover aus einer Audiodatei.
     /// Nutzt sowohl Common-Keys als auch Raw-Keys für maximale Kompatibilität (MP3, M4A, etc.)
-    public static func extractEmbeddedArtwork(from url: URL) -> Data? {
+    public static func extractEmbeddedArtwork(from url: URL) async -> Data? {
         let asset = AVAsset(url: url)
-        
-        for item in asset.metadata {
+
+        guard let metadata = try? await asset.load(.metadata) else { return nil }
+        for item in metadata {
             // 1. Prüfung über CommonKey (Standardweg)
             if let commonKey = item.commonKey?.rawValue, (commonKey == "artwork" || commonKey == "cover") {
-                if let data = item.value as? Data {
+                if let data = try? await item.load(.dataValue) {
                     return data
                 }
             }
             
             // 2. Prüfung über den rohen Key (oft nötig für ID3/MP3)
             if let key = item.key as? String, (key.contains("artwork") || key.contains("cover")) {
-                if let data = item.value as? Data {
+                if let data = try? await item.load(.dataValue) {
                     return data
                 }
             }
@@ -30,8 +31,8 @@ extension AudioFile {
     /// mitgeliefert und fehlt auf Maschinen ohne Homebrew, wodurch m4b-Kapitel
     /// in der verteilten App verloren gingen. `ffmpeg -f ffmetadata -` schreibt
     /// die Metadaten (inkl. `[CHAPTER]`-Blöcke) nach stdout.
-    public static func extractChapters(from url: URL) -> [AudioFile]? {
-        extractChaptersControlled(from: url)
+    public static func extractChapters(from url: URL) async -> [AudioFile]? {
+        await extractChaptersControlled(from: url)
     }
 
     /// Variante für `ConversionSession`: Sie registriert den gestarteten
@@ -39,17 +40,17 @@ extension AudioFile {
     /// Meldungen in das gemeinsame Session-Log statt direkt auf stdout.
     static func extractChaptersControlled(
         from url: URL,
-        shouldCancel: () -> Bool = { false },
-        registerProcess: (Process) -> Bool = { _ in true },
-        unregisterProcess: (Process) -> Void = { _ in },
-        log: (String) -> Void = { _ in }
-    ) -> [AudioFile]? {
+        shouldCancel: @Sendable () -> Bool = { false },
+        registerProcess: @Sendable (Process) -> Bool = { _ in true },
+        unregisterProcess: @Sendable (Process) -> Void = { _ in },
+        log: @Sendable (String) -> Void = { _ in }
+    ) async -> [AudioFile]? {
         guard ["m4b", "mp4"].contains(url.pathExtension.lowercased()) else { return nil }
         guard !shouldCancel() else { return [] }
 
         guard let ffmpegURL = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else {
             log("⚠️ ffmpeg wurde nicht gefunden. Kapitel-Extraktion übersprungen.")
-            return [AudioFile(url: url)]
+            return [await AudioFile(url: url)]
         }
 
         let process = Process()
@@ -78,15 +79,16 @@ extension AudioFile {
 
             guard let text = String(data: data, encoding: .utf8) else {
                 log("⚠️ FFMETADATA von \(url.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
-                return [AudioFile(url: url)]
+                return [await AudioFile(url: url)]
             }
             var chapters = parseFFMetadataChapters(text)
             guard !chapters.isEmpty else {
                 log("⚠️ Keine Kapitel in \(url.lastPathComponent) gefunden. Nutze die Datei als ein Kapitel.")
-                return [AudioFile(url: url)]
+                return [await AudioFile(url: url)]
             }
 
-            let totalDuration = CMTimeGetSeconds(AVURLAsset(url: url).duration)
+            let loadedDuration = try? await AVURLAsset(url: url).load(.duration)
+            let totalDuration = sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
             // Das LETZTE Kapitel hat in FFMETADATA oft keine END-Zeit — es gibt kein
             // Folgekapitel, aus dem sie (wie in parseFFMetadataChapters) abgeleitet
             // werden könnte. Ohne Korrektur bliebe es ein Null-Dauer-Kapitel, das ein
@@ -103,7 +105,7 @@ extension AudioFile {
             // komplette Datei als ein Kapitel; so scheitert nicht das ganze Buch.
             guard chaptersAreValid(chapters, totalDuration: totalDuration) else {
                 log("⚠️ Unvollständige Kapitelzeiten in \(url.lastPathComponent). Nutze die Datei als ein Kapitel.")
-                return [AudioFile(url: url)]
+                return [await AudioFile(url: url)]
             }
             // Rundungsdifferenzen im FFMETADATA-Container lückenlos an die
             // tatsächliche Dateidauer anlegen.
@@ -129,7 +131,7 @@ extension AudioFile {
         } catch {
             if shouldCancel() { return [] }
             log("⚠️ Kapitel aus \(url.lastPathComponent) konnten nicht gelesen werden: \(error.localizedDescription)")
-            return [AudioFile(url: url)]
+            return [await AudioFile(url: url)]
         }
     }
 

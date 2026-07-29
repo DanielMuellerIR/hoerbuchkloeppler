@@ -1,6 +1,9 @@
 import Foundation
 
-public class SettingsManager {
+/// Unveränderlicher Zugriffspunkt auf genau eine Einstellungsdatei. Da der
+/// Manager nach der Initialisierung keinen eigenen Zustand mehr ändert, kann er
+/// gefahrlos aus verschiedenen Concurrency-Domänen verwendet werden.
+public final class SettingsManager: Sendable {
     public static let shared = SettingsManager()
     private let settingsURL: URL
     
