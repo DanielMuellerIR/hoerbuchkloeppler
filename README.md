@@ -76,6 +76,7 @@ cd hoerbuchkloeppler
 ```bash
 ./install.sh                 # build → sign → notarize → staple → /Applications
 ./install.sh --no-notarize   # Developer-ID-signed test build in the project; never installs
+./install.sh --no-install    # build, sign and notarize, but leave /Applications untouched
 ./install.sh --help
 ```
 

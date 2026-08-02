@@ -29,6 +29,10 @@
 #   ./install.sh --no-notarize            # nur Developer-ID-signierten Test-Build
 #                                         #   im Projekt erzeugen; installiert nie
 #                                         #   nach /Applications
+#   ./install.sh --no-install             # baut, signiert und notarisiert das
+#                                         #   Bundle im Projekt-Root, fasst
+#                                         #   /Applications aber nicht an (der
+#                                         #   Ausstieg, den release.sh nutzt)
 #   ./install.sh --help
 #
 # GPL-Hinweis: Der installierte Build bündelt ffmpeg (GPL-3.0). Das ist für den
