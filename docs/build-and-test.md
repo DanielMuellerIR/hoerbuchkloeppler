@@ -39,6 +39,9 @@ kloeppler <ordner> [--mode parallel|standard] [--bitrate 48k] \
   unbegrenzt). Pendant zur GUI-Einstellung „Maximale Dauer".
 - `--title` / `--author` setzen Buchtitel/Autor explizit und gewinnen gegen die
   aus den Datei-Tags erkannten Kandidaten (`--title` bestimmt auch den Dateinamen).
+  Ohne diese Optionen entscheidet die CLI bei mehrdeutigen Tag-Kandidaten selbst
+  nach fester Priorität: Album vor Title bzw. Performer vor Album_Performer
+  (die GUI öffnet in diesem Fall stattdessen die manuelle Auswahl).
 - `--genre`, `--cover` und `--no-cover` bilden die entsprechenden GUI-Werte im
   kopierten CLI-Handoff vollständig ab.
 - `--output <ziel>` = Zielordner (Datei heißt dann `<Titel>.m4b`) **oder** voller
@@ -71,7 +74,7 @@ nicht nur „Build grün".
 ## Unit-Tests (Core)
 
 ```bash
-cd HoerbuchkloepplerCore && swift test        # 77 Tests, 17 Suites
+cd HoerbuchkloepplerCore && swift test        # 85 Tests, 17 Suites
 ```
 
 Deckt die reine Kernlogik ab: FFMETADATA-Escaping/Parsing, Kapitel-Arithmetik

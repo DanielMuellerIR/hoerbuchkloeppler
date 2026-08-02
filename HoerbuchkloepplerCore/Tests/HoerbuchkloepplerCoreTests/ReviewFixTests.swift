@@ -91,6 +91,46 @@ struct OutputSafetyTests {
         #expect(try String(contentsOf: final, encoding: .utf8) == "behalten")
     }
 
+    @Test("Staging-Dateien tragen die Besitzer-PID als Laufmarke im Namen")
+    func stagingURLCarriesOwnerPID() {
+        let final = URL(fileURLWithPath: "/tmp/Buch.m4b")
+        let staged = FFmpegWrapper.stagingOutputURL(for: final)
+        #expect(FFmpegWrapper.stagedOutputOwnerPID(staged) == ProcessInfo.processInfo.processIdentifier)
+    }
+
+    @Test("Altformat-Partials ohne PID-Marke liefern keine Besitzer-PID")
+    func legacyStagingNameHasNoOwner() {
+        // Alte Namen waren `.partial-<uuid>`; eine rein numerische erste
+        // UUID-Gruppe darf nicht als PID fehlinterpretiert werden.
+        let legacy = URL(fileURLWithPath: "/tmp/.Buch.partial-12345678-1234-1234-1234-123456789012.m4b")
+        #expect(FFmpegWrapper.stagedOutputOwnerPID(legacy) == nil)
+        #expect(FFmpegWrapper.stagedOutputOwnerPID(URL(fileURLWithPath: "/tmp/Buch.m4b")) == nil)
+    }
+
+    @Test("Verwaiste Partial-Dateien toter Prozesse werden vor dem nächsten Lauf entfernt")
+    func removesOrphanedStagedOutputs() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        // Oberhalb von macOS' PID_MAX (99999) — sicher kein lebender Prozess.
+        let orphan = FFmpegWrapper.stagingOutputURL(for: final, ownerPID: 987_654)
+        let alive = FFmpegWrapper.stagingOutputURL(for: final)
+        let legacy = directory.appendingPathComponent(".Buch.partial-\(UUID().uuidString).m4b")
+        let otherTarget = directory.appendingPathComponent(".Anderes.partial-987654-\(UUID().uuidString).m4b")
+        for url in [orphan, alive, legacy, otherTarget] {
+            try Data("unvollständig".utf8).write(to: url)
+        }
+
+        FFmpegWrapper.removeOrphanedStagedOutputs(for: final)
+
+        #expect(!FileManager.default.fileExists(atPath: orphan.path))
+        // Der eigene (lebende) Prozess, Altformat-Namen und fremde Ziele
+        // bleiben unangetastet.
+        #expect(FileManager.default.fileExists(atPath: alive.path))
+        #expect(FileManager.default.fileExists(atPath: legacy.path))
+        #expect(FileManager.default.fileExists(atPath: otherTarget.path))
+    }
+
     @Test("Fortschritt mehrerer Split-Gruppen bleibt monoton")
     func splitProgressIsMonotonic() {
         let values = [
@@ -133,6 +173,47 @@ struct ToolResolutionTests {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         #expect(!FFmpegWrapper.isUsableExecutable(directory))
+    }
+
+    @Test("Symlink auf ein ausführbares Ziel gilt als brauchbares Tool (Homebrew-Fall)")
+    func acceptsSymlinkToExecutable() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // Nachbau des Homebrew-Layouts: bin/ffmpeg -> ../Cellar/ffmpeg/ffmpeg
+        let cellar = directory.appendingPathComponent("Cellar")
+        let binDirectory = directory.appendingPathComponent("bin")
+        try FileManager.default.createDirectory(at: cellar, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: binDirectory, withIntermediateDirectories: true)
+        let target = cellar.appendingPathComponent("ffmpeg")
+        try makeExecutable(target, contents: "#!/bin/sh\nexit 0\n")
+        let link = binDirectory.appendingPathComponent("ffmpeg")
+        try FileManager.default.createSymbolicLink(
+            atPath: link.path,
+            withDestinationPath: "../Cellar/ffmpeg"
+        )
+
+        #expect(FFmpegWrapper.isUsableExecutable(link))
+        // Auch die PATH-Auflösung muss den Symlink-Kandidaten akzeptieren.
+        let resolved = FFmpegWrapper.resolveBinaryURL(
+            name: "ffmpeg",
+            bundledURL: nil,
+            pathEnvironment: binDirectory.path,
+            fallbackPaths: []
+        )
+        #expect(resolved == link)
+    }
+
+    @Test("Hängender Symlink ohne Ziel bleibt unbrauchbar")
+    func rejectsDanglingSymlink() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let link = directory.appendingPathComponent("ffmpeg")
+        try FileManager.default.createSymbolicLink(
+            atPath: link.path,
+            withDestinationPath: "gibt-es-nicht"
+        )
+
+        #expect(!FFmpegWrapper.isUsableExecutable(link))
     }
 
     @Test("Version gilt nur bei Exit 0 und nichtleerer Ausgabe")
@@ -210,6 +291,32 @@ struct CancellationIsolationTests {
         }
         #expect(committedBeforeCancel)
         #expect(!finishedContext.cancel())
+    }
+
+    @Test("Der Abschluss übernimmt die erfolgreichen Ziel-URLs in einer Nachricht")
+    func conversionFinishCarriesCompletedOutputs() async throws {
+        let session = ConversionSession(settings: AudioSettings())
+        let context = session.beginConversionRun()
+        let url = URL(fileURLWithPath: "/tmp/Buch-01.m4b")
+
+        session.enqueueConversionFinished(
+            success: false,
+            cancelled: false,
+            completedOutputs: [url],
+            runID: context.id
+        )
+        // Die Nachricht läuft als Main-Actor-Task; bis zu 1 s darauf warten.
+        var attempts = 0
+        while session.lastConversionSucceeded == nil, attempts < 1_000 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        // Auch bei einem Teilerfolg (success == false) kennt die Session damit
+        // die bereits atomar übernommenen Dateien — die CLI listet sie auf,
+        // statt fälschlich "keine gültige Datei" zu melden.
+        #expect(session.lastConversionSucceeded == false)
+        #expect(session.completedOutputURLs == [url])
     }
 
     @Test("Temporäres Verzeichnis erkennt den lebenden Besitzer")
@@ -330,6 +437,43 @@ struct MetadataAndCLITests {
         #expect(resolution.shouldShowSelection)
     }
 
+    @Test("Headless nimmt bei mehrdeutigen Tags den ersten Kandidaten statt leer zu bleiben")
+    func headlessAmbiguityPrefersFirstCandidate() {
+        // Kandidaten-Reihenfolge aus `metadataCandidates`: Album vor Title,
+        // Performer vor Album_Performer. Die CLI hat keine Auswahl-UI und muss
+        // deshalb selbst entscheiden.
+        let resolution = ConversionSession.resolveMetadata(
+            currentTitle: "",
+            currentAuthor: "",
+            titleCandidates: [
+                TagCandidate(type: "MediaInfo", key: "Album", value: "Buchtitel"),
+                TagCandidate(type: "MediaInfo", key: "Title", value: "Kapitel 1")
+            ],
+            authorCandidates: [
+                TagCandidate(type: "MediaInfo", key: "Performer", value: "Autor"),
+                TagCandidate(type: "MediaInfo", key: "Album_Performer", value: "Verlag")
+            ],
+            allowsSelectionUI: false
+        )
+        #expect(resolution.title == "Buchtitel")
+        #expect(resolution.author == "Autor")
+        #expect(!resolution.shouldShowSelection)
+    }
+
+    @Test("Headless ohne brauchbare Kandidaten bleibt leer und verlangt keine Auswahl")
+    func headlessWithoutCandidatesStaysEmpty() {
+        let resolution = ConversionSession.resolveMetadata(
+            currentTitle: "",
+            currentAuthor: "",
+            titleCandidates: [],
+            authorCandidates: [TagCandidate(type: "MediaInfo", key: "Performer", value: "   ")],
+            allowsSelectionUI: false
+        )
+        #expect(resolution.title.isEmpty)
+        #expect(resolution.author.isEmpty)
+        #expect(!resolution.shouldShowSelection)
+    }
+
     @Test("Metadatenwerte werden vor der Entscheidung bereinigt")
     func metadataValuesAreNormalized() {
         let resolution = ConversionSession.resolveMetadata(
@@ -369,6 +513,7 @@ struct MetadataAndCLITests {
         settings.sampleRate = 44_100
         settings.maxDurationHours = 9
         settings.isMono = false
+        settings.isVerbose = true
         let invocation = CLIInvocation(
             executable: "/tmp/kloeppler tool",
             folderURL: URL(fileURLWithPath: "/tmp/Buch $HOME's"),
@@ -385,6 +530,7 @@ struct MetadataAndCLITests {
         #expect(invocation.arguments.contains("--genre"))
         #expect(invocation.arguments.contains("--cover"))
         #expect(invocation.arguments.contains("--stereo"))
+        #expect(invocation.arguments.contains("--verbose"))
         #expect(invocation.shellCommand.contains("'$HOME'" ) == false)
         #expect(invocation.shellCommand.contains("'\\''"))
         #expect(invocation.shellCommand.contains("'Titel `touch /tmp/nope`'"))
@@ -404,6 +550,8 @@ struct MetadataAndCLITests {
 
         #expect(invocation.arguments.contains("--no-cover"))
         #expect(!invocation.arguments.contains("--cover"))
+        // Default-Settings haben isVerbose == false — dann auch kein --verbose.
+        #expect(!invocation.arguments.contains("--verbose"))
     }
 
     @Test("UTF-16-MediaInfo-JSON wird erst nach erfolgreichem JSON-Parse akzeptiert")

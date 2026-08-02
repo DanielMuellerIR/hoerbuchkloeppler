@@ -380,20 +380,22 @@ public final class ConversionSession: ObservableObject, Identifiable {
         }
     }
 
-    nonisolated func enqueueCompletedOutput(_ url: URL, runID: UUID) {
-        Task { @MainActor [weak self] in
-            guard let self, isCurrentConversion(runID) else { return }
-            completedOutputURLs.append(url)
-        }
-    }
-
+    /// Übernimmt das Endergebnis des Workers in genau EINER Main-Actor-Nachricht,
+    /// inklusive der erfolgreich erzeugten Ziel-URLs. Früher meldete eine
+    /// separate Task jede fertige Datei einzeln; unstrukturierte Tasks haben
+    /// aber keine garantierte Reihenfolge — lief der Abschluss zuerst, entfernte
+    /// `endConversion` den Kontext und die Ausgabe-Meldung fiel am
+    /// `isCurrentConversion`-Guard durch (die CLI meldete dann fälschlich,
+    /// es sei keine gültige Datei erzeugt worden).
     nonisolated func enqueueConversionFinished(
         success: Bool,
         cancelled: Bool,
+        completedOutputs: [URL],
         runID: UUID
     ) {
         Task { @MainActor [weak self] in
             guard let self, isCurrentConversion(runID) else { return }
+            completedOutputURLs = completedOutputs
             isConverting = false
             progress = success ? 1.0 : progress
             lastConversionSucceeded = success
@@ -753,11 +755,14 @@ public final class ConversionSession: ObservableObject, Identifiable {
         }
         titleCandidates = candidates.titles
         authorCandidates = candidates.authors
+        // Ohne Import-Token läuft der headless CLI-Pfad (siehe
+        // `processIncomingFiles`) — dort gibt es keine Auswahl-UI.
         let resolution = Self.resolveMetadata(
             currentTitle: title,
             currentAuthor: author,
             titleCandidates: candidates.titles,
-            authorCandidates: candidates.authors
+            authorCandidates: candidates.authors,
+            allowsSelectionUI: importToken != nil
         )
         title = resolution.title
         author = resolution.author
@@ -809,22 +814,33 @@ public final class ConversionSession: ObservableObject, Identifiable {
         return (titles, authors)
     }
 
+    /// `allowsSelectionUI: false` ist der headless-Pfad (CLI): Bei mehrdeutigen
+    /// Kandidaten gewinnt der erste in Listenreihenfolge — also Album vor Title
+    /// bzw. Performer vor Album_Performer (siehe `metadataCandidates`) — statt
+    /// den Wert leer zu lassen und auf eine SwiftUI-Auswahl zu warten, die die
+    /// CLI nie anzeigt. Das stellt die frühere Erst-Kandidaten-Priorität wieder
+    /// her; die GUI (`true`) öffnet weiterhin die manuelle Auswahl.
     nonisolated static func resolveMetadata(
         currentTitle: String,
         currentAuthor: String,
         titleCandidates: [TagCandidate],
-        authorCandidates: [TagCandidate]
+        authorCandidates: [TagCandidate],
+        allowsSelectionUI: Bool = true
     ) -> MetadataResolution {
         func resolve(current: String, candidates: [TagCandidate]) -> (String, Bool) {
             guard current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 return (current, false)
             }
-            let uniqueValues = Array(Set(
-                candidates
-                    .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-            )).sorted()
-            return uniqueValues.count == 1 ? (uniqueValues[0], false) : (current, true)
+            let values = candidates
+                .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let uniqueValues = Array(Set(values)).sorted()
+            if uniqueValues.count == 1 { return (uniqueValues[0], false) }
+            guard allowsSelectionUI else {
+                // Headless: erster nichtleerer Kandidat oder unverändert leer.
+                return (values.first ?? current, false)
+            }
+            return (current, true)
         }
 
         let resolvedTitle = resolve(current: currentTitle, candidates: titleCandidates)

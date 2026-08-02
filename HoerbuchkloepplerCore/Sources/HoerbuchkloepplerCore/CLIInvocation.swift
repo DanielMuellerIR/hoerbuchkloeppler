@@ -44,6 +44,11 @@ public struct CLIInvocation: Sendable {
         } else if let coverPath {
             arguments += ["--cover", coverPath]
         }
+        // Auch das ausführliche Logging reist mit — sonst verhält sich der
+        // kopierte Befehl anders als die aktuelle GUI-Session.
+        if settings.isVerbose {
+            arguments.append("--verbose")
+        }
         self.arguments = arguments
     }
 

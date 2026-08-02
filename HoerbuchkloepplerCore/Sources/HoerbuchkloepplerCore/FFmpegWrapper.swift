@@ -193,10 +193,14 @@ public struct FFmpegWrapper {
 
     /// Nur reguläre, ausführbare Dateien sind startfähige Tool-Kandidaten.
     /// Ein gebündeltes Binary ohne x-Bit darf den funktionierenden PATH-Fallback
-    /// nicht verdecken.
+    /// nicht verdecken. Symlinks werden vor der Prüfung aufgelöst:
+    /// `attributesOfItem` folgt ihnen nicht und meldet `.typeSymbolicLink` statt
+    /// `.typeRegular` — die üblichen Homebrew-/MacPorts-Symlinks (z.B.
+    /// `/opt/homebrew/bin/ffmpeg` → `../Cellar/…`) fielen sonst durch.
     public static func isUsableExecutable(_ url: URL) -> Bool {
-        guard FileManager.default.isExecutableFile(atPath: url.path),
-              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+        let resolved = url.resolvingSymlinksInPath()
+        guard FileManager.default.isExecutableFile(atPath: resolved.path),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: resolved.path),
               attributes[.type] as? FileAttributeType == .typeRegular else {
             return false
         }
@@ -363,6 +367,10 @@ public struct FFmpegWrapper {
             // wirklich erfolgreich (für CLI-Exit-Code + ehrliche Statusmeldung).
             var overallSuccess = true
             var completedDuration: TimeInterval = 0
+            // Erfolgreich übernommene Ziel-URLs hier im Worker sammeln und erst
+            // mit der EINEN Abschlussnachricht übergeben — separate Tasks pro
+            // Datei hätten keine garantierte Reihenfolge gegenüber dem Abschluss.
+            var committedOutputs: [URL] = []
 
             for (groupIndex, fileGroup) in job.plan.groups.enumerated() {
                 if context.isCancelled {
@@ -383,6 +391,10 @@ public struct FFmpegWrapper {
                 context.registerTempDirectory(tempDir)
 
                 let finalURL = job.plan.outputURLs[groupIndex]
+                // Leichen abgestürzter früherer Läufe (SIGKILL/Stromausfall)
+                // für dieses Ziel zuerst wegräumen — sie sind versteckt, oft
+                // mehrere GB groß und sonst für immer unsichtbar.
+                removeOrphanedStagedOutputs(for: finalURL)
                 let stagedURL = stagingOutputURL(for: finalURL)
                 context.registerStagedOutput(stagedURL)
                 var success = false
@@ -479,7 +491,7 @@ public struct FFmpegWrapper {
                     // rename() hat die Staging-Datei verschoben; nur noch aus
                     // dem Context austragen, nicht den neuen Zielpfad löschen.
                     context.unregisterStagedOutput(stagedURL)
-                    session.enqueueCompletedOutput(finalURL, runID: context.id)
+                    committedOutputs.append(finalURL)
                 } catch {
                     context.discardStagedOutput(stagedURL)
                     session.enqueueLog(
@@ -502,6 +514,7 @@ public struct FFmpegWrapper {
             session.enqueueConversionFinished(
                 success: overallSuccess,
                 cancelled: context.isCancelled,
+                completedOutputs: committedOutputs,
                 runID: context.id
             )
         }
@@ -1001,11 +1014,61 @@ public struct FFmpegWrapper {
         return parentDir.appendingPathComponent("\(baseName)-\(String(format: "%02d", groupIndex + 1))").appendingPathExtension(fileExt)
     }
 
-    static func stagingOutputURL(for finalURL: URL, id: UUID = UUID()) -> URL {
+    /// Versteckte Staging-Datei neben dem Ziel. Der Dateiname trägt die
+    /// Besitzer-PID als überprüfbare Laufmarke: Nach SIGKILL/Absturz/Stromausfall
+    /// kennt kein Kontext die Datei mehr, aber `removeOrphanedStagedOutputs`
+    /// erkennt am toten Besitzer, dass die oft gigabytegroße Leiche weg darf.
+    static func stagingOutputURL(
+        for finalURL: URL,
+        id: UUID = UUID(),
+        ownerPID: pid_t = ProcessInfo.processInfo.processIdentifier
+    ) -> URL {
         let parent = finalURL.deletingLastPathComponent()
         let basename = finalURL.deletingPathExtension().lastPathComponent
         let ext = finalURL.pathExtension.isEmpty ? "m4b" : finalURL.pathExtension
-        return parent.appendingPathComponent(".\(basename).partial-\(id.uuidString)").appendingPathExtension(ext)
+        return parent.appendingPathComponent(".\(basename).partial-\(ownerPID)-\(id.uuidString)").appendingPathExtension(ext)
+    }
+
+    /// Liest die Besitzer-PID aus einem Staging-Dateinamen
+    /// (`.<basename>.partial-<pid>-<uuid>.<ext>`). Liefert `nil` für das alte
+    /// Format ohne PID und für alles, was keiner Staging-Datei ähnelt.
+    static func stagedOutputOwnerPID(_ url: URL) -> pid_t? {
+        let stem = url.deletingPathExtension().lastPathComponent
+        guard let range = stem.range(of: ".partial-") else { return nil }
+        let suffix = stem[range.upperBound...]
+        guard let dash = suffix.firstIndex(of: "-"),
+              let pid = pid_t(suffix[..<dash]),
+              pid > 0,
+              // Der Rest muss eine vollständige UUID sein. Das schließt das alte
+              // Format `.partial-<uuid>` aus, dessen erste Zifferngruppe sonst
+              // als PID durchginge.
+              UUID(uuidString: String(suffix[suffix.index(after: dash)...])) != nil else {
+            return nil
+        }
+        return pid
+    }
+
+    /// Entfernt verwaiste Staging-Dateien früherer Läufe für genau dieses Ziel.
+    /// Verwaist = die im Namen vermerkte Besitzer-PID lebt nicht mehr. Dateien
+    /// eines lebenden Prozesses (paralleler Lauf auf dasselbe Ziel) und Namen
+    /// ohne PID-Marke bleiben unangetastet.
+    static func removeOrphanedStagedOutputs(for finalURL: URL) {
+        let fileManager = FileManager.default
+        let parent = finalURL.deletingLastPathComponent()
+        let basename = finalURL.deletingPathExtension().lastPathComponent
+        let prefix = ".\(basename).partial-"
+        guard let contents = try? fileManager.contentsOfDirectory(
+            at: parent,
+            includingPropertiesForKeys: nil,
+            options: []
+        ) else { return }
+        for url in contents where url.lastPathComponent.hasPrefix(prefix) {
+            guard let owner = stagedOutputOwnerPID(url) else { continue }
+            // Gleiche Lebend-Prüfung wie bei den Temp-Verzeichnissen: EPERM
+            // heißt "existiert, gehört jemand anderem" — also nicht anfassen.
+            if Darwin.kill(owner, 0) == 0 || errno == EPERM { continue }
+            try? fileManager.removeItem(at: url)
+        }
     }
 
     static func regularFileSize(_ url: URL) -> Int64? {
