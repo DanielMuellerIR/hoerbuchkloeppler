@@ -36,8 +36,16 @@ APP_NAME="Hörbuchklöppler"
 APP="./${APP_NAME}.app"
 VOLNAME="$APP_NAME"
 VERSION="$(cat VERSION)"
-DIST="build/dmg"
+# dist/ liegt bewusst AUSSERHALB von build/: build.sh löscht build/ bei jedem
+# App-Build komplett — ein früher notarisiertes DMG unter build/dmg verschwand
+# damit schon beim Start des nächsten Release-Versuchs.
+DIST="dist"
 DMG="$DIST/${APP_NAME}-${VERSION}.dmg"
+# Unfertige Zwischenstände tragen eigene Namen; der endgültige DMG-Pfad
+# entsteht erst nach bestandener Signatur-/Notary-/Gatekeeper-Prüfung durch
+# atomares Umbenennen. So bleibt ein früheres gutes DMG bei einem Fehlversuch
+# erhalten, und unter dem Erfolgsnamen liegt nie ein ungeprüftes Image.
+STAGING_DMG="$DIST/${APP_NAME}-${VERSION}.unverified.dmg"
 RW_DMG="$DIST/${APP_NAME}-${VERSION}-rw.dmg"
 
 FINDER_LAYOUT=1
@@ -74,7 +82,7 @@ cleanup() {
     echo "Warnung: DMG blieb eingehängt; temporäre Daten bleiben erhalten: $MOUNT_ROOT" >&2
     return
   fi
-  rm -f "$RW_DMG"
+  rm -f "$RW_DMG" "$STAGING_DMG"
   rm -rf "$MOUNT_ROOT"
 }
 trap cleanup EXIT
@@ -90,7 +98,9 @@ xcrun stapler validate "$APP"
 # ── 2. DMG packen ───────────────────────────────────────────────────────────
 log "Packe DMG…"
 mkdir -p "$DIST"
-rm -f "$DMG" "$RW_DMG"
+# Nur die Zwischenstände wegräumen. Ein vorhandenes fertiges "$DMG" bleibt
+# liegen, bis der neue Stand alle Prüfungen bestanden hat (atomares mv unten).
+rm -f "$RW_DMG" "$STAGING_DMG"
 
 SIZE=$(( $(du -sm "$APP" | cut -f1) + 60 ))
 hdiutil create -srcfolder "$APP" -volname "$VOLNAME" -fs HFS+ \
@@ -101,8 +111,10 @@ hdiutil attach "$RW_DMG" -mountpoint "$MOUNT_DIR" -nobrowse -noverify \
 
 ln -s /Applications "$MOUNT_DIR/Applications"
 # Die GPL-Hinweise reisen mit: Wer das Image auf einem anderen eigenen Mac
-# öffnet, findet die Lizenzlage direkt daneben.
-cp THIRD-PARTY-NOTICES.md "$MOUNT_DIR/THIRD-PARTY-NOTICES.md" 2>/dev/null || true
+# öffnet, findet die Lizenzlage direkt daneben. Der Kopiervorgang ist
+# verpflichtend — ein DMG ohne die zugesagten Lizenzhinweise darf kein
+# RELEASE OK melden (set -e bricht bei cp-Fehler ab).
+cp THIRD-PARTY-NOTICES.md "$MOUNT_DIR/THIRD-PARTY-NOTICES.md"
 
 # Icon-Positionen setzen. --no-finder-layout überspringt das: Der Schritt öffnet
 # ein echtes Finder-Fenster und reißt den Fokus an sich, was headless-Läufe (und
@@ -133,13 +145,18 @@ else
   log "Finder-Layout übersprungen (--no-finder-layout)"
 fi
 
+# Vor dem Aushängen sicherstellen, dass die Lizenzhinweise wirklich im Image
+# liegen (z.B. gegen ein versehentliches Entfernen im Finder-Layout-Schritt).
+[ -f "$MOUNT_DIR/THIRD-PARTY-NOTICES.md" ] \
+  || { echo "Fehler: THIRD-PARTY-NOTICES.md fehlt im DMG." >&2; exit 1; }
+
 sync; sleep 2                       # Race: DS_Store-Schreibpuffer vs. detach
 if ! hdiutil detach "$MOUNT_DIR"; then
   hdiutil detach "$MOUNT_DIR" -force
 fi
 mount_is_active && { echo "Fehler: privates DMG konnte nicht ausgehängt werden." >&2; exit 1; }
 
-hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$DMG"
+hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$STAGING_DMG"
 rm -f "$RW_DMG"
 
 # ── 3. DMG signieren, notarisieren, stapeln ─────────────────────────────────
@@ -149,17 +166,22 @@ if [ -z "$SIGN_IDENTITY" ]; then
     | awk -F'"' '/Developer ID Application/{print $2; exit}')"
 fi
 log "Signiere und notarisiere das DMG…"
-codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG"
+codesign --force --timestamp --sign "$SIGN_IDENTITY" "$STAGING_DMG"
 
 # install.sh hat das Profil oben bereits geprüft und clone-lokal gemerkt.
 # shellcheck source=notary-profile.sh
 source "./notary-profile.sh"
 hoerbuchkloeppler_require_notary_profile
 
-xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait
-xcrun stapler staple "$DMG"
-xcrun stapler validate "$DMG"
-spctl --assess --type open --context context:primary-signature -v "$DMG" 2>&1 | sed 's/^/    /'
+xcrun notarytool submit "$STAGING_DMG" --keychain-profile "$NOTARY_PROFILE" --wait
+xcrun stapler staple "$STAGING_DMG"
+xcrun stapler validate "$STAGING_DMG"
+spctl --assess --type open --context context:primary-signature -v "$STAGING_DMG" 2>&1 | sed 's/^/    /'
+
+# Alle Prüfungen bestanden — erst jetzt bekommt das Image den endgültigen
+# Namen. Ein Fehler weiter oben lässt höchstens die .unverified-Datei zurück
+# (die der EXIT-Cleanup entfernt), nie ein ungeprüftes "$DMG".
+mv -f "$STAGING_DMG" "$DMG"
 
 echo
 echo "⚠ Nur für eigene Macs — nicht weitergeben (gebündeltes ffmpeg ist GPL-3.0)."

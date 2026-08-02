@@ -20,6 +20,10 @@ HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/Resources/bin/mediainfo
 /Hörbuchklöppler.app
 build/
 
+# DMG-Ausgabe von release.sh — außerhalb von build/, weil build.sh dieses
+# Verzeichnis bei jedem App-Build löscht
+/dist/
+
 # Hörprobe-Dateien (Audio) — als GitHub-Release-Asset gedacht, nicht ins Repo
 /hoerprobe/
 

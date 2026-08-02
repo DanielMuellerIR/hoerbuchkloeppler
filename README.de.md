@@ -83,7 +83,7 @@ cd hoerbuchkloeppler
 Für einen weiteren **eigenen** Mac gibt es zusätzlich `release.sh`. Es packt denselben notarisierten Stand in ein DMG:
 
 ```bash
-./release.sh                     # → build/dmg/Hörbuchklöppler-<version>.dmg
+./release.sh                     # → dist/Hörbuchklöppler-<version>.dmg
 ./release.sh --no-finder-layout  # ohne Finder-Fensterlayout (headless)
 ```
 
