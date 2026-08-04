@@ -28,6 +28,32 @@ if [ "$IDENTITY" != "-" ]; then
   SIGN_ARGS+=(--options runtime --timestamp)
 fi
 
+# --- Spuren des Build-Macs entfernen, BEVOR signiert wird ---------------------
+# (strip und Löschen machen eine vorhandene Signatur ungültig, deshalb hier und
+# nicht später.) Gefunden am 2026-08-04 in der ausgelieferten App: An zwei
+# Stellen stand der volle Pfad dieses Macs.
+#
+# 1. Debug-Map in den Binärdateien. Der Compiler notiert für jede übersetzte
+#    Quelldatei den vollen Pfad ihrer .o-Datei. `strip -S` nimmt genau diese
+#    Debug-Symbole und lässt die normale Symboltabelle stehen, damit
+#    Absturzberichte lesbar bleiben. Angefasst werden nur die eigenen
+#    Binärdateien; ffmpeg und mediainfo kommen fertig von außen.
+for eigene in "$APP/Contents/MacOS/"* "$FRAMEWORK/Versions/A/HoerbuchkloepplerCore"; do
+  [ -f "$eigene" ] || continue
+  if file -b "$eigene" 2>/dev/null | grep -q 'Mach-O'; then
+    strip -S "$eigene"
+  fi
+done
+
+# 2. Die Modules-Dateien des Frameworks (.swiftmodule und vor allem
+#    .swiftsourceinfo) enthalten Quelldateipfade — .swiftsourceinfo ist genau
+#    dafür da. Gebraucht werden sie nur, um GEGEN das Framework zu übersetzen;
+#    zur Laufzeit liest sie niemand. In einer ausgelieferten App haben sie
+#    nichts verloren.
+if [ -d "$FRAMEWORK/Versions/A/Modules" ]; then
+  rm -rf "$FRAMEWORK/Versions/A/Modules"
+fi
+
 # Die gebündelten Tools ffmpeg und mediainfo liegen als Mach-O in einer
 # SwiftPM-Ressourcen-Bundle unter Contents/Resources. Sie sind eigenständige
 # Programme (keine Frameworks/Helpers) und müssen einzeln signiert werden — eine
