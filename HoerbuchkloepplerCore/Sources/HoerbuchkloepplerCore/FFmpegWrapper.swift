@@ -1034,7 +1034,11 @@ public struct FFmpegWrapper {
     /// Format ohne PID und für alles, was keiner Staging-Datei ähnelt.
     static func stagedOutputOwnerPID(_ url: URL) -> pid_t? {
         let stem = url.deletingPathExtension().lastPathComponent
-        guard let range = stem.range(of: ".partial-") else { return nil }
+        // Von hinten suchen: Der Zieltitel selbst darf `.partial-` enthalten
+        // (z.B. `Mein.partial-Buch.m4b` ergibt `.Mein.partial-Buch.partial-<pid>-<uuid>`).
+        // Nur der letzte Marker ist der von uns angehängte; eine UUID enthält nie
+        // `.partial-`, der Marker steht also garantiert am richtigen Platz.
+        guard let range = stem.range(of: ".partial-", options: .backwards) else { return nil }
         let suffix = stem[range.upperBound...]
         guard let dash = suffix.firstIndex(of: "-"),
               let pid = pid_t(suffix[..<dash]),
@@ -1063,6 +1067,10 @@ public struct FFmpegWrapper {
             options: []
         ) else { return }
         for url in contents where url.lastPathComponent.hasPrefix(prefix) {
+            // `contentsOfDirectory` liefert auch Ordner. Ein passend benannter
+            // Ordner würde von `removeItem` samt Inhalt gelöscht — deshalb hier
+            // nur echte Dateien zulassen.
+            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { continue }
             guard let owner = stagedOutputOwnerPID(url) else { continue }
             // Gleiche Lebend-Prüfung wie bei den Temp-Verzeichnissen: EPERM
             // heißt "existiert, gehört jemand anderem" — also nicht anfassen.

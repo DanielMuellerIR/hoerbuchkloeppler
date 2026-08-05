@@ -131,6 +131,50 @@ struct OutputSafetyTests {
         #expect(FileManager.default.fileExists(atPath: otherTarget.path))
     }
 
+    @Test("Ein Ziel mit `.partial-` im eigenen Namen wird trotzdem aufgeräumt")
+    func handlesTargetNameContainingMarker() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // `sanitizeFilename` lässt Punkte und Bindestriche durch, ein solcher
+        // Titel ist also über `--output` und den GUI-Speicherdialog erreichbar.
+        let final = directory.appendingPathComponent("Mein.partial-Buch.m4b")
+        // Oberhalb von macOS' PID_MAX (99999) — sicher kein lebender Prozess.
+        let orphan = FFmpegWrapper.stagingOutputURL(for: final, ownerPID: 987_654)
+        let alive = FFmpegWrapper.stagingOutputURL(for: final)
+
+        // Erzeugen und Parsen müssen zusammenpassen: Nur der letzte Marker zählt.
+        #expect(orphan.lastPathComponent.hasPrefix(".Mein.partial-Buch.partial-"))
+        #expect(FFmpegWrapper.stagedOutputOwnerPID(orphan) == 987_654)
+        #expect(FFmpegWrapper.stagedOutputOwnerPID(alive) == ProcessInfo.processInfo.processIdentifier)
+
+        for url in [orphan, alive] {
+            try Data("unvollständig".utf8).write(to: url)
+        }
+
+        FFmpegWrapper.removeOrphanedStagedOutputs(for: final)
+
+        #expect(!FileManager.default.fileExists(atPath: orphan.path))
+        #expect(FileManager.default.fileExists(atPath: alive.path))
+    }
+
+    @Test("Ein gleichnamiger Ordner wird nicht rekursiv gelöscht")
+    func doesNotRemoveDirectoriesMatchingStagingName() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        // Gleicher Name wie eine verwaiste Partial-Datei, aber ein Ordner mit
+        // Inhalt — der darf auf keinen Fall mitsamt Inhalt verschwinden.
+        let decoyDirectory = FFmpegWrapper.stagingOutputURL(for: final, ownerPID: 987_654)
+        try FileManager.default.createDirectory(at: decoyDirectory, withIntermediateDirectories: true)
+        let payload = decoyDirectory.appendingPathComponent("wichtig.txt")
+        try Data("nicht anfassen".utf8).write(to: payload)
+
+        FFmpegWrapper.removeOrphanedStagedOutputs(for: final)
+
+        #expect(FileManager.default.fileExists(atPath: decoyDirectory.path))
+        #expect(FileManager.default.fileExists(atPath: payload.path))
+    }
+
     @Test("Fortschritt mehrerer Split-Gruppen bleibt monoton")
     func splitProgressIsMonotonic() {
         let values = [
