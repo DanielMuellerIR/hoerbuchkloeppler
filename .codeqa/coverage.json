@@ -4,9 +4,11 @@
   "campaign": {
     "id": "20260815T134633974092+0200",
     "token_budget": 2000000,
-    "status": "active",
+    "status": "complete",
     "started_at": "2026-08-15T13:46:33+02:00",
-    "tokens_spent": 564709
+    "tokens_spent": 599452,
+    "finished_at": "2026-08-15T14:26:45+02:00",
+    "finish_reason": "all-current"
   },
   "campaign_history": [],
   "scope": {
@@ -299,12 +301,21 @@
       "risk": "low",
       "priority": 11,
       "reason": "App-Ziel, Build-Einstellungen und Paket-Verknüpfung im Xcode-Projekt",
-      "state": "in_progress",
-      "active_run": {
+      "state": "completed",
+      "last_run": {
         "campaign_id": "20260815T134633974092+0200",
-        "started_at": "2026-08-15T14:23:07+02:00",
-        "required_review": "full",
-        "status_at_start": "pending"
+        "completed_at": "2026-08-15T14:25:11+02:00",
+        "observed_head": "c473a547f123c4d8688fc07ee21230108bea271d",
+        "content_sha256": "70090189de52d1bfb661a3e4542987166b9a354ea9fb8bdc0f59d24bcbf95975",
+        "file_count": 1,
+        "review": "full",
+        "outcome": "improved",
+        "summary": "Gesamte Xcode-Projektdatei geprüft: synchronisierte Dateigruppe, App-Target, lokales Core-Paket, Swift 6/Main-Actor, macOS 13, Plist, Sandbox, Signing und Versionswerte sind konsistent. Swift-Warnungen werden nun zielgenau nur im App-Target für Debug und Release als Fehler behandelt, ohne Xcodes Paket-Warnungsunterdrückung zu widersprechen.",
+        "tests": [
+          "plutil -lint project.pbxproj und xcodebuild -list -json: passed",
+          "xcodebuild Debug macOS arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED mit -warnings-as-errors im App-Compiler",
+          "xcodebuild Release macOS arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED mit -warnings-as-errors im App-Compiler"
+        ]
       }
     }
   ],
