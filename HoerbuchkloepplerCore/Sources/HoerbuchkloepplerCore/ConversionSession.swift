@@ -900,7 +900,14 @@ public final class ConversionSession: ObservableObject, Identifiable {
         ) else {
             return []
         }
-        return enumerator.compactMap { $0 as? URL }
+        return enumerator.compactMap { item in
+            guard let fileURL = item as? URL,
+                  let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]),
+                  values.isRegularFile == true else {
+                return nil
+            }
+            return fileURL
+        }
     }
 
     /// Leichter Teil: das Scan-Ergebnis in den Main-Actor-isolierten

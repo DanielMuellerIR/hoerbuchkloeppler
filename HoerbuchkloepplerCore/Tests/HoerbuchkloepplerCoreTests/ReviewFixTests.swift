@@ -45,6 +45,21 @@ struct AsyncAVFoundationTests {
         #expect(audio.chapterTitle == "Kapitel Eins")
         #expect(artwork == nil)
     }
+
+    @Test("Ordner mit Audio-Endung werden beim rekursiven Scan nicht importiert")
+    func scanIgnoresDirectoriesWithAudioExtension() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(
+            at: directory.appendingPathComponent("Kein Kapitel.mp3"),
+            withIntermediateDirectories: false
+        )
+        let session = ConversionSession(settings: AudioSettings())
+
+        let scanned = await session.scanFolder(directory)
+
+        #expect(scanned.audioFiles.isEmpty)
+    }
 }
 
 @Suite("Review-Fixes – Ausgabeplan und atomare Übernahme")

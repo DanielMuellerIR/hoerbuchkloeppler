@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "project": "Hoerbuchkloeppler",
+  "campaign": {
+    "id": "20260815T134633974092+0200",
+    "token_budget": 2000000,
+    "status": "active",
+    "started_at": "2026-08-15T13:46:33+02:00"
+  },
+  "campaign_history": [],
+  "scope": {
+    "paths": [
+      "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore",
+      "HoerbuchkloepplerCore/Sources/kloeppler",
+      "HoerbuchkloepplerCore/Tests",
+      "Hörbuchklöppler",
+      "HoerbuchkloepplerCore/Package.swift",
+      "Hörbuchklöppler.xcodeproj/project.pbxproj",
+      "build.sh",
+      "install.sh",
+      "release.sh",
+      "sign-bundle.sh",
+      "notary-profile.sh"
+    ],
+    "exclusions": [
+      {
+        "path": "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/Resources",
+        "reason": "Eingebettete Drittanbieter-Binaries und Verzeichnis-Platzhalter; werden vom Build-Skript erzeugt, nicht refaktoriert"
+      },
+      {
+        "path": "Hörbuchklöppler/Assets.xcassets",
+        "reason": "Binäre App-Icons und Xcode-Asset-Metadaten; kein ausführbarer First-Party-Code"
+      }
+    ]
+  },
+  "areas": [
+    {
+      "id": "session-lifecycle",
+      "paths": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift"
+      ],
+      "risk": "critical",
+      "priority": 1,
+      "reason": "Bekannte SIGINT-Lücke in der Vorbereitungsphase sowie zentraler Main-Actor-, Import- und Metadatenzustand",
+      "state": "in_progress",
+      "active_run": {
+        "campaign_id": "20260815T134633974092+0200",
+        "started_at": "2026-08-15T13:47:40+02:00",
+        "required_review": "full",
+        "status_at_start": "pending"
+      }
+    },
+    {
+      "id": "conversion-engine",
+      "paths": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift",
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/FFmpegWrapperTests.swift"
+      ],
+      "risk": "critical",
+      "priority": 2,
+      "reason": "Datenintegrität, externe Prozesse, Parallelität, Abbruch und atomare Ausgabedateien",
+      "state": "pending"
+    },
+    {
+      "id": "cli-frontend",
+      "paths": [
+        "HoerbuchkloepplerCore/Sources/kloeppler/KloepplerCLI.swift"
+      ],
+      "risk": "high",
+      "priority": 3,
+      "reason": "Signalbehandlung, Fehler-Exit-Codes, Eingabevalidierung und skriptfähige Ausgabe",
+      "state": "pending"
+    },
+    {
+      "id": "installation-safety",
+      "paths": [
+        "install.sh",
+        "sign-bundle.sh",
+        "notary-profile.sh"
+      ],
+      "risk": "critical",
+      "priority": 4,
+      "reason": "Notarisierung, Signaturprüfung und einziger mutierender Pfad nach /Applications",
+      "state": "pending"
+    },
+    {
+      "id": "audio-analysis",
+      "paths": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift"
+      ],
+      "risk": "high",
+      "priority": 5,
+      "reason": "AVFoundation-Analyse, Kapitelimport und externe ffmpeg-Prozessgrenze",
+      "state": "pending"
+    },
+    {
+      "id": "core-configuration",
+      "paths": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioSettings.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/SettingsManager.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/CLIInvocation.swift"
+      ],
+      "risk": "high",
+      "priority": 6,
+      "reason": "Persistierte Einstellungen, Normalisierung und vollständiger shell-sicherer GUI-zu-CLI-Vertrag",
+      "state": "pending"
+    },
+    {
+      "id": "build-system",
+      "paths": [
+        "build.sh",
+        "HoerbuchkloepplerCore/Package.swift"
+      ],
+      "risk": "high",
+      "priority": 7,
+      "reason": "Download-Integrität externer Werkzeuge und reproduzierbarer Core-, CLI- und App-Build",
+      "state": "pending"
+    },
+    {
+      "id": "release-packaging",
+      "paths": [
+        "release.sh"
+      ],
+      "risk": "high",
+      "priority": 8,
+      "reason": "DMG-Erzeugung, temporäre Mounts und bewusst nicht öffentlicher Release-Pfad",
+      "state": "pending"
+    },
+    {
+      "id": "regression-tests",
+      "paths": [
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ReviewFixTests.swift"
+      ],
+      "risk": "medium",
+      "priority": 9,
+      "reason": "Breite Querschnittstests für Laufzeit, Import, Einstellungen und Tool-Auflösung",
+      "state": "pending"
+    },
+    {
+      "id": "gui-frontend",
+      "paths": [
+        "Hörbuchklöppler/ContentView.swift",
+        "Hörbuchklöppler/ConversionOverlayView.swift",
+        "Hörbuchklöppler/MetadataSelectionView.swift",
+        "Hörbuchklöppler/SettingsView.swift",
+        "Hörbuchklöppler/Hörbuchklöppler.swift",
+        "Hörbuchklöppler/info.plist"
+      ],
+      "risk": "medium",
+      "priority": 10,
+      "reason": "Dünne SwiftUI-Schicht, Datei-Drop, Exportplanung und Sitzungsdarstellung",
+      "state": "pending"
+    },
+    {
+      "id": "xcode-config",
+      "paths": [
+        "Hörbuchklöppler.xcodeproj/project.pbxproj"
+      ],
+      "risk": "low",
+      "priority": 11,
+      "reason": "App-Ziel, Build-Einstellungen und Paket-Verknüpfung im Xcode-Projekt",
+      "state": "pending"
+    }
+  ],
+  "architecture": {
+    "campaign_id": "20260815T134633974092+0200",
+    "recorded_at": "2026-08-15T13:47:22+02:00",
+    "observed_head": "4c6590b080ddb87076963b2fe898118a65ee67a2",
+    "summary": "Das Paradigma passt zu zwei Frontends, aber ConversionSession bündelt Zustandsmodell, Import und Metadatenanalyse; FFmpegWrapper bündelt Planung, Prozesssteuerung, Encoding und atomare Ausgabe.",
+    "paradigm": "Schichtenmodell mit gemeinsamem Core; SwiftUI-Frontend MVVM-artig über ConversionSession und CLI als separater Adapter",
+    "fit": "gespannt",
+    "recommendation": "Lokale Verantwortungsgrenzen und testbare Hilfsfunktionen bereichsweise schärfen; kein Paradigmenwechsel, da der gemeinsame Core weiterhin die passende Architektur ist."
+  },
+  "themes": [
+    {
+      "id": "preparation-task-cancellation",
+      "summary": "Ctrl-C beendet in der CLI nur registrierte externe Prozesse; der laufende Swift-Vorbereitungstask und AVFoundation-Ladevorgänge werden nicht gecancelt. Task-Handle laufbezogen speichern, im Signalpfad canceln und Cancellation in Scan-, Audio- und Artwork-Schritten auswerten.",
+      "evidence": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift",
+        "HoerbuchkloepplerCore/Sources/kloeppler/KloepplerCLI.swift"
+      ],
+      "priority": 1,
+      "state": "pending",
+      "noted_at": "2026-08-15T13:50:16+02:00",
+      "campaign_id": "20260815T134633974092+0200"
+    }
+  ]
+}
