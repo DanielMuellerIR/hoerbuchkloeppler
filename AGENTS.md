@@ -43,17 +43,6 @@ gezielt das passende Dokument greppen/lesen statt alles laden.
   `ffmpeg` auslösen. Deshalb hat `release.sh` bewusst keinen `--publish`-Pfad,
   keinen GitHub-Upload und keinen Tag — bitte auch keinen nachrüsten.
 
-## Nächste Schritte
-
-- **CLI: Ctrl-C während der Audioanalyse greift nicht sofort.** SIGINT beendet
-  in der Vorbereitungsphase nur registrierte externe Prozesse; laufende
-  AVFoundation-Aufrufe (`AVAsset.load` für Dauer/Tags/Artwork in `addFolder`)
-  laufen bis zu ihrem natürlichen Ende weiter — bei einer hängenden oder sehr
-  langsamen Quelle bleibt die CLI so lange stehen. Lösungsidee: den
-  Vorbereitungslauf als gespeicherten Swift-Task führen, ihn im Signalpfad
-  canceln und in `scanFolder` sowie den AVFoundation-Schritten
-  `Task.checkCancellation()` auswerten (Code-Review-Befund 2026-08).
-
 ## Vorgänger-Versionen (Archiv-Tags)
 
 Frühere Stände liegen als annotierte Tags in **diesem** Repo, nicht als separate

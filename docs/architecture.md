@@ -26,8 +26,9 @@ Core.
   und CLI erwarten denselben asynchronen Import-Lebenszyklus; die frühere
   `metadataGroup: DispatchGroup`-Sonderbehandlung der CLI entfällt.
 - Laufbezogene Abbrüche bleiben synchron erreichbar: kleine, sperrengeschützte
-  Koordinatoren besitzen die Vorbereitungs- und Konvertierungsprozesse, damit
-  SIGINT abbrechen kann, ohne die Main-Actor-Isolation zu umgehen.
+  Koordinatoren besitzen den Swift-Vorbereitungstask sowie die Vorbereitungs-
+  und Konvertierungsprozesse. Dadurch kann SIGINT abbrechen, ohne die
+  Main-Actor-Isolation zu umgehen.
 - **App-Sandbox: AUS** — nötig, um externe Binaries auszuführen.
 
 ## UI-Pattern (App)
@@ -46,7 +47,7 @@ Symbolnamen als Anker (bewusst **ohne** Zeilennummern — die driften bei jeder
 |---|---|---|
 | `FFmpegWrapper.swift` | Zentraler Ausgabeplan, unveränderlicher Worker-Snapshot, atomare Partial→Ziel-Übernahme, Prozessausführung, Concat/Muxing, laufbezogene Cancellation | `ConversionJob` · `makeConversionPlan` · `convert(session:plan:)` · `commitStagedOutput` · `performSequentialConversion` · `performParallelConversion` · `runFinalProcess` · `splitAudioFilesIfNeeded` |
 | `CLIInvocation.swift` | Vollständiger, POSIX-shell-sicherer GUI→CLI-Handoff | `CLIInvocation.arguments` · `shellCommand` |
-| `ConversionSession.swift` | Main-Actor-isolierter Lebenszyklus und `@Published`-State, asynchroner Import, Worker→UI-Nachrichten | `addLog` · `fetchRawMediaInfo` · `processIncomingFiles` · `importGlobalMetadata` · `scanFolder` · `addFolder` · `selectCover` |
+| `ConversionSession.swift` | Main-Actor-isolierter Lebenszyklus und `@Published`-State, abbrechbarer asynchroner Import, Worker→UI-Nachrichten | `addLog` · `fetchRawMediaInfo` · `processIncomingFiles` · `importGlobalMetadata` · `scanFolder` · `prepareFolder` · `addFolder` · `selectCover` |
 | `AudioSettings.swift` | Einstellungs-Struct (`Codable`) | Felder → [settings.md](settings.md) |
 | `SettingsManager.swift` | Laden/Speichern `~/.Hoerbuchkloeppler/settings.json` | `shared` · `loadSettings` · `saveSettings` |
 | `AudioFile+Extensions.swift` | Asynchrone AVFoundation-Artwork-Analyse, Kapitel-Extraktion via **gebündeltem ffmpeg** (`-f ffmetadata`) | `extractEmbeddedArtwork` · `extractChapters` · `parseFFMetadataChapters` |

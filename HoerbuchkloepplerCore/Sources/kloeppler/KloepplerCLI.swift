@@ -83,6 +83,30 @@ private func readLine(unlessInterrupted state: InterruptState) -> String? {
     return nil
 }
 
+/// Erzeugt den GCD-Handler außerhalb des Main Actors. Wird die Closure direkt
+/// in `execute` angelegt, erbt sie dessen Actor-Isolation und Swift 6 beendet
+/// den Prozess beim Aufruf auf der Signal-Queue mit einem Laufzeitfehler.
+private func makeInterruptHandler(
+    session: ConversionSession,
+    interruptState: InterruptState,
+    renderer: TerminalRenderer
+) -> @Sendable () -> Void {
+    {
+        let preparationCancelled = interruptState.shouldCancelPreparation
+            ? session.cancelPreparation()
+            : false
+        let outcome = FFmpegWrapper.cancelConversion(session: session)
+        if interruptState.recordSignal(
+            conversionOutcome: outcome,
+            preparationCancelled: preparationCancelled
+        ) {
+            Task { @MainActor in
+                renderer.emitLog("🛑 Abbruchsignal (SIGINT) empfangen. Bereinige und beende...")
+            }
+        }
+    }
+}
+
 /// Sendable-Snapshot der von ArgumentParser gefüllten Optionen. Die Parser-
 /// Konformität bleibt dadurch nichtisoliert; nur die eigentliche Ausführung
 /// wechselt anschließend auf den Main Actor.
@@ -301,20 +325,11 @@ struct KloepplerCLI: AsyncParsableCommand {
         let interruptState = InterruptState()
         let signalQueue = DispatchQueue(label: "de.hoerbuchkloeppler.sigint")
         let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: signalQueue)
-        sigintSource.setEventHandler {
-            let preparationCancelled = interruptState.shouldCancelPreparation
-                ? session.cancelPreparation()
-                : false
-            let outcome = FFmpegWrapper.cancelConversion(session: session)
-            if interruptState.recordSignal(
-                conversionOutcome: outcome,
-                preparationCancelled: preparationCancelled
-            ) {
-                Task { @MainActor in
-                    renderer.emitLog("🛑 Abbruchsignal (SIGINT) empfangen. Bereinige und beende...")
-                }
-            }
-        }
+        sigintSource.setEventHandler(handler: makeInterruptHandler(
+            session: session,
+            interruptState: interruptState,
+            renderer: renderer
+        ))
         signal(SIGINT, SIG_IGN)
         sigintSource.resume()
         defer { sigintSource.cancel() }
@@ -324,7 +339,7 @@ struct KloepplerCLI: AsyncParsableCommand {
             session.cancelPreparation()
             throw ExitCode(130)
         }
-        await session.addFolder(url)
+        await session.prepareFolder(url)
 
         if interruptState.wasReceived { throw ExitCode(130) }
 

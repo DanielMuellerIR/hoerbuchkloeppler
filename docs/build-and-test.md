@@ -126,6 +126,7 @@ Deshalb laufen alle Terminal-Ausgaben der CLI über `TerminalRenderer` in
   m4b-Re-Import (`extractChapters` via gebündeltem ffmpeg), Auto-Split
   (`--max-duration` → `-01`/`-02`), Stereo (44100 Hz), Cover (eingebettet +
   `folder.jpg`), Kapiteltitel mit Sonderzeichen, Fehler-Exit-Codes, SIGINT-
-  Abbruch inkl. Temp-Cleanup.
+  Abbruch inkl. Temp-Cleanup. SIGINT während der AVFoundation-Vorbereitung
+  wurde am 2026-08-15 mit 1.001 WAV-Dateien und Exit 130 verifiziert.
 - **Noch ungetestet:** GUI-App-Lauf (nur Kompilierung via xcodebuild geprüft),
   Audio-Qualität nach Gehör.

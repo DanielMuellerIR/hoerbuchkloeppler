@@ -5,22 +5,25 @@ extension AudioFile {
     /// Extrahiert das eingebettete Cover aus einer Audiodatei.
     /// Nutzt sowohl Common-Keys als auch Raw-Keys für maximale Kompatibilität (MP3, M4A, etc.)
     public static func extractEmbeddedArtwork(from url: URL) async -> Data? {
+        guard !taskCancellationRequested() else { return nil }
         let asset = AVAsset(url: url)
 
         guard let metadata = try? await asset.load(.metadata) else { return nil }
+        guard !taskCancellationRequested() else { return nil }
         for item in metadata {
+            guard !taskCancellationRequested() else { return nil }
             // 1. Prüfung über CommonKey (Standardweg)
             if let commonKey = item.commonKey?.rawValue, (commonKey == "artwork" || commonKey == "cover") {
-                if let data = try? await item.load(.dataValue) {
-                    return data
-                }
+                let data = try? await item.load(.dataValue)
+                guard !taskCancellationRequested() else { return nil }
+                if let data { return data }
             }
             
             // 2. Prüfung über den rohen Key (oft nötig für ID3/MP3)
             if let key = item.key as? String, (key.contains("artwork") || key.contains("cover")) {
-                if let data = try? await item.load(.dataValue) {
-                    return data
-                }
+                let data = try? await item.load(.dataValue)
+                guard !taskCancellationRequested() else { return nil }
+                if let data { return data }
             }
         }
         return nil
@@ -46,7 +49,7 @@ extension AudioFile {
         log: @Sendable (String) -> Void = { _ in }
     ) async -> [AudioFile]? {
         guard ["m4b", "mp4"].contains(url.pathExtension.lowercased()) else { return nil }
-        guard !shouldCancel() else { return [] }
+        guard !shouldCancel(), !taskCancellationRequested() else { return [] }
 
         guard let ffmpegURL = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else {
             log("⚠️ ffmpeg wurde nicht gefunden. Kapitel-Extraktion übersprungen.")
@@ -65,7 +68,7 @@ extension AudioFile {
         defer { unregisterProcess(process) }
 
         do {
-            guard !shouldCancel() else { return [] }
+            guard !shouldCancel(), !taskCancellationRequested() else { return [] }
             try process.run()
             // Cancel kann genau zwischen dem letzten Check und `run()` liegen.
             // Der Context hat den damals noch nicht laufenden Process dann nicht
@@ -75,7 +78,7 @@ extension AudioFile {
             // die Kapitelliste den Pipe-Puffer (~64 KB) füllt.
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
-            guard !shouldCancel() else { return [] }
+            guard !shouldCancel(), !taskCancellationRequested() else { return [] }
 
             guard let text = String(data: data, encoding: .utf8) else {
                 log("⚠️ FFMETADATA von \(url.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
@@ -88,6 +91,7 @@ extension AudioFile {
             }
 
             let loadedDuration = try? await AVURLAsset(url: url).load(.duration)
+            guard !shouldCancel(), !taskCancellationRequested() else { return [] }
             let totalDuration = sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
             // Das LETZTE Kapitel hat in FFMETADATA oft keine END-Zeit — es gibt kein
             // Folgekapitel, aus dem sie (wie in parseFFMetadataChapters) abgeleitet
@@ -129,7 +133,7 @@ extension AudioFile {
             log("✅ \(audioFiles.count) Kapitel aus \(url.lastPathComponent) extrahiert.")
             return audioFiles
         } catch {
-            if shouldCancel() { return [] }
+            if shouldCancel() || taskCancellationRequested() { return [] }
             log("⚠️ Kapitel aus \(url.lastPathComponent) konnten nicht gelesen werden: \(error.localizedDescription)")
             return [await AudioFile(url: url)]
         }

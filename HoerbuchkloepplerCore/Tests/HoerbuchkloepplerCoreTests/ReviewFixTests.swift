@@ -14,6 +14,17 @@ private func makeExecutable(_ url: URL, contents: String) throws {
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
 }
 
+private actor PreparationCancellationProbe {
+    private var started = false
+    private var observedCancellation = false
+
+    func markStarted() { started = true }
+    func markFinished(cancelled: Bool) { observedCancellation = cancelled }
+    func snapshot() -> (started: Bool, observedCancellation: Bool) {
+        (started, observedCancellation)
+    }
+}
+
 @Suite("Swift 6 – asynchrone AVFoundation-Analyse")
 @MainActor
 struct AsyncAVFoundationTests {
@@ -305,6 +316,44 @@ struct ToolResolutionTests {
 @Suite("Review-Fixes – laufbezogener Abbruch")
 @MainActor
 struct CancellationIsolationTests {
+    @Test("Vorbereitungsabbruch cancelt den registrierten Swift-Task")
+    func preparationCancellationReachesTask() async throws {
+        let session = ConversionSession(settings: AudioSettings())
+        let probe = PreparationCancellationProbe()
+        session.beginPreparation()
+        let work = Task {
+            await session.runPreparationTask {
+                await probe.markStarted()
+                do {
+                    try await Task.sleep(for: .seconds(30))
+                } catch {
+                    // CancellationError ist hier das erwartete Ende.
+                }
+                await probe.markFinished(cancelled: Task.isCancelled)
+            }
+        }
+
+        var state = await probe.snapshot()
+        var attempts = 0
+        while !state.started, attempts < 1_000 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(1))
+            state = await probe.snapshot()
+        }
+        guard state.started else {
+            work.cancel()
+            await work.value
+            Issue.record("Vorbereitungstask startete nicht innerhalb einer Sekunde")
+            return
+        }
+
+        #expect(session.cancelPreparation())
+        await work.value
+        state = await probe.snapshot()
+        #expect(state.observedCancellation)
+        #expect(!session.cancelPreparation())
+    }
+
     @Test("Abbruch räumt nur Ressourcen seines Laufs auf")
     func contextsAreIsolated() throws {
         let firstDirectory = try temporaryDirectory()

@@ -49,6 +49,7 @@ struct MetadataResolution: Equatable, Sendable {
 private final class PreparationContext: @unchecked Sendable {
     private let lock = NSLock()
     private var processes: [ObjectIdentifier: Process] = [:]
+    private var taskCancellations: [UUID: @Sendable () -> Void] = [:]
     private var cancelled = false
 
     var isCancelled: Bool {
@@ -74,6 +75,24 @@ private final class PreparationContext: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Registriert einen Swift-Task zusätzlich zu den externen Prozessen. So
+    /// erreicht der synchrone SIGINT-Pfad auch gerade suspendierte
+    /// AVFoundation-Aufrufe und nicht nur ffmpeg/mediainfo.
+    func registerTaskCancellation(_ cancellation: @escaping @Sendable () -> Void) -> UUID? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled else { return nil }
+        let id = UUID()
+        taskCancellations[id] = cancellation
+        return id
+    }
+
+    func unregisterTaskCancellation(_ id: UUID) {
+        lock.lock()
+        taskCancellations.removeValue(forKey: id)
+        lock.unlock()
+    }
+
     @discardableResult
     func cancel() -> Bool {
         lock.lock()
@@ -83,8 +102,11 @@ private final class PreparationContext: @unchecked Sendable {
         }
         cancelled = true
         let activeProcesses = Array(processes.values)
+        let activeTaskCancellations = Array(taskCancellations.values)
         processes.removeAll()
+        taskCancellations.removeAll()
         lock.unlock()
+        activeTaskCancellations.forEach { $0() }
         activeProcesses.forEach { if $0.isRunning { $0.terminate() } }
         return true
     }
@@ -229,6 +251,39 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
     private nonisolated func currentPreparationContext() -> PreparationContext? {
         preparationCoordinator.context()
+    }
+
+    private nonisolated func preparationCancellationRequested() -> Bool {
+        AudioFile.taskCancellationRequested()
+            || currentPreparationContext()?.isCancelled == true
+    }
+
+    /// Führt einen Vorbereitungsschritt als registrierten Swift-Task aus. Der
+    /// Signalpfad kann dessen Handle synchron canceln; der Aufrufer wartet
+    /// trotzdem auf das saubere Ende, bevor die CLI mit Exit 130 zurückkehrt.
+    nonisolated func runPreparationTask(
+        _ operation: @escaping @MainActor @Sendable () async -> Void
+    ) async {
+        let context = currentPreparationContext()
+        let task = Task { @MainActor in await operation() }
+        guard let context else {
+            await task.value
+            return
+        }
+        guard let registration = context.registerTaskCancellation({ task.cancel() }) else {
+            task.cancel()
+            await task.value
+            return
+        }
+        await task.value
+        context.unregisterTaskCancellation(registration)
+    }
+
+    /// Vollständiger CLI-Ordnerimport als abbrechbarer Vorbereitungstask.
+    public nonisolated func prepareFolder(_ url: URL) async {
+        await runPreparationTask { @MainActor [weak self] in
+            await self?.addFolder(url)
+        }
     }
 
     /// Liest Kapitel mit einem optional laufenden Vorbereitungs-Context. Die
@@ -868,21 +923,25 @@ public final class ConversionSession: ObservableObject, Identifiable {
     public nonisolated func scanFolder(_ url: URL) async -> ScannedFolder {
         var foundAudio: [AudioFile] = []; var foundImages: [URL] = []
         for fileURL in Self.recursiveFileURLs(in: url) {
-            if currentPreparationContext()?.isCancelled == true { break }
+            if preparationCancellationRequested() { break }
             let ext = fileURL.pathExtension.lowercased()
             if ["mp3", "m4a", "wav", "flac", "m4b", "mp4"].contains(ext) {
                 if ["m4b", "mp4"].contains(ext),
                    let chapters = await extractChapters(from: fileURL) {
+                    if preparationCancellationRequested() { break }
                     foundAudio.append(contentsOf: chapters)
                 } else {
-                    foundAudio.append(await AudioFile(url: fileURL))
+                    let audioFile = await AudioFile(url: fileURL)
+                    if preparationCancellationRequested() { break }
+                    foundAudio.append(audioFile)
                 }
             } else if ["jpg", "jpeg", "png"].contains(ext) { foundImages.append(fileURL) }
         }
         var embedded: Data? = nil
         for audioFile in foundAudio {
-            if currentPreparationContext()?.isCancelled == true { break }
+            if preparationCancellationRequested() { break }
             if let artworkData = await AudioFile.extractEmbeddedArtwork(from: audioFile.url) {
+                if preparationCancellationRequested() { break }
                 embedded = artworkData
                 break
             }
@@ -916,6 +975,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         _ scanned: ScannedFolder,
         importToken: ImportToken? = nil
     ) async {
+        if AudioFile.taskCancellationRequested() { return }
         if let importToken, !isCurrentImport(importToken) { return }
         let expectedCoverRevision = importToken?.coverRevision ?? coverRevision
         if coverRevision == expectedCoverRevision, !isCoverSuppressed,
@@ -948,6 +1008,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// Actors, anschließend Übernahme und Metadatenauflösung auf Main.
     public func addFolder(_ url: URL) async {
         let scanned = await scanFolder(url)
+        guard !preparationCancellationRequested() else { return }
         await applyScannedFolder(scanned)
     }
 
@@ -1011,16 +1072,30 @@ public struct AudioFile: Identifiable, Sendable {
     /// verhindern den Import nicht; sie fallen auf sichere Standardwerte zurück.
     public init(url: URL) async {
         self.url = url
+        self.startTime = 0
+        let fallbackTitle = url.deletingPathExtension().lastPathComponent
+        guard !Self.taskCancellationRequested() else {
+            self.duration = 0
+            self.chapterTitle = fallbackTitle
+            return
+        }
         let asset = AVAsset(url: url)
         // CMTimeGetSeconds kann NaN/Infinity liefern (korrupte/unlesbare Datei).
         // An der Quelle auf einen endlichen, nicht-negativen Wert klemmen — sonst
         // crashen spätere Int()-Casts (Int(NaN)) und Divisionen durch die Dauer.
         let loadedDuration = try? await asset.load(.duration)
         self.duration = AudioFile.sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
-        self.startTime = 0
+        guard !Self.taskCancellationRequested() else {
+            self.chapterTitle = fallbackTitle
+            return
+        }
         let metadata = (try? await asset.load(.metadata)) ?? []
+        guard !Self.taskCancellationRequested() else {
+            self.chapterTitle = fallbackTitle
+            return
+        }
         self.chapterTitle = await AudioFile.findRobustTag(for: "title", in: metadata)
-            ?? url.deletingPathExtension().lastPathComponent
+            ?? fallbackTitle
     }
     public init(url: URL, startTime: TimeInterval, duration: TimeInterval, chapterTitle: String) {
         self.url = url
@@ -1033,23 +1108,38 @@ public struct AudioFile: Identifiable, Sendable {
     static func sanitizeDuration(_ seconds: TimeInterval) -> TimeInterval {
         return (seconds.isFinite && seconds >= 0) ? seconds : 0
     }
+
+    /// Wertet die strukturierte Task-Cancellation über `Task.checkCancellation`
+    /// aus, ohne die absichtlich fehlertoleranten Audio-APIs werfend zu machen.
+    static func taskCancellationRequested() -> Bool {
+        do {
+            try Task.checkCancellation()
+            return false
+        } catch {
+            return true
+        }
+    }
+
     private static func findRobustTag(
         for tagName: String,
         in metadata: [AVMetadataItem]
     ) async -> String? {
+        guard !taskCancellationRequested() else { return nil }
         if let commonItem = metadata.first(where: { $0.commonKey?.rawValue == tagName }) {
-            if let value = try? await commonItem.load(.stringValue),
-               !value.isEmpty {
+            let value = try? await commonItem.load(.stringValue)
+            guard !taskCancellationRequested() else { return nil }
+            if let value, !value.isEmpty {
                 return value
             }
         }
         for item in metadata {
+            guard !taskCancellationRequested() else { return nil }
             guard let key = item.key else { continue }
             let keyString = String(describing: key).lowercased()
-            if keyString.contains(tagName.lowercased()),
-               let value = try? await item.load(.stringValue),
-               !value.isEmpty {
-                return value
+            if keyString.contains(tagName.lowercased()) {
+                let value = try? await item.load(.stringValue)
+                guard !taskCancellationRequested() else { return nil }
+                if let value, !value.isEmpty { return value }
             }
         }
         return nil
