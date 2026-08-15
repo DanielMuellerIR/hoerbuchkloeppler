@@ -52,7 +52,7 @@ FINDER_LAYOUT=1
 for arg in "$@"; do
   case "$arg" in
     --no-finder-layout) FINDER_LAYOUT=0 ;;
-    -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '/^# release\.sh/,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) echo "Unbekannte Option: $arg" >&2
        echo "Aufruf: ./release.sh [--no-finder-layout] [--help]" >&2; exit 64 ;;
   esac
@@ -68,7 +68,9 @@ MOUNT_ROOT="$(cd "$MOUNT_ROOT" && pwd -P)"
 MOUNT_DIR="$MOUNT_ROOT/volume"
 
 mount_is_active() {
-  hdiutil info | grep -Fq "$MOUNT_DIR"
+  # Ohne `grep -q`: Dessen frühes Ende kann `hdiutil` unter pipefail mit SIGPIPE
+  # beenden und einen vorhandenen Mount fälschlich als inaktiv melden.
+  hdiutil info | grep -F "$MOUNT_DIR" >/dev/null
 }
 
 cleanup() {
@@ -163,7 +165,7 @@ rm -f "$RW_DMG"
 SIGN_IDENTITY="${HOERBUCHKLOEPPLER_SIGN_IDENTITY:-}"
 if [ -z "$SIGN_IDENTITY" ]; then
   SIGN_IDENTITY="$(security find-identity -v -p codesigning \
-    | awk -F'"' '/Developer ID Application/{print $2; exit}')"
+    | awk -F'"' '/Developer ID Application/ && !found {print $2; found=1}')"
 fi
 log "Signiere und notarisiere das DMG…"
 codesign --force --timestamp --sign "$SIGN_IDENTITY" "$STAGING_DMG"
