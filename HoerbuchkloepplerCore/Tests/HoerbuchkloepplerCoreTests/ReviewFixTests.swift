@@ -358,6 +358,7 @@ struct CancellationIsolationTests {
     func contextsAreIsolated() throws {
         let firstDirectory = try temporaryDirectory()
         let secondDirectory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: firstDirectory) }
         defer { try? FileManager.default.removeItem(at: secondDirectory) }
         let first = ConversionContext()
         let second = ConversionContext()
@@ -628,7 +629,17 @@ struct MetadataAndCLITests {
     }
 
     @Test("CLI-Befehl enthält alle GUI-Optionen und quotet Shell-Metazeichen")
-    func completeShellSafeCLICommand() {
+    func completeShellSafeCLICommand() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appendingPathComponent("kloeppler tool's")
+        try makeExecutable(executable, contents: """
+        #!/bin/sh
+        for argument in "$@"; do
+            printf '%s\\000' "$argument"
+        done
+        """)
+
         var settings = AudioSettings()
         settings.useParallelEncoding = false
         settings.bitrate = "64k"
@@ -637,10 +648,10 @@ struct MetadataAndCLITests {
         settings.isMono = false
         settings.isVerbose = true
         let invocation = CLIInvocation(
-            executable: "/tmp/kloeppler tool",
+            executable: executable.path,
             folderURL: URL(fileURLWithPath: "/tmp/Buch $HOME's"),
             settings: settings,
-            title: "Titel `touch /tmp/nope`",
+            title: "Titel `printf nicht-ausführen`",
             author: "O'Brien",
             genre: "Roman & Lesung",
             coverPath: "/tmp/Cover Bild.jpg"
@@ -653,10 +664,24 @@ struct MetadataAndCLITests {
         #expect(invocation.arguments.contains("--cover"))
         #expect(invocation.arguments.contains("--stereo"))
         #expect(invocation.arguments.contains("--verbose"))
-        #expect(invocation.shellCommand.contains("'$HOME'" ) == false)
-        #expect(invocation.shellCommand.contains("'\\''"))
-        #expect(invocation.shellCommand.contains("'Titel `touch /tmp/nope`'"))
-        #expect(invocation.shellCommand.contains("'/tmp/Cover Bild.jpg'"))
+
+        // Der echte Shell-Durchlauf prüft das beobachtbare Verhalten: Weder
+        // Dollarzeichen noch Backticks, Apostrophe oder Leerzeichen dürfen die
+        // Argumentgrenzen oder Inhalte verändern.
+        let process = Process()
+        let outputPipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", invocation.shellCommand]
+        process.standardOutput = outputPipe
+        try process.run()
+        let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let receivedArguments = output.split(separator: 0).map {
+            String(decoding: $0, as: UTF8.self)
+        }
+
+        #expect(process.terminationStatus == 0)
+        #expect(receivedArguments == invocation.arguments)
     }
 
     @Test("CLI-Handoff kann ein automatisch gefundenes Cover bewusst unterdrücken")

@@ -6,7 +6,7 @@
     "token_budget": 2000000,
     "status": "active",
     "started_at": "2026-08-15T13:46:33+02:00",
-    "tokens_spent": 427849
+    "tokens_spent": 453393
   },
   "campaign_history": [],
   "scope": {
@@ -219,12 +219,21 @@
       "risk": "high",
       "priority": 8,
       "reason": "DMG-Erzeugung, temporäre Mounts und bewusst nicht öffentlicher Release-Pfad",
-      "state": "in_progress",
-      "active_run": {
+      "state": "completed",
+      "last_run": {
         "campaign_id": "20260815T134633974092+0200",
-        "started_at": "2026-08-15T14:14:37+02:00",
-        "required_review": "full",
-        "status_at_start": "pending"
+        "completed_at": "2026-08-15T14:16:30+02:00",
+        "observed_head": "9a4f0e2b01819570608f973325076273e15a22f0",
+        "content_sha256": "a095f243635b1707ffa33c65cf01fc4e32fc9af5a3c100c51a70b17f7cfd0e4c",
+        "file_count": 1,
+        "review": "full",
+        "outcome": "improved",
+        "summary": "Gesamten privaten DMG-Pfad einschließlich atomarem Endnamen, Mount-Cleanup, Lizenzhinweisen, App-/DMG-Tickets und Veröffentlichungsverbot geprüft. Hilfe blendet die Shebang aus; Mount- und Zertifikatssuche lesen Pipelines vollständig und können unter pipefail keinen falschen SIGPIPE-Fehler mehr liefern.",
+        "tests": [
+          "bash -n release.sh und --help-Vertrag: passed",
+          "Vorher-/Nachher-Pipefail-Probe: Kurzleser Exit 141, vollständige Leser Exit 0 bei identischem Treffer",
+          "./release.sh --publish: bewusst unbekannt, Exit 64 ohne Build oder externen Zugriff"
+        ]
       }
     },
     {
@@ -235,7 +244,13 @@
       "risk": "medium",
       "priority": 9,
       "reason": "Breite Querschnittstests für Laufzeit, Import, Einstellungen und Tool-Auflösung",
-      "state": "pending"
+      "state": "in_progress",
+      "active_run": {
+        "campaign_id": "20260815T134633974092+0200",
+        "started_at": "2026-08-15T14:16:43+02:00",
+        "required_review": "full",
+        "status_at_start": "pending"
+      }
     },
     {
       "id": "gui-frontend",
