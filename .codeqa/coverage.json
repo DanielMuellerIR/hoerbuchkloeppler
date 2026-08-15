@@ -6,7 +6,7 @@
     "token_budget": 2000000,
     "status": "active",
     "started_at": "2026-08-15T13:46:33+02:00",
-    "tokens_spent": 491719
+    "tokens_spent": 564709
   },
   "campaign_history": [],
   "scope": {
@@ -274,12 +274,21 @@
       "risk": "medium",
       "priority": 10,
       "reason": "Dünne SwiftUI-Schicht, Datei-Drop, Exportplanung und Sitzungsdarstellung",
-      "state": "in_progress",
-      "active_run": {
+      "state": "completed",
+      "last_run": {
         "campaign_id": "20260815T134633974092+0200",
-        "started_at": "2026-08-15T14:19:23+02:00",
-        "required_review": "full",
-        "status_at_start": "pending"
+        "completed_at": "2026-08-15T14:22:58+02:00",
+        "observed_head": "fead895ac17772523a83ecbe3e4e7bf1a2d22cc5",
+        "content_sha256": "7dd73301a2eaeadceb032d52a578fc1d52239eb64273f796706b23d9cb0f36d7",
+        "file_count": 6,
+        "review": "full",
+        "outcome": "improved",
+        "summary": "Alle fünf SwiftUI-Dateien und das App-Plist vollständig geprüft: Drop-/Importabschluss, Preview-Besitz, Exportkollisionen, CLI-Handoff, Overlay, Einstellungen und Metadatenauswahl bleiben dünne Core-Adapter. Die seit v1.2.0 ungenutzte lokale Netzwerkfreigabe wurde entfernt und der öffentliche Dokumentenzugriffstext sprachlich korrigiert.",
+        "tests": [
+          "plutil -lint info.plist und Prüfung auf fehlendes NSAppTransportSecurity: passed",
+          "xcodebuild Debug, macOS arm64, CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED",
+          "swift test -Xswiftc -warnings-as-errors: 90 Tests in 17 Suites passed; GUI nicht gestartet, um keinen Fokus zu übernehmen"
+        ]
       }
     },
     {
@@ -290,7 +299,13 @@
       "risk": "low",
       "priority": 11,
       "reason": "App-Ziel, Build-Einstellungen und Paket-Verknüpfung im Xcode-Projekt",
-      "state": "pending"
+      "state": "in_progress",
+      "active_run": {
+        "campaign_id": "20260815T134633974092+0200",
+        "started_at": "2026-08-15T14:23:07+02:00",
+        "required_review": "full",
+        "status_at_start": "pending"
+      }
     }
   ],
   "architecture": {
