@@ -6,7 +6,7 @@
     "token_budget": 2000000,
     "status": "active",
     "started_at": "2026-08-15T13:46:33+02:00",
-    "tokens_spent": 123265
+    "tokens_spent": 147044
   },
   "campaign_history": [],
   "scope": {
@@ -93,12 +93,22 @@
       "risk": "high",
       "priority": 3,
       "reason": "Signalbehandlung, Fehler-Exit-Codes, Eingabevalidierung und skriptfähige Ausgabe",
-      "state": "in_progress",
-      "active_run": {
+      "state": "completed",
+      "last_run": {
         "campaign_id": "20260815T134633974092+0200",
-        "started_at": "2026-08-15T13:54:27+02:00",
-        "required_review": "full",
-        "status_at_start": "pending"
+        "completed_at": "2026-08-15T13:55:49+02:00",
+        "observed_head": "5c21797b65d173520cedce6a397ef6927a6f41d3",
+        "content_sha256": "c75c3e8f5bc531b70702bc23ac18eb96c7cc4085f75f09b98f2afa81c2a64124",
+        "file_count": 1,
+        "review": "full",
+        "outcome": "reviewed-clean",
+        "summary": "Argumentvalidierung, headless/TTY-Ausgabe, Signalphasen, Exit-Codes, Ausgabekollisionen, Renderer und Abschlusslogik vollständig geprüft; keine lokale lohnende Änderung. Vorbereitungstask-Abbruch bleibt als Querschnitts-Fund offen.",
+        "tests": [
+          "swift run kloeppler --help: Exit 0, vollständige Optionen",
+          "swift run kloeppler /tmp --mode kaputt: Exit 64 mit Usage-Fehler",
+          ".build/debug/kloeppler <leerer Ordner>: Exit 1 ohne ANSI-Hängen",
+          "swift build -Xswiftc -warnings-as-errors: passed"
+        ]
       }
     },
     {
@@ -111,7 +121,13 @@
       "risk": "critical",
       "priority": 4,
       "reason": "Notarisierung, Signaturprüfung und einziger mutierender Pfad nach /Applications",
-      "state": "pending"
+      "state": "in_progress",
+      "active_run": {
+        "campaign_id": "20260815T134633974092+0200",
+        "started_at": "2026-08-15T13:56:01+02:00",
+        "required_review": "full",
+        "status_at_start": "pending"
+      }
     },
     {
       "id": "audio-analysis",

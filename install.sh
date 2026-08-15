@@ -66,6 +66,32 @@ done
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
 
+# Ein benutzerdefiniertes Testziel darf den späteren Staging-Pfad nicht auf ein
+# breites oder unerwartetes Dateisystemziel lenken. `--no-install` braucht diese
+# Prüfung nicht, weil dieser Modus DEST überhaupt nicht anfasst.
+if [ "$INSTALL" -eq 1 ]; then
+  case "$DEST" in
+    /*/*.app) ;;
+    *) echo "✗ Installationsziel muss ein absoluter .app-Pfad unterhalb eines Ordners sein: $DEST" >&2
+       exit 1 ;;
+  esac
+  DEST_BASENAME="$(basename "$DEST")"
+  DEST_PARENT_INPUT="$(dirname "$DEST")"
+  if ! DEST_PARENT="$(cd "$DEST_PARENT_INPUT" 2>/dev/null && pwd -P)"; then
+    echo "✗ Elternordner des Installationsziels fehlt: $DEST_PARENT_INPUT" >&2
+    exit 1
+  fi
+  [ "$DEST_PARENT" != "/" ] \
+    || { echo "✗ Installation direkt unter / ist nicht erlaubt: $DEST" >&2; exit 1; }
+  # Normalisieren, damit spätere dirname-/basename-Aufrufe nicht erneut `..`
+  # oder einen Symlink-Elternpfad interpretieren müssen.
+  DEST="$DEST_PARENT/$DEST_BASENAME"
+  if [ -e "$DEST" ] && [ ! -d "$DEST" ]; then
+    echo "✗ Installationsziel existiert, ist aber kein App-Bundle-Ordner: $DEST" >&2
+    exit 1
+  fi
+fi
+
 # ── Notar-Profil VOR dem teuren Build prüfen (schneller Fehlschlag) ──────────
 if [ "$NOTARIZE" -eq 1 ]; then
   # shellcheck source=notary-profile.sh
@@ -157,10 +183,22 @@ if [ "$INSTALL" -eq 0 ]; then
   exit 0
 fi
 
-# ── 4. Nach /Applications installieren (laufende Instanz vorher beenden) ─────
-if pgrep -x "$APP_NAME" >/dev/null 2>&1; then
-  log "Beende laufende ${APP_NAME}-Instanz"
-  pkill -x "$APP_NAME" || true
+# ── 4. Nach /Applications installieren (laufende Ziel-Instanz vorher beenden) ─
+# Nur Prozesse des tatsächlich zu ersetzenden Bundles beenden. Ein pauschales
+# `pkill -x` träfe auch einen Test-Build aus diesem oder einem anderen Worktree.
+DEST_EXECUTABLE="$DEST/Contents/MacOS/$APP_NAME"
+stopped_destination=0
+while IFS= read -r pid; do
+  [ -n "$pid" ] || continue
+  process_command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  case "$process_command" in
+    "$DEST_EXECUTABLE"|"$DEST_EXECUTABLE "*)
+      if kill "$pid" 2>/dev/null; then stopped_destination=1; fi
+      ;;
+  esac
+done < <(pgrep -x "$APP_NAME" 2>/dev/null || true)
+if [ "$stopped_destination" -eq 1 ]; then
+  log "Beende laufende ${APP_NAME}-Instanz aus $DEST"
   sleep 1
 fi
 # Atomar austauschen: erst neben das Ziel legen, dann in einem Schritt
