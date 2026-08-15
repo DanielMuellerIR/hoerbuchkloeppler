@@ -5,7 +5,8 @@
     "id": "20260815T134633974092+0200",
     "token_budget": 2000000,
     "status": "active",
-    "started_at": "2026-08-15T13:46:33+02:00"
+    "started_at": "2026-08-15T13:46:33+02:00",
+    "tokens_spent": 71038
   },
   "campaign_history": [],
   "scope": {
@@ -42,12 +43,20 @@
       "risk": "critical",
       "priority": 1,
       "reason": "Bekannte SIGINT-Lücke in der Vorbereitungsphase sowie zentraler Main-Actor-, Import- und Metadatenzustand",
-      "state": "in_progress",
-      "active_run": {
+      "state": "completed",
+      "last_run": {
         "campaign_id": "20260815T134633974092+0200",
-        "started_at": "2026-08-15T13:47:40+02:00",
-        "required_review": "full",
-        "status_at_start": "pending"
+        "completed_at": "2026-08-15T13:51:19+02:00",
+        "observed_head": "453448cc8d8e92175fba5cbf12b5cd7e8ddc2f1c",
+        "content_sha256": "8e58d525f0746cc9665d7b2c52f62249f4f6c26ad35591b42414374b8c525e6f",
+        "file_count": 1,
+        "review": "full",
+        "outcome": "improved",
+        "summary": "Rekursiver Ordnerscan übernimmt nur noch reguläre Dateien; Audio-Endungsordner werden nicht mehr als Nullsekunden-Kapitel importiert. Ctrl-C-Lücke als Querschnitts-Fund erfasst.",
+        "tests": [
+          "swift test --filter scanIgnoresDirectoriesWithAudioExtension: vor Fix rot, nach Fix passed",
+          "swift test: 88 Tests in 17 Suites passed"
+        ]
       }
     },
     {
@@ -59,7 +68,13 @@
       "risk": "critical",
       "priority": 2,
       "reason": "Datenintegrität, externe Prozesse, Parallelität, Abbruch und atomare Ausgabedateien",
-      "state": "pending"
+      "state": "in_progress",
+      "active_run": {
+        "campaign_id": "20260815T134633974092+0200",
+        "started_at": "2026-08-15T13:51:39+02:00",
+        "required_review": "full",
+        "status_at_start": "pending"
+      }
     },
     {
       "id": "cli-frontend",

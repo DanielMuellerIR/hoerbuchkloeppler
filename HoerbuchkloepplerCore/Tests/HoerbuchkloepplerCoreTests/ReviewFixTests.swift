@@ -190,6 +190,20 @@ struct OutputSafetyTests {
         #expect(FileManager.default.fileExists(atPath: payload.path))
     }
 
+    @Test("Verwaiste Partial-Dateien einer anderen Zielendung bleiben erhalten")
+    func doesNotRemoveStagingFilesForDifferentExtension() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let audiobook = directory.appendingPathComponent("Buch.m4b")
+        let textFile = directory.appendingPathComponent("Buch.txt")
+        let decoy = FFmpegWrapper.stagingOutputURL(for: textFile, ownerPID: 987_654)
+        try Data("nicht anfassen".utf8).write(to: decoy)
+
+        FFmpegWrapper.removeOrphanedStagedOutputs(for: audiobook)
+
+        #expect(FileManager.default.fileExists(atPath: decoy.path))
+    }
+
     @Test("Fortschritt mehrerer Split-Gruppen bleibt monoton")
     func splitProgressIsMonotonic() {
         let values = [

@@ -1061,12 +1061,14 @@ public struct FFmpegWrapper {
         let parent = finalURL.deletingLastPathComponent()
         let basename = finalURL.deletingPathExtension().lastPathComponent
         let prefix = ".\(basename).partial-"
+        let expectedExtension = finalURL.pathExtension.isEmpty ? "m4b" : finalURL.pathExtension
         guard let contents = try? fileManager.contentsOfDirectory(
             at: parent,
             includingPropertiesForKeys: nil,
             options: []
         ) else { return }
-        for url in contents where url.lastPathComponent.hasPrefix(prefix) {
+        for url in contents where url.lastPathComponent.hasPrefix(prefix)
+            && url.pathExtension == expectedExtension {
             // `contentsOfDirectory` liefert auch Ordner. Ein passend benannter
             // Ordner würde von `removeItem` samt Inhalt gelöscht — deshalb hier
             // nur echte Dateien zulassen.
