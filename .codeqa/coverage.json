@@ -6,7 +6,7 @@
     "token_budget": 2000000,
     "status": "active",
     "started_at": "2026-08-15T13:46:33+02:00",
-    "tokens_spent": 208819
+    "tokens_spent": 396534
   },
   "campaign_history": [],
   "scope": {
@@ -46,16 +46,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260815T134633974092+0200",
-        "completed_at": "2026-08-15T13:51:19+02:00",
-        "observed_head": "453448cc8d8e92175fba5cbf12b5cd7e8ddc2f1c",
-        "content_sha256": "8e58d525f0746cc9665d7b2c52f62249f4f6c26ad35591b42414374b8c525e6f",
+        "completed_at": "2026-08-15T14:10:51+02:00",
+        "observed_head": "0fa952a4642c185fb0446253390bde6ce4201c7b",
+        "content_sha256": "9fa967639023f9b9372b33eb41125826b5e0428c0681d3ecf2b510f5940ca64b",
         "file_count": 1,
-        "review": "full",
+        "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Rekursiver Ordnerscan übernimmt nur noch reguläre Dateien; Audio-Endungsordner werden nicht mehr als Nullsekunden-Kapitel importiert. Ctrl-C-Lücke als Querschnitts-Fund erfasst.",
+        "summary": "Themen-Diff und Grenzen zu CLI sowie AudioFile geprüft: Der laufbezogene PreparationContext registriert und cancelt genau den aktuellen Swift-Task; Scan und Zustandsübernahme brechen vor weiteren Seiteneffekten ab.",
         "tests": [
-          "swift test --filter scanIgnoresDirectoriesWithAudioExtension: vor Fix rot, nach Fix passed",
-          "swift test: 88 Tests in 17 Suites passed"
+          "swift test -Xswiftc -warnings-as-errors: 90 Tests in 17 Suites passed"
         ]
       }
     },
@@ -96,18 +95,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260815T134633974092+0200",
-        "completed_at": "2026-08-15T13:55:49+02:00",
-        "observed_head": "5c21797b65d173520cedce6a397ef6927a6f41d3",
-        "content_sha256": "c75c3e8f5bc531b70702bc23ac18eb96c7cc4085f75f09b98f2afa81c2a64124",
+        "completed_at": "2026-08-15T14:10:51+02:00",
+        "observed_head": "0fa952a4642c185fb0446253390bde6ce4201c7b",
+        "content_sha256": "c173964ba5f726e309c690871a1bbcbee5669582ecd7d603c6365d323a932820",
         "file_count": 1,
-        "review": "full",
-        "outcome": "reviewed-clean",
-        "summary": "Argumentvalidierung, headless/TTY-Ausgabe, Signalphasen, Exit-Codes, Ausgabekollisionen, Renderer und Abschlusslogik vollständig geprüft; keine lokale lohnende Änderung. Vorbereitungstask-Abbruch bleibt als Querschnitts-Fund offen.",
+        "review": "delta-plus-boundaries",
+        "outcome": "improved",
+        "summary": "Themen-Diff und Core-Grenze geprüft: Die CLI nutzt prepareFolder, der außerhalb des Main Actors erzeugte DispatchSource-Handler bleibt thread-sicher und SIGINT endet während der Vorbereitung mit Exit 130.",
         "tests": [
-          "swift run kloeppler --help: Exit 0, vollständige Optionen",
-          "swift run kloeppler /tmp --mode kaputt: Exit 64 mit Usage-Fehler",
-          ".build/debug/kloeppler <leerer Ordner>: Exit 1 ohne ANSI-Hängen",
-          "swift build -Xswiftc -warnings-as-errors: passed"
+          "Realer CLI-SIGINT während der Analyse von 1.001 WAV-Dateien: Exit 130 innerhalb der 10-Sekunden-Grenze"
         ]
       }
     },
@@ -150,17 +146,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260815T134633974092+0200",
-        "completed_at": "2026-08-15T14:00:24+02:00",
-        "observed_head": "fbb87e2c9025b635df7718b6a150b7037fbe1003",
-        "content_sha256": "cb532098f40b96ecc9d898878184f7571037e8519cff533bb0dcade68c7aa6e3",
+        "completed_at": "2026-08-15T14:10:51+02:00",
+        "observed_head": "0fa952a4642c185fb0446253390bde6ce4201c7b",
+        "content_sha256": "81d2b9fc64885c94bf860e65c9a2821c07ef55f36dd80c888d9851cde0c4857a",
         "file_count": 1,
-        "review": "full",
-        "outcome": "reviewed-clean",
-        "summary": "Artwork-Laden, ffmpeg-Kapitelextraktion, FFMETADATA-Parser, Zeitnormalisierung und Fallbacks vollständig geprüft; keine isolierte Änderung nötig. Task-Cancellation wird im bereits priorisierten Querschnitts-Fund umgesetzt.",
+        "review": "delta-plus-boundaries",
+        "outcome": "improved",
+        "summary": "Themen-Diff und Session-Grenze geprüft: AudioFile-Initialisierung, Tags, Artwork und Kapitelextraktion prüfen Task-Cancellation nach suspendierenden AVFoundation-Aufrufen und liefern keine Teilergebnisse mehr an den Import zurück.",
         "tests": [
-          "swift test --filter ParseFFMetadataChaptersTests: 7 Tests passed",
-          "swift test --filter ChapterValidationTests: passed",
-          "swift test --filter AsyncAVFoundationTests: 2 Tests passed"
+          "swift test -Xswiftc -warnings-as-errors: 90 Tests in 17 Suites passed"
         ]
       }
     },
@@ -174,7 +168,22 @@
       "risk": "high",
       "priority": 6,
       "reason": "Persistierte Einstellungen, Normalisierung und vollständiger shell-sicherer GUI-zu-CLI-Vertrag",
-      "state": "pending"
+      "state": "completed",
+      "last_run": {
+        "campaign_id": "20260815T134633974092+0200",
+        "completed_at": "2026-08-15T14:12:08+02:00",
+        "observed_head": "0fa952a4642c185fb0446253390bde6ce4201c7b",
+        "content_sha256": "554e6ffa4c78ae468be2a1e7a961f19c0c69e06ee46428af6345d74cf680e518",
+        "file_count": 3,
+        "review": "full",
+        "outcome": "reviewed-clean",
+        "summary": "AudioSettings, feldweises Codable-Fallback und Normalisierung, atomare SettingsManager-Persistenz samt Parallel-Mode-Regel sowie vollständige, POSIX-shell-sichere CLIInvocation geprüft. Die Zuständigkeiten sind klein und konsistent; keine Änderung erforderlich.",
+        "tests": [
+          "swift test -Xswiftc -warnings-as-errors --filter SettingsPersistenceTests: 4 Tests passed",
+          "swift test -Xswiftc -warnings-as-errors --filter CLI-Handoff-Tests: 2 Tests passed",
+          "CLI-Grenzwerte für Bitrate, Samplerate und Maximaldauer: jeweils Exit 64"
+        ]
+      }
     },
     {
       "id": "build-system",
@@ -185,7 +194,13 @@
       "risk": "high",
       "priority": 7,
       "reason": "Download-Integrität externer Werkzeuge und reproduzierbarer Core-, CLI- und App-Build",
-      "state": "pending"
+      "state": "in_progress",
+      "active_run": {
+        "campaign_id": "20260815T134633974092+0200",
+        "started_at": "2026-08-15T14:12:18+02:00",
+        "required_review": "full",
+        "status_at_start": "pending"
+      }
     },
     {
       "id": "release-packaging",
@@ -252,10 +267,21 @@
         "HoerbuchkloepplerCore/Sources/kloeppler/KloepplerCLI.swift"
       ],
       "priority": 1,
-      "state": "in_progress",
+      "state": "completed",
       "noted_at": "2026-08-15T13:50:16+02:00",
       "campaign_id": "20260815T134633974092+0200",
-      "started_at": "2026-08-15T14:01:56+02:00"
+      "started_at": "2026-08-15T14:01:56+02:00",
+      "completed": {
+        "campaign_id": "20260815T134633974092+0200",
+        "completed_at": "2026-08-15T14:10:31+02:00",
+        "observed_head": "0fa952a4642c185fb0446253390bde6ce4201c7b",
+        "summary": "Der CLI-Ordnerimport läuft nun als im PreparationContext registrierter Swift-Task; SIGINT cancelt ihn, alle AVFoundation- und Scan-Grenzen werten Task-Cancellation aus, und der Signal-Handler wird außerhalb des Main Actors erzeugt, damit Swift 6 ihn auf der GCD-Signal-Queue nicht mit SIGTRAP beendet.",
+        "tests": [
+          "swift test -Xswiftc -warnings-as-errors: 90 Tests in 17 Suites passed",
+          "swift build -c release -Xswiftc -warnings-as-errors: passed",
+          "Realer CLI-SIGINT während der Analyse von 1.001 WAV-Dateien: Exit 130 innerhalb der 10-Sekunden-Grenze"
+        ]
+      }
     }
   ]
 }

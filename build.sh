@@ -34,7 +34,7 @@ for arg in "$@"; do
         --cli-only)   CLI_ONLY=1 ;;
         --deps-only)  DEPS_ONLY=1 ;;
         --force-deps) FORCE_DEPS=1 ;;
-        -h|--help)    grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)    sed -n '/^# build\.sh/,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;;
         *) echo "Unbekannte Option: $arg" >&2; exit 64 ;;
     esac
 done
@@ -91,14 +91,14 @@ fetch_mediainfo() (
     mounted=1
     # Das DMG enthält keinen losen Binary, sondern einen Installer 'mediainfo.pkg'.
     # Payload entpacken (ohne zu installieren) und die Binary herausziehen.
-    local pkg; pkg="$(find "$mnt" -maxdepth 1 -name '*.pkg' | head -1)"
+    local pkg; pkg="$(find "$mnt" -maxdepth 1 -name '*.pkg' -print -quit)"
     if [[ -z "$pkg" ]]; then
         echo "Fehler: kein .pkg im mediainfo-DMG gefunden." >&2; exit 1
     fi
     pkgutil --expand-full "$pkg" "$tmp/expanded" >/dev/null
     hdiutil detach "$mnt" >/dev/null
     mounted=0
-    local found; found="$(find "$tmp/expanded" -type f -name mediainfo | head -1)"
+    local found; found="$(find "$tmp/expanded" -type f -name mediainfo -print -quit)"
     if [[ -z "$found" ]]; then
         echo "Fehler: 'mediainfo'-Binary im pkg-Payload nicht gefunden." >&2; exit 1
     fi
@@ -151,7 +151,7 @@ build_app() {
         -configuration Release -derivedDataPath build \
         MARKETING_VERSION="$version" \
         CODE_SIGNING_ALLOWED=NO build >/dev/null
-    local app; app="$(find build/Build/Products -maxdepth 2 -name '*.app' | head -1)"
+    local app; app="$(find build/Build/Products -maxdepth 2 -name '*.app' -print -quit)"
     if [[ -z "$app" ]]; then echo "Fehler: gebaute .app nicht gefunden." >&2; exit 1; fi
     rm -rf "./$(basename "$app")"
     cp -R "$app" "./$(basename "$app")"
