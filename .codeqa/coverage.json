@@ -6,7 +6,7 @@
     "token_budget": 2000000,
     "status": "active",
     "started_at": "2026-08-15T13:46:33+02:00",
-    "tokens_spent": 453393
+    "tokens_spent": 491719
   },
   "campaign_history": [],
   "scope": {
@@ -244,12 +244,21 @@
       "risk": "medium",
       "priority": 9,
       "reason": "Breite Querschnittstests für Laufzeit, Import, Einstellungen und Tool-Auflösung",
-      "state": "in_progress",
-      "active_run": {
+      "state": "completed",
+      "last_run": {
         "campaign_id": "20260815T134633974092+0200",
-        "started_at": "2026-08-15T14:16:43+02:00",
-        "required_review": "full",
-        "status_at_start": "pending"
+        "completed_at": "2026-08-15T14:19:15+02:00",
+        "observed_head": "b0b373263d637130e46fcf5a8bd5f28da59ee259",
+        "content_sha256": "843170c6976c2d5db2f04506051a1fcc2d295d93505e676163dccbba0b1a75af",
+        "file_count": 1,
+        "review": "full",
+        "outcome": "improved",
+        "summary": "Alle 849 Zeilen der Querschnittstests auf Aussagekraft, Ressourcenbesitz, Zeitgrenzen und Wiederholung geprüft. Der CLI-Quoting-Test vergleicht nun nach echtem /bin/sh-Durchlauf alle Argumente bytegenau statt nur brüchige Teilstrings; beide temporären Abbruchordner werden garantiert bereinigt.",
+        "tests": [
+          "swift test -Xswiftc -warnings-as-errors --filter completeShellSafeCLICommand: passed mit echtem Shell-Roundtrip",
+          "swift test -Xswiftc -warnings-as-errors --filter contextsAreIsolated: passed",
+          "swift test -Xswiftc -warnings-as-errors: 90 Tests in 17 Suites passed"
+        ]
       }
     },
     {
@@ -265,7 +274,13 @@
       "risk": "medium",
       "priority": 10,
       "reason": "Dünne SwiftUI-Schicht, Datei-Drop, Exportplanung und Sitzungsdarstellung",
-      "state": "pending"
+      "state": "in_progress",
+      "active_run": {
+        "campaign_id": "20260815T134633974092+0200",
+        "started_at": "2026-08-15T14:19:23+02:00",
+        "required_review": "full",
+        "status_at_start": "pending"
+      }
     },
     {
       "id": "xcode-config",
