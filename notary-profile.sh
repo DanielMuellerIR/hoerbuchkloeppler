@@ -36,11 +36,11 @@ hoerbuchkloeppler_require_notary_profile() {
   # als ein bloßer security-find-generic-password-Check.
   #
   # Fünf Versuche statt einem: `history` meldet gelegentlich fälschlich „No
-  # Keychain password item found", obwohl das Profil da ist (2026-07-26 auf M3
-  # belegt — Versuch 1 fehlgeschlagen, Versuch 2 sofort ok). Ein einzelner
-  # Fehlversuch würde sonst einen ganzen Lauf grundlos abbrechen oder unnötig
-  # nach store-credentials fragen; ein wirklich fehlendes Profil scheitert auch
-  # nach fünf Versuchen.
+  # Keychain password item found", obwohl das Profil da ist (2026-07-26 auf
+  # einem Mac belegt — Versuch 1 fehlgeschlagen, Versuch 2 sofort ok). Ein
+  # einzelner Fehlversuch würde sonst einen ganzen Lauf grundlos abbrechen oder
+  # unnötig nach store-credentials fragen; ein wirklich fehlendes Profil
+  # scheitert auch nach fünf Versuchen.
   local attempt profile_ok=0
   for attempt in 1 2 3 4 5; do
     if xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1; then
