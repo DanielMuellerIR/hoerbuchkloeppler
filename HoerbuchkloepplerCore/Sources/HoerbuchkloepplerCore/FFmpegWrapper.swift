@@ -1056,19 +1056,24 @@ public struct FFmpegWrapper {
     /// Verwaist = die im Namen vermerkte Besitzer-PID lebt nicht mehr. Dateien
     /// eines lebenden Prozesses (paralleler Lauf auf dasselbe Ziel) und Namen
     /// ohne PID-Marke bleiben unangetastet.
-    static func removeOrphanedStagedOutputs(for finalURL: URL) {
+    static func removeOrphanedStagedOutputs(
+        for finalURL: URL,
+        beforeUnlink: ((URL) -> Void)? = nil
+    ) {
         let fileManager = FileManager.default
         let parent = finalURL.deletingLastPathComponent()
         let basename = finalURL.deletingPathExtension().lastPathComponent
         let prefix = ".\(basename).partial-"
-        let expectedExtension = finalURL.pathExtension.isEmpty ? "m4b" : finalURL.pathExtension
+        let expectedExtension = (
+            finalURL.pathExtension.isEmpty ? "m4b" : finalURL.pathExtension
+        ).lowercased()
         guard let contents = try? fileManager.contentsOfDirectory(
             at: parent,
             includingPropertiesForKeys: nil,
             options: []
         ) else { return }
         for url in contents where url.lastPathComponent.hasPrefix(prefix)
-            && url.pathExtension == expectedExtension {
+            && url.pathExtension.lowercased() == expectedExtension {
             // `contentsOfDirectory` liefert auch Ordner. Ein passend benannter
             // Ordner würde von `removeItem` samt Inhalt gelöscht — deshalb hier
             // nur echte Dateien zulassen.
@@ -1077,7 +1082,12 @@ public struct FFmpegWrapper {
             // Gleiche Lebend-Prüfung wie bei den Temp-Verzeichnissen: EPERM
             // heißt "existiert, gehört jemand anderem" — also nicht anfassen.
             if Darwin.kill(owner, 0) == 0 || errno == EPERM { continue }
-            try? fileManager.removeItem(at: url)
+            // Der Hook macht im Test den Typwechsel nach der Prüfung
+            // deterministisch. `unlink` entfernt genau diesen Verzeichniseintrag
+            // und verweigert einen inzwischen eingesetzten Ordner atomar; anders
+            // als `removeItem` kann es dessen Inhalt nicht rekursiv löschen.
+            beforeUnlink?(url)
+            _ = url.path.withCString { Darwin.unlink($0) }
         }
     }
 

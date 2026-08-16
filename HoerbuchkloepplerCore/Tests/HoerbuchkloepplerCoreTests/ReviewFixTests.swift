@@ -71,6 +71,62 @@ struct AsyncAVFoundationTests {
 
         #expect(scanned.audioFiles.isEmpty)
     }
+
+    @Test("Ein Symlink auf eine reguläre Audiodatei wird importiert")
+    func scanImportsAudioFileSymlink() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sourceDirectory = directory.appendingPathComponent("Quelle")
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: false)
+        let target = directory.appendingPathComponent("Original.wav")
+        let link = sourceDirectory.appendingPathComponent("Kapitel per Link.wav")
+
+        // Den Writer vor dem Import freigeben; erst dann ist der WAV-Header
+        // vollständig geschrieben und AVFoundation kann die Dauer lesen.
+        do {
+            let format = try #require(
+                AVAudioFormat(standardFormatWithSampleRate: 8_000, channels: 1)
+            )
+            let buffer = try #require(
+                AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 2_000)
+            )
+            buffer.frameLength = 2_000
+            let file = try AVAudioFile(forWriting: target, settings: format.settings)
+            try file.write(from: buffer)
+        }
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        let session = ConversionSession(settings: AudioSettings())
+        let scanned = await session.scanFolder(sourceDirectory)
+        let audioFile = try #require(scanned.audioFiles.first)
+
+        #expect(scanned.audioFiles.count == 1)
+        #expect(audioFile.url == target.resolvingSymlinksInPath())
+        #expect(abs(audioFile.duration - 0.25) < 0.02)
+    }
+
+    @Test("Der rekursive Scan prüft den Abbruch auch direkt nach nextObject")
+    func recursiveScanStopsDuringEnumeration() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for index in 1...10 {
+            try Data("Datei \(index)".utf8).write(
+                to: directory.appendingPathComponent("\(index).txt")
+            )
+        }
+        var cancellationChecks = 0
+
+        let files = ConversionSession.recursiveFileURLs(in: directory) {
+            cancellationChecks += 1
+            // 1: vor dem Enumerator, 2: vor dem ersten nextObject,
+            // 3: direkt danach. Das erste Ergebnis darf dann nicht mehr in die
+            // vollständig materialisierte Dateiliste gelangen.
+            return cancellationChecks >= 3
+        }
+
+        #expect(files.isEmpty)
+        #expect(cancellationChecks == 3)
+    }
 }
 
 @Suite("Review-Fixes – Ausgabeplan und atomare Übernahme")
@@ -157,6 +213,20 @@ struct OutputSafetyTests {
         #expect(FileManager.default.fileExists(atPath: otherTarget.path))
     }
 
+    @Test("Die Endung einer verwaisten Partial-Datei wird ohne Beachtung der Großschreibung verglichen")
+    func removesOrphanedStagedOutputWithUppercaseExtension() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let uppercaseFinal = directory.appendingPathComponent("Buch.M4B")
+        let lowercaseFinal = directory.appendingPathComponent("Buch.m4b")
+        let orphan = FFmpegWrapper.stagingOutputURL(for: uppercaseFinal, ownerPID: 987_654)
+        try Data("unvollständig".utf8).write(to: orphan)
+
+        FFmpegWrapper.removeOrphanedStagedOutputs(for: lowercaseFinal)
+
+        #expect(!FileManager.default.fileExists(atPath: orphan.path))
+    }
+
     @Test("Ein Ziel mit `.partial-` im eigenen Namen wird trotzdem aufgeräumt")
     func handlesTargetNameContainingMarker() throws {
         let directory = try temporaryDirectory()
@@ -198,6 +268,34 @@ struct OutputSafetyTests {
         FFmpegWrapper.removeOrphanedStagedOutputs(for: final)
 
         #expect(FileManager.default.fileExists(atPath: decoyDirectory.path))
+        #expect(FileManager.default.fileExists(atPath: payload.path))
+    }
+
+    @Test("Ein nach der Typprüfung eingesetzter Ordner wird nicht rekursiv gelöscht")
+    func doesNotRemoveDirectoryInsertedBeforeUnlink() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let orphan = FFmpegWrapper.stagingOutputURL(for: final, ownerPID: 987_654)
+        try Data("unvollständig".utf8).write(to: orphan)
+        var replacementError: (any Error)?
+        let payload = orphan.appendingPathComponent("wichtig.txt")
+
+        FFmpegWrapper.removeOrphanedStagedOutputs(for: final) { checkedURL in
+            do {
+                try FileManager.default.removeItem(at: checkedURL)
+                try FileManager.default.createDirectory(
+                    at: checkedURL,
+                    withIntermediateDirectories: false
+                )
+                try Data("nicht anfassen".utf8).write(to: payload)
+            } catch {
+                replacementError = error
+            }
+        }
+
+        #expect(replacementError == nil)
+        #expect(FileManager.default.fileExists(atPath: orphan.path))
         #expect(FileManager.default.fileExists(atPath: payload.path))
     }
 

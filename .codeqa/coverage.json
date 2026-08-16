@@ -23,7 +23,10 @@
       "install.sh",
       "release.sh",
       "sign-bundle.sh",
-      "notary-profile.sh"
+      "notary-profile.sh",
+      "VERSION",
+      "HoerbuchkloepplerCore/Package.resolved",
+      "Hörbuchklöppler.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
     ],
     "exclusions": [
       {
@@ -191,7 +194,9 @@
       "id": "build-system",
       "paths": [
         "build.sh",
-        "HoerbuchkloepplerCore/Package.swift"
+        "HoerbuchkloepplerCore/Package.swift",
+        "VERSION",
+        "HoerbuchkloepplerCore/Package.resolved"
       ],
       "risk": "high",
       "priority": 7,
@@ -296,7 +301,8 @@
     {
       "id": "xcode-config",
       "paths": [
-        "Hörbuchklöppler.xcodeproj/project.pbxproj"
+        "Hörbuchklöppler.xcodeproj/project.pbxproj",
+        "Hörbuchklöppler.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
       ],
       "risk": "low",
       "priority": 11,

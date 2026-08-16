@@ -74,7 +74,7 @@ nicht nur „Build grün".
 ## Unit-Tests (Core)
 
 ```bash
-cd HoerbuchkloepplerCore && swift test        # 90 Tests, 17 Suites
+cd HoerbuchkloepplerCore && swift test        # 94 Tests, 17 Suites
 ```
 
 Deckt die reine Kernlogik ab: FFMETADATA-Escaping/Parsing, Kapitel-Arithmetik

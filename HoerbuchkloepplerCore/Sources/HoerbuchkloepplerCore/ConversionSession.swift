@@ -922,7 +922,10 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// der Dateisystem- und ffmpeg-Anteil läuft außerhalb des Main Actors.
     public nonisolated func scanFolder(_ url: URL) async -> ScannedFolder {
         var foundAudio: [AudioFile] = []; var foundImages: [URL] = []
-        for fileURL in Self.recursiveFileURLs(in: url) {
+        for fileURL in Self.recursiveFileURLs(
+            in: url,
+            cancellationRequested: { preparationCancellationRequested() }
+        ) {
             if preparationCancellationRequested() { break }
             let ext = fileURL.pathExtension.lowercased()
             if ["mp3", "m4a", "wav", "flac", "m4b", "mp4"].contains(ext) {
@@ -949,24 +952,49 @@ public final class ConversionSession: ObservableObject, Identifiable {
         return ScannedFolder(sourceURL: url, audioFiles: foundAudio, imageURLs: foundImages, embeddedArtwork: embedded)
     }
 
-    /// `FileManager.DirectoryEnumerator` ist absichtlich nicht aus asynchronen
-    /// Kontexten iterierbar. Deshalb wird die rein synchrone Dateiliste hier
-    /// vollständig materialisiert, bevor AVFoundation suspendieren darf.
-    private nonisolated static func recursiveFileURLs(in url: URL) -> [URL] {
+    /// `FileManager.DirectoryEnumerator` ist absichtlich nicht über einen
+    /// asynchronen Aufruf hinweg haltbar. Die Dateiliste wird deshalb synchron
+    /// aufgebaut, prüft den laufbezogenen Abbruch aber vor und nach jedem
+    /// `nextObject()`, damit auch ein großer Ordnerscan sofort enden kann.
+    nonisolated static func recursiveFileURLs(
+        in url: URL,
+        cancellationRequested: () -> Bool = { false }
+    ) -> [URL] {
+        guard !cancellationRequested() else { return [] }
         guard let enumerator = FileManager.default.enumerator(
             at: url,
-            includingPropertiesForKeys: [.isRegularFileKey]
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]
         ) else {
             return []
         }
-        return enumerator.compactMap { item in
+
+        var files: [URL] = []
+        while !cancellationRequested() {
+            guard let item = enumerator.nextObject() else { break }
+            guard !cancellationRequested() else { break }
             guard let fileURL = item as? URL,
-                  let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey]),
-                  values.isRegularFile == true else {
-                return nil
+                  let values = try? fileURL.resourceValues(
+                    forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+                  ) else {
+                continue
             }
-            return fileURL
+
+            if values.isRegularFile == true {
+                files.append(fileURL)
+                continue
+            }
+            guard values.isSymbolicLink == true else { continue }
+            // Verzeichnis-Symlinks nie als Rekursionsweg verwenden. Ein
+            // Dateisymlink wird dagegen bis zur regulären Zieldatei aufgelöst;
+            // AVFoundation liefert für den Linkpfad selbst nicht zuverlässig
+            // Dauer und Metadaten.
+            enumerator.skipDescendants()
+            let resolvedURL = fileURL.resolvingSymlinksInPath()
+            guard (try? resolvedURL.resourceValues(forKeys: [.isRegularFileKey]))?
+                .isRegularFile == true else { continue }
+            files.append(resolvedURL)
         }
+        return files
     }
 
     /// Leichter Teil: das Scan-Ergebnis in den Main-Actor-isolierten
