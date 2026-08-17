@@ -34,8 +34,9 @@ extension AudioFile {
     /// mitgeliefert und fehlt auf Maschinen ohne Homebrew, wodurch m4b-Kapitel
     /// in der verteilten App verloren gingen. `ffmpeg -f ffmetadata -` schreibt
     /// die Metadaten (inkl. `[CHAPTER]`-Blöcke) nach stdout.
-    public static func extractChapters(from url: URL) async -> [AudioFile]? {
-        await extractChaptersControlled(from: url)
+    public static func extractChapters(from url: URL,
+                                       sourceURL: URL? = nil) async -> [AudioFile]? {
+        await extractChaptersControlled(from: url, sourceURL: sourceURL)
     }
 
     /// Variante für `ConversionSession`: Sie registriert den gestarteten
@@ -43,17 +44,22 @@ extension AudioFile {
     /// Meldungen in das gemeinsame Session-Log statt direkt auf stdout.
     static func extractChaptersControlled(
         from url: URL,
+        sourceURL: URL? = nil,
         shouldCancel: @Sendable () -> Bool = { false },
         registerProcess: @Sendable (Process) -> Bool = { _ in true },
         unregisterProcess: @Sendable (Process) -> Void = { _ in },
         log: @Sendable (String) -> Void = { _ in }
     ) async -> [AudioFile]? {
-        guard ["m4b", "mp4"].contains(url.pathExtension.lowercased()) else { return nil }
+        // Der sichtbare Pfad bestimmt Namen, Reihenfolge und Kapiteltitel; aus
+        // `url` wird gelesen. Bei einem Symlink sind das zwei verschiedene
+        // Pfade (Review-Fund 2026-08-17).
+        let visibleURL = sourceURL ?? url
+        guard ["m4b", "mp4"].contains(visibleURL.pathExtension.lowercased()) else { return nil }
         guard !shouldCancel(), !taskCancellationRequested() else { return [] }
 
         guard let ffmpegURL = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else {
             log("⚠️ ffmpeg wurde nicht gefunden. Kapitel-Extraktion übersprungen.")
-            return [await AudioFile(url: url)]
+            return [await AudioFile(url: url, sourceURL: visibleURL)]
         }
 
         let process = Process()
@@ -81,13 +87,13 @@ extension AudioFile {
             guard !shouldCancel(), !taskCancellationRequested() else { return [] }
 
             guard let text = String(data: data, encoding: .utf8) else {
-                log("⚠️ FFMETADATA von \(url.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
-                return [await AudioFile(url: url)]
+                log("⚠️ FFMETADATA von \(visibleURL.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
+                return [await AudioFile(url: url, sourceURL: visibleURL)]
             }
             var chapters = parseFFMetadataChapters(text)
             guard !chapters.isEmpty else {
-                log("⚠️ Keine Kapitel in \(url.lastPathComponent) gefunden. Nutze die Datei als ein Kapitel.")
-                return [await AudioFile(url: url)]
+                log("⚠️ Keine Kapitel in \(visibleURL.lastPathComponent) gefunden. Nutze die Datei als ein Kapitel.")
+                return [await AudioFile(url: url, sourceURL: visibleURL)]
             }
 
             let loadedDuration = try? await AVURLAsset(url: url).load(.duration)
@@ -108,8 +114,8 @@ extension AudioFile {
             // `ffmpeg -t 0`-Segmente übersetzen. Der sichere Fallback ist die
             // komplette Datei als ein Kapitel; so scheitert nicht das ganze Buch.
             guard chaptersAreValid(chapters, totalDuration: totalDuration) else {
-                log("⚠️ Unvollständige Kapitelzeiten in \(url.lastPathComponent). Nutze die Datei als ein Kapitel.")
-                return [await AudioFile(url: url)]
+                log("⚠️ Unvollständige Kapitelzeiten in \(visibleURL.lastPathComponent). Nutze die Datei als ein Kapitel.")
+                return [await AudioFile(url: url, sourceURL: visibleURL)]
             }
             // Rundungsdifferenzen im FFMETADATA-Container lückenlos an die
             // tatsächliche Dateidauer anlegen.
@@ -127,15 +133,16 @@ extension AudioFile {
                     url: url,
                     startTime: ch.start,
                     duration: ch.end - ch.start,
-                    chapterTitle: title
+                    chapterTitle: title,
+                    sourceURL: visibleURL
                 ))
             }
-            log("✅ \(audioFiles.count) Kapitel aus \(url.lastPathComponent) extrahiert.")
+            log("✅ \(audioFiles.count) Kapitel aus \(visibleURL.lastPathComponent) extrahiert.")
             return audioFiles
         } catch {
             if shouldCancel() || taskCancellationRequested() { return [] }
-            log("⚠️ Kapitel aus \(url.lastPathComponent) konnten nicht gelesen werden: \(error.localizedDescription)")
-            return [await AudioFile(url: url)]
+            log("⚠️ Kapitel aus \(visibleURL.lastPathComponent) konnten nicht gelesen werden: \(error.localizedDescription)")
+            return [await AudioFile(url: url, sourceURL: visibleURL)]
         }
     }
 

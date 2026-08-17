@@ -213,8 +213,20 @@ struct OutputSafetyTests {
         #expect(FileManager.default.fileExists(atPath: otherTarget.path))
     }
 
-    @Test("Die Endung einer verwaisten Partial-Datei wird ohne Beachtung der Großschreibung verglichen")
-    func removesOrphanedStagedOutputWithUppercaseExtension() throws {
+    /// Behandelt das Volume dieses Ordners `a.txt` und `A.txt` als denselben Namen?
+    private func volumeIsCaseInsensitive(_ directory: URL) -> Bool {
+        ((try? directory.resourceValues(
+            forKeys: [.volumeSupportsCaseSensitiveNamesKey]
+        ))?.volumeSupportsCaseSensitiveNames ?? true) == false
+    }
+
+    @Test("Groß-/Kleinschreibung wird nach der Regel des Volumes verglichen")
+    func comparesStagedOutputNamesByVolumeSemantics() throws {
+        // Auf einem case-insensitiven Volume (macOS-Standard) sind `Buch.M4B`
+        // und `Buch.m4b` dasselbe Ziel — die Leiche muss weg. Auf einem
+        // case-sensitiven Volume sind es zwei Ziele — sie muss liegen bleiben.
+        // Vorher galt für die Endung immer „egal", für den Basisnamen immer
+        // „exakt"; je nach Volume war eines davon falsch (Review-Fund 2026-08-17).
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let uppercaseFinal = directory.appendingPathComponent("Buch.M4B")
@@ -224,7 +236,23 @@ struct OutputSafetyTests {
 
         FFmpegWrapper.removeOrphanedStagedOutputs(for: lowercaseFinal)
 
-        #expect(!FileManager.default.fileExists(atPath: orphan.path))
+        let entferntErwartet = volumeIsCaseInsensitive(directory)
+        #expect(FileManager.default.fileExists(atPath: orphan.path) != entferntErwartet)
+    }
+
+    @Test("Auch der Basisname folgt der Volume-Regel")
+    func comparesStagedOutputBasenameByVolumeSemantics() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let uppercaseFinal = directory.appendingPathComponent("BUCH.m4b")
+        let lowercaseFinal = directory.appendingPathComponent("buch.m4b")
+        let orphan = FFmpegWrapper.stagingOutputURL(for: uppercaseFinal, ownerPID: 987_654)
+        try Data("unvollständig".utf8).write(to: orphan)
+
+        FFmpegWrapper.removeOrphanedStagedOutputs(for: lowercaseFinal)
+
+        let entferntErwartet = volumeIsCaseInsensitive(directory)
+        #expect(FileManager.default.fileExists(atPath: orphan.path) != entferntErwartet)
     }
 
     @Test("Ein Ziel mit `.partial-` im eigenen Namen wird trotzdem aufgeräumt")
@@ -968,5 +996,113 @@ struct SettingsPersistenceTests {
         #expect(throws: (any Error).self) {
             try manager.saveSettings(AudioSettings())
         }
+    }
+}
+
+@Suite("Review-Fixes 2026-08-17 – Symlinks und Staging-Bereinigung")
+struct ReviewFixes20260817Tests {
+    @Test("Ein Dateisymlink behält seinen sichtbaren Namen als Quellpfad")
+    func symlinkKeepsVisibleNameAsSourcePath() throws {
+        // Zwei gegenläufig benannte Link-/Ziel-Paare: die vom Nutzer gewollte
+        // Reihenfolge (01, 02) ist genau die umgekehrte der Zielnamen (A, B).
+        // Wird nur das aufgelöste Ziel weitergereicht, kippt die Reihenfolge
+        // (Review-Fund 2026-08-17).
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let zielB = directory.appendingPathComponent("Original-B.wav")
+        let zielA = directory.appendingPathComponent("Original-A.wav")
+        try Data("B".utf8).write(to: zielB)
+        try Data("A".utf8).write(to: zielA)
+        let linkEins = directory.appendingPathComponent("01.wav")
+        let linkZwei = directory.appendingPathComponent("02.wav")
+        try FileManager.default.createSymbolicLink(at: linkEins, withDestinationURL: zielB)
+        try FileManager.default.createSymbolicLink(at: linkZwei, withDestinationURL: zielA)
+
+        let gefunden = ConversionSession.recursiveFileURLs(in: directory)
+        let links = gefunden
+            .filter { ["01.wav", "02.wav"].contains($0.source.lastPathComponent) }
+            .sorted { $0.source.lastPathComponent < $1.source.lastPathComponent }
+
+        #expect(links.count == 2)
+        #expect(links.first?.source.lastPathComponent == "01.wav")
+        #expect(links.first?.resolved.lastPathComponent == "Original-B.wav")
+        #expect(links.last?.source.lastPathComponent == "02.wav")
+        #expect(links.last?.resolved.lastPathComponent == "Original-A.wav")
+    }
+
+    @Test("Name und Fallback-Kapiteltitel folgen dem Linknamen, gelesen wird das Ziel")
+    func audioFileNameFollowsSourcePath() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let ziel = directory.appendingPathComponent("Original-B.wav")
+        try Data("B".utf8).write(to: ziel)
+        let link = directory.appendingPathComponent("01.wav")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: ziel)
+
+        // Ohne Titel-Tag (die Datei ist kein echtes Audio) greift der Fallback.
+        let datei = await AudioFile(url: ziel, sourceURL: link)
+
+        #expect(datei.name == "01.wav")
+        #expect(datei.chapterTitle == "01")
+        #expect(datei.url.lastPathComponent == "Original-B.wav")
+    }
+
+    @Test("Eine gewöhnliche Datei führt beide Pfade identisch")
+    func plainFileHasIdenticalPaths() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let datei = directory.appendingPathComponent("Kapitel.wav")
+        try Data("x".utf8).write(to: datei)
+
+        let audio = await AudioFile(url: datei)
+
+        #expect(audio.name == "Kapitel.wav")
+        #expect(audio.sourceURL == audio.url)
+    }
+
+    @Test("discardStagedOutput löscht einen untergeschobenen Ordner nicht rekursiv")
+    func discardStagedOutputDoesNotDeleteDirectories() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staging = directory.appendingPathComponent(".Buch.partial-1234.m4b")
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        let inhalt = staging.appendingPathComponent("wichtig.txt")
+        try Data("nicht löschen".utf8).write(to: inhalt)
+
+        let context = ConversionContext()
+        context.registerStagedOutput(staging)
+        context.discardStagedOutput(staging)
+
+        #expect(FileManager.default.fileExists(atPath: inhalt.path))
+    }
+
+    @Test("cancel löscht einen untergeschobenen Ordner nicht rekursiv")
+    func cancelDoesNotDeleteDirectories() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staging = directory.appendingPathComponent(".Buch.partial-5678.m4b")
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        let inhalt = staging.appendingPathComponent("wichtig.txt")
+        try Data("nicht löschen".utf8).write(to: inhalt)
+
+        let context = ConversionContext()
+        context.registerStagedOutput(staging)
+        context.cancel()
+
+        #expect(FileManager.default.fileExists(atPath: inhalt.path))
+    }
+
+    @Test("Eine registrierte Staging-DATEI wird beim Abbruch trotzdem entfernt")
+    func cancelStillRemovesStagedFiles() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staging = directory.appendingPathComponent(".Buch.partial-9999.m4b")
+        try Data("unvollständig".utf8).write(to: staging)
+
+        let context = ConversionContext()
+        context.registerStagedOutput(staging)
+        context.cancel()
+
+        #expect(!FileManager.default.fileExists(atPath: staging.path))
     }
 }

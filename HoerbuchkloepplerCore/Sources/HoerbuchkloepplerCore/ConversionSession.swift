@@ -288,10 +288,12 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
     /// Liest Kapitel mit einem optional laufenden Vorbereitungs-Context. Die
     /// öffentliche Methode hält diese Prozessverwaltung aus `ContentView`.
-    public nonisolated func extractChapters(from url: URL) async -> [AudioFile]? {
+    public nonisolated func extractChapters(from url: URL,
+                                            sourceURL: URL? = nil) async -> [AudioFile]? {
         let context = currentPreparationContext()
         return await AudioFile.extractChaptersControlled(
             from: url,
+            sourceURL: sourceURL,
             shouldCancel: { context?.isCancelled ?? false },
             registerProcess: { context?.register($0) ?? true },
             unregisterProcess: { context?.unregister($0) },
@@ -922,19 +924,24 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// der Dateisystem- und ffmpeg-Anteil läuft außerhalb des Main Actors.
     public nonisolated func scanFolder(_ url: URL) async -> ScannedFolder {
         var foundAudio: [AudioFile] = []; var foundImages: [URL] = []
-        for fileURL in Self.recursiveFileURLs(
+        for found in Self.recursiveFileURLs(
             in: url,
             cancellationRequested: { preparationCancellationRequested() }
         ) {
             if preparationCancellationRequested() { break }
-            let ext = fileURL.pathExtension.lowercased()
+            let fileURL = found.resolved
+            // Der Dateityp folgt dem SICHTBAREN Namen: unter diesem Namen hat
+            // der Nutzer die Datei in den Ordner gelegt.
+            let ext = found.source.pathExtension.lowercased()
             if ["mp3", "m4a", "wav", "flac", "m4b", "mp4"].contains(ext) {
                 if ["m4b", "mp4"].contains(ext),
-                   let chapters = await extractChapters(from: fileURL) {
+                   let chapters = await extractChapters(from: fileURL,
+                                                        sourceURL: found.source) {
                     if preparationCancellationRequested() { break }
                     foundAudio.append(contentsOf: chapters)
                 } else {
-                    let audioFile = await AudioFile(url: fileURL)
+                    let audioFile = await AudioFile(url: fileURL,
+                                                    sourceURL: found.source)
                     if preparationCancellationRequested() { break }
                     foundAudio.append(audioFile)
                 }
@@ -956,10 +963,23 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// asynchronen Aufruf hinweg haltbar. Die Dateiliste wird deshalb synchron
     /// aufgebaut, prüft den laufbezogenen Abbruch aber vor und nach jedem
     /// `nextObject()`, damit auch ein großer Ordnerscan sofort enden kann.
+    /// Eine gefundene Datei mit ihren beiden Pfaden.
+    ///
+    /// `source` ist der Pfad, unter dem der Nutzer die Datei im Ordner sieht —
+    /// bei einem Symlink also der Linkname. `resolved` ist die reguläre Datei,
+    /// aus der wirklich gelesen wird. Für eine gewöhnliche Datei sind beide
+    /// gleich. Getrennt geführt, weil Sortierung und Kapiteltitel dem sichtbaren
+    /// Namen folgen müssen, AVFoundation und ffmpeg aber dem Ziel
+    /// (Review-Fund 2026-08-17).
+    nonisolated struct FoundFile: Sendable {
+        let source: URL
+        let resolved: URL
+    }
+
     nonisolated static func recursiveFileURLs(
         in url: URL,
         cancellationRequested: () -> Bool = { false }
-    ) -> [URL] {
+    ) -> [FoundFile] {
         guard !cancellationRequested() else { return [] }
         guard let enumerator = FileManager.default.enumerator(
             at: url,
@@ -968,7 +988,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
             return []
         }
 
-        var files: [URL] = []
+        var files: [FoundFile] = []
         while !cancellationRequested() {
             guard let item = enumerator.nextObject() else { break }
             guard !cancellationRequested() else { break }
@@ -980,19 +1000,22 @@ public final class ConversionSession: ObservableObject, Identifiable {
             }
 
             if values.isRegularFile == true {
-                files.append(fileURL)
+                files.append(FoundFile(source: fileURL, resolved: fileURL))
                 continue
             }
             guard values.isSymbolicLink == true else { continue }
             // Verzeichnis-Symlinks nie als Rekursionsweg verwenden. Ein
             // Dateisymlink wird dagegen bis zur regulären Zieldatei aufgelöst;
             // AVFoundation liefert für den Linkpfad selbst nicht zuverlässig
-            // Dauer und Metadaten.
+            // Dauer und Metadaten. Der LINKNAME bleibt trotzdem erhalten: er
+            // bestimmt Reihenfolge und Kapiteltitel, sonst gäbe eine Sammlung
+            // aus `01.wav -> Original-B.wav`, `02.wav -> Original-A.wav` die
+            // vom Nutzer festgelegte Reihenfolge auf (Review-Fund 2026-08-17).
             enumerator.skipDescendants()
             let resolvedURL = fileURL.resolvingSymlinksInPath()
             guard (try? resolvedURL.resourceValues(forKeys: [.isRegularFileKey]))?
                 .isRegularFile == true else { continue }
-            files.append(resolvedURL)
+            files.append(FoundFile(source: fileURL, resolved: resolvedURL))
         }
         return files
     }
@@ -1089,19 +1112,28 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
 public struct AudioFile: Identifiable, Sendable {
     public let id = UUID()
+    /// Physische Lese-URL: die reguläre Datei, aus der AVFoundation und ffmpeg
+    /// lesen. Bei einem Symlink ist das dessen aufgelöstes Ziel.
     public let url: URL
+    /// Logischer Quellpfad: der Pfad, unter dem der Nutzer die Datei sieht.
+    /// Bei einem Symlink der Linkpfad, sonst gleich `url`. Reihenfolge und
+    /// Fallback-Kapiteltitel folgen ihm, damit zwei Links auf dasselbe Ziel
+    /// unterscheidbar bleiben (Review-Fund 2026-08-17).
+    public let sourceURL: URL
     public let duration: TimeInterval
     public let startTime: TimeInterval
     public var chapterTitle: String
-    public var name: String { url.lastPathComponent }
+    public var name: String { sourceURL.lastPathComponent }
 
     /// Lädt Dauer und Kapiteltitel über die seit macOS 13 vorgesehenen
     /// AVFoundation-Async-Properties. Fehlerhafte oder nicht lesbare Tags
     /// verhindern den Import nicht; sie fallen auf sichere Standardwerte zurück.
-    public init(url: URL) async {
+    /// `sourceURL` weglassen heißt: der sichtbare Pfad ist die Datei selbst.
+    public init(url: URL, sourceURL: URL? = nil) async {
         self.url = url
+        self.sourceURL = sourceURL ?? url
         self.startTime = 0
-        let fallbackTitle = url.deletingPathExtension().lastPathComponent
+        let fallbackTitle = (sourceURL ?? url).deletingPathExtension().lastPathComponent
         guard !Self.taskCancellationRequested() else {
             self.duration = 0
             self.chapterTitle = fallbackTitle
@@ -1125,8 +1157,10 @@ public struct AudioFile: Identifiable, Sendable {
         self.chapterTitle = await AudioFile.findRobustTag(for: "title", in: metadata)
             ?? fallbackTitle
     }
-    public init(url: URL, startTime: TimeInterval, duration: TimeInterval, chapterTitle: String) {
+    public init(url: URL, startTime: TimeInterval, duration: TimeInterval,
+                chapterTitle: String, sourceURL: URL? = nil) {
         self.url = url
+        self.sourceURL = sourceURL ?? url
         self.startTime = AudioFile.sanitizeDuration(startTime)
         self.duration = AudioFile.sanitizeDuration(duration)
         self.chapterTitle = chapterTitle

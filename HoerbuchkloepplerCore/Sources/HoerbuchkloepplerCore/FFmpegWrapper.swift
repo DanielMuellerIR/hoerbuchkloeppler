@@ -63,12 +63,23 @@ final class ConversionContext: @unchecked Sendable {
         try? FileManager.default.removeItem(at: url)
     }
 
+    /// Entfernt genau diesen Verzeichniseintrag — nie rekursiv.
+    ///
+    /// Staging-Ausgaben sind immer einzelne Dateien. Wird der Eintrag zwischen
+    /// Registrierung und Bereinigung durch einen Ordner ersetzt, würde
+    /// `removeItem` diesen samt Inhalt löschen; `unlink` verweigert einen Ordner
+    /// atomar. Für die selbst angelegten Temp-Verzeichnisse bleibt das
+    /// rekursive `removeItem` richtig (Review-Fund 2026-08-17).
+    static func unlinkStagedOutput(_ url: URL) {
+        _ = url.path.withCString { Darwin.unlink($0) }
+    }
+
     func registerStagedOutput(_ url: URL) {
         lock.lock()
         stagedOutputs.insert(url)
         let shouldRemove = cancelled
         lock.unlock()
-        if shouldRemove { try? FileManager.default.removeItem(at: url) }
+        if shouldRemove { ConversionContext.unlinkStagedOutput(url) }
     }
 
     func unregisterStagedOutput(_ url: URL) {
@@ -79,7 +90,7 @@ final class ConversionContext: @unchecked Sendable {
 
     func discardStagedOutput(_ url: URL) {
         unregisterStagedOutput(url)
-        try? FileManager.default.removeItem(at: url)
+        ConversionContext.unlinkStagedOutput(url)
     }
 
     /// Führt den atomaren Commit nur aus, solange noch kein Abbruch gewonnen hat.
@@ -116,7 +127,7 @@ final class ConversionContext: @unchecked Sendable {
 
         for process in ownedProcesses where process.isRunning { process.terminate() }
         for directory in ownedDirectories { try? FileManager.default.removeItem(at: directory) }
-        for output in ownedStagedOutputs { try? FileManager.default.removeItem(at: output) }
+        for output in ownedStagedOutputs { ConversionContext.unlinkStagedOutput(output) }
         return true
     }
 }
@@ -1064,16 +1075,34 @@ public struct FFmpegWrapper {
         let parent = finalURL.deletingLastPathComponent()
         let basename = finalURL.deletingPathExtension().lastPathComponent
         let prefix = ".\(basename).partial-"
-        let expectedExtension = (
-            finalURL.pathExtension.isEmpty ? "m4b" : finalURL.pathExtension
-        ).lowercased()
+        let expectedExtension = finalURL.pathExtension.isEmpty
+            ? "m4b" : finalURL.pathExtension
+        // Basisname und Endung müssen NACH DERSELBEN Regel verglichen werden,
+        // und zwar nach der des Volumes: Auf einem case-insensitiven Volume
+        // (macOS-Standard) sind `Buch.M4B` und `Buch.m4b` dasselbe Ziel, auf
+        // einem case-sensitiven zwei verschiedene. Vorher wurde die Endung
+        // immer kleingeschrieben verglichen, der Basisname aber immer exakt —
+        // beides ging je nach Volume daneben (Review-Fund 2026-08-17).
+        // Lässt sich die Eigenschaft nicht ermitteln, gilt case-sensitiv: das
+        // vergleicht enger und bleibt damit innerhalb von „genau dieses Ziel".
+        let caseSensitive = (try? parent.resourceValues(
+            forKeys: [.volumeSupportsCaseSensitiveNamesKey]
+        ))?.volumeSupportsCaseSensitiveNames ?? true
+        func sameName(_ candidate: String, _ expected: String) -> Bool {
+            caseSensitive ? candidate == expected
+                : candidate.compare(expected, options: .caseInsensitive) == .orderedSame
+        }
+        func startsWithPrefix(_ candidate: String) -> Bool {
+            caseSensitive ? candidate.hasPrefix(prefix)
+                : candidate.range(of: prefix, options: [.caseInsensitive, .anchored]) != nil
+        }
         guard let contents = try? fileManager.contentsOfDirectory(
             at: parent,
             includingPropertiesForKeys: nil,
             options: []
         ) else { return }
-        for url in contents where url.lastPathComponent.hasPrefix(prefix)
-            && url.pathExtension.lowercased() == expectedExtension {
+        for url in contents where startsWithPrefix(url.lastPathComponent)
+            && sameName(url.pathExtension, expectedExtension) {
             // `contentsOfDirectory` liefert auch Ordner. Ein passend benannter
             // Ordner würde von `removeItem` samt Inhalt gelöscht — deshalb hier
             // nur echte Dateien zulassen.
