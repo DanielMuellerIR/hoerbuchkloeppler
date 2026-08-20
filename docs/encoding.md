@@ -95,9 +95,11 @@ bzw. Container-Stats), nie über die Mediainfo-Schnellschätzung.
 
 ## Output-Struktur (verifiziert)
 
-Die `.m4b` enthält: Kapitel-Marken aus Eingabe-Dateinamen/Tags (FFMETADATA
-`[CHAPTER]`, gebaut in `writeConcatAndChapters`, Titel via `escapeFFMetadata`
-maskiert), eingebettetes Cover (`-disposition:v attached_pic`; auch reines
+Die `.m4b` enthält: Kapitel-Marken aus Tags oder dem sichtbaren Quellpfad
+(`AudioFile.sourceURL`; bei Symlinks also der Linkname), nicht aus der
+aufgelösten physischen Lese-URL. Die FFMETADATA-`[CHAPTER]`-Blöcke baut
+`writeConcatAndChapters`, Titel maskiert `escapeFFMetadata`. Hinzu kommen ein
+eingebettetes Cover (`-disposition:v attached_pic`; auch reines
 eingebettetes Artwork via `resolveCoverInputPath`), Metadaten title/artist/genre
 sowie `album=title` (Hörbuch-Konvention: das Buch als „Album" der Kapitel).
 

@@ -22,11 +22,16 @@ final class ConversionContext: @unchecked Sendable {
     let id = UUID()
 
     private let lock = NSLock()
+    private let log: @Sendable (String) -> Void
     private var cancelled = false
     private var finished = false
     private var processes = Set<Process>()
     private var tempDirectories = Set<URL>()
     private var stagedOutputs = Set<URL>()
+
+    init(log: @escaping @Sendable (String) -> Void = { _ in }) {
+        self.log = log
+    }
 
     var isCancelled: Bool {
         lock.lock()
@@ -70,8 +75,24 @@ final class ConversionContext: @unchecked Sendable {
     /// `removeItem` diesen samt Inhalt löschen; `unlink` verweigert einen Ordner
     /// atomar. Für die selbst angelegten Temp-Verzeichnisse bleibt das
     /// rekursive `removeItem` richtig (Review-Fund 2026-08-17).
-    static func unlinkStagedOutput(_ url: URL) {
-        _ = url.path.withCString { Darwin.unlink($0) }
+    @discardableResult
+    static func unlinkStagedOutput(
+        _ url: URL,
+        log: @Sendable (String) -> Void = { _ in }
+    ) -> Bool {
+        let result = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else {
+                errno = EINVAL
+                return -1
+            }
+            return Darwin.unlink(path)
+        }
+        guard result != 0 else { return true }
+        let errorNumber = errno
+        if errorNumber == ENOENT { return true }
+        let reason = String(cString: strerror(errorNumber))
+        log("⚠️ Staging-Datei konnte nicht entfernt werden: \(url.path) (\(reason))")
+        return false
     }
 
     func registerStagedOutput(_ url: URL) {
@@ -79,7 +100,7 @@ final class ConversionContext: @unchecked Sendable {
         stagedOutputs.insert(url)
         let shouldRemove = cancelled
         lock.unlock()
-        if shouldRemove { ConversionContext.unlinkStagedOutput(url) }
+        if shouldRemove { ConversionContext.unlinkStagedOutput(url, log: log) }
     }
 
     func unregisterStagedOutput(_ url: URL) {
@@ -90,7 +111,7 @@ final class ConversionContext: @unchecked Sendable {
 
     func discardStagedOutput(_ url: URL) {
         unregisterStagedOutput(url)
-        ConversionContext.unlinkStagedOutput(url)
+        ConversionContext.unlinkStagedOutput(url, log: log)
     }
 
     /// Führt den atomaren Commit nur aus, solange noch kein Abbruch gewonnen hat.
@@ -127,7 +148,9 @@ final class ConversionContext: @unchecked Sendable {
 
         for process in ownedProcesses where process.isRunning { process.terminate() }
         for directory in ownedDirectories { try? FileManager.default.removeItem(at: directory) }
-        for output in ownedStagedOutputs { ConversionContext.unlinkStagedOutput(output) }
+        for output in ownedStagedOutputs {
+            ConversionContext.unlinkStagedOutput(output, log: log)
+        }
         return true
     }
 }
@@ -256,7 +279,14 @@ public struct FFmpegWrapper {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
+        let reader = pipe.fileHandleForReading
+        let outputBuffer = LockedDataBuffer()
+        reader.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if !chunk.isEmpty { outputBuffer.append(chunk) }
+        }
         do {
+            defer { reader.readabilityHandler = nil }
             try process.run()
             let deadline = Date().addingTimeInterval(5)
             while process.isRunning, Date() < deadline {
@@ -273,7 +303,10 @@ public struct FFmpegWrapper {
                 }
             }
             process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            reader.readabilityHandler = nil
+            let rest = reader.availableData
+            if !rest.isEmpty { outputBuffer.append(rest) }
+            let data = outputBuffer.snapshot()
             guard process.terminationStatus == 0,
                   let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !output.isEmpty else { return nil }
@@ -353,15 +386,16 @@ public struct FFmpegWrapper {
         let durationStr = String(format: "%02d:%02dh", totalHours, totalMinutes)
         let channels = job.settings.isMono ? "Mono" : "Stereo"
 
+        let physicalInputURLs = Set(session.audioFiles.map { $0.url.standardizedFileURL })
         var totalSize: Int64 = 0
-        for file in session.audioFiles {
-            if let attr = try? FileManager.default.attributesOfItem(atPath: file.url.path),
+        for url in physicalInputURLs {
+            if let attr = try? FileManager.default.attributesOfItem(atPath: url.path),
                let size = attr[.size] as? Int64 {
                 totalSize += size
             }
         }
         let sizeStr = formatFileSize(totalSize)
-        let fileCount = session.audioFiles.count
+        let fileCount = Set(session.audioFiles.map { $0.sourceURL.standardizedFileURL }).count
 
         let titleStr = job.title.isEmpty ? "Unbekannt" : job.title
         let authorStr = job.author.isEmpty ? "Unbekannt" : job.author
@@ -405,7 +439,9 @@ public struct FFmpegWrapper {
                 // Leichen abgestürzter früherer Läufe (SIGKILL/Stromausfall)
                 // für dieses Ziel zuerst wegräumen — sie sind versteckt, oft
                 // mehrere GB groß und sonst für immer unsichtbar.
-                removeOrphanedStagedOutputs(for: finalURL)
+                removeOrphanedStagedOutputs(for: finalURL, log: { message in
+                    session.enqueueLog(message, type: .highlight)
+                })
                 let stagedURL = stagingOutputURL(for: finalURL)
                 context.registerStagedOutput(stagedURL)
                 var success = false
@@ -776,6 +812,55 @@ public struct FFmpegWrapper {
         return arguments
     }
 
+    /// Gemeinsamer Abschluss beider Kodiermodi: Steuerdateien und Cover
+    /// vorbereiten, Mux-Argumente bauen und den finalen ffmpeg-Prozess starten.
+    /// Der jeweilige Modus liefert nur seine Segmentpfade, Codec-Argumente und
+    /// Fortschrittsaufteilung.
+    private static func finalizeConvertedSegments(
+        _ validPaths: [String],
+        session: ConversionSession,
+        job: ConversionJob,
+        context: ConversionContext,
+        group: [AudioFile],
+        tempDir: URL,
+        finalURL: URL,
+        progressBase: Double,
+        progressScale: Double,
+        segmentProgressFraction: Double,
+        audioCodecArguments: [String],
+        logMessage: String,
+        pacmanTitle: String
+    ) -> Bool {
+        let listFile = tempDir.appendingPathComponent("audio_list.txt")
+        let metaFile = tempDir.appendingPathComponent("chapters.txt")
+        guard writeConcatAndChapters(
+            validPaths: validPaths,
+            group: group,
+            listFile: listFile,
+            metaFile: metaFile,
+            session: session
+        ) else { return false }
+        let coverInput = resolveCoverInputPath(job: job, session: session, tempDir: tempDir)
+        let args = finalMuxArguments(
+            listFile: listFile,
+            metaFile: metaFile,
+            coverInput: coverInput,
+            audioCodecArguments: audioCodecArguments,
+            job: job,
+            finalURL: finalURL
+        )
+        return runFinalProcess(
+            args: args,
+            session: session,
+            context: context,
+            progressBase: progressBase + progressScale * segmentProgressFraction,
+            progressWeight: progressScale * (1 - segmentProgressFraction),
+            phaseDuration: group.reduce(0) { $0 + $1.duration },
+            logMessage: logMessage,
+            pacmanTitle: pacmanTitle
+        )
+    }
+
     private static func performSequentialConversion(
         session: ConversionSession,
         job: ConversionJob,
@@ -794,30 +879,23 @@ public struct FFmpegWrapper {
             )
         }
         guard let validPaths = wavPaths else { return false }
-        let listFile = tempDir.appendingPathComponent("audio_list.txt")
-        let metaFile = tempDir.appendingPathComponent("chapters.txt")
-        guard writeConcatAndChapters(validPaths: validPaths, group: group, listFile: listFile, metaFile: metaFile, session: session) else { return false }
-        let coverInput = resolveCoverInputPath(job: job, session: session, tempDir: tempDir)
-        let args = finalMuxArguments(
-            listFile: listFile,
-            metaFile: metaFile,
-            coverInput: coverInput,
+        return finalizeConvertedSegments(
+            validPaths,
+            session: session,
+            job: job,
+            context: context,
+            group: group,
+            tempDir: tempDir,
+            finalURL: finalURL,
+            progressBase: progressBase,
+            progressScale: progressScale,
+            segmentProgressFraction: 0.2,
             audioCodecArguments: [
                 "-c:a", "aac_at", "-aac_at_mode", "cvbr",
                 "-b:a", job.settings.bitrate,
                 "-ar", "\(job.settings.sampleRate)",
                 "-ac", job.settings.isMono ? "1" : "2"
             ],
-            job: job,
-            finalURL: finalURL
-        )
-        return runFinalProcess(
-            args: args,
-            session: session,
-            context: context,
-            progressBase: progressBase + progressScale * 0.2,
-            progressWeight: progressScale * 0.8,
-            phaseDuration: group.reduce(0) { $0 + $1.duration },
             logMessage: "🛠️ Starte komplette Apple CVBR Kodierung...",
             pacmanTitle: "Apple AAC Encoding"
         )
@@ -841,31 +919,24 @@ public struct FFmpegWrapper {
             )
         }
         guard let validPaths = aacPaths else { return false }
-        let listFile = tempDir.appendingPathComponent("audio_list.txt")
-        let metaFile = tempDir.appendingPathComponent("chapters.txt")
-        guard writeConcatAndChapters(validPaths: validPaths, group: group, listFile: listFile, metaFile: metaFile, session: session) else { return false }
-        let coverInput = resolveCoverInputPath(job: job, session: session, tempDir: tempDir)
-        let args = finalMuxArguments(
-            listFile: listFile,
-            metaFile: metaFile,
-            coverInput: coverInput,
-            audioCodecArguments: ["-c:a", "copy"],
-            job: job,
-            finalURL: finalURL
-        )
-        return runFinalProcess(
-            args: args,
+        return finalizeConvertedSegments(
+            validPaths,
             session: session,
+            job: job,
             context: context,
-            progressBase: progressBase + progressScale * 0.9,
-            progressWeight: progressScale * 0.1,
-            phaseDuration: group.reduce(0) { $0 + $1.duration },
+            group: group,
+            tempDir: tempDir,
+            finalURL: finalURL,
+            progressBase: progressBase,
+            progressScale: progressScale,
+            segmentProgressFraction: 0.9,
+            audioCodecArguments: ["-c:a", "copy"],
             logMessage: "🛠️ Finaler Stream-Copy & MP4-Muxing gestartet...",
             pacmanTitle: "Finaler Zusammenbau"
         )
     }
 
-    private static func runFinalProcess(
+    static func runFinalProcess(
         args: [String],
         session: ConversionSession,
         context: ConversionContext,
@@ -902,10 +973,12 @@ public struct FFmpegWrapper {
             try process.run()
             if context.isCancelled { process.terminate() }
             let reader = pipe.fileHandleForReading
+            let stderrBuffer = LockedDataBuffer()
             
             reader.readabilityHandler = { fileHandle in
                 let data = fileHandle.availableData
                 if data.isEmpty { return }
+                stderrBuffer.append(data)
                 if let output = String(data: data, encoding: .utf8) {
                     if let timeString = extractTimeFromFFmpeg(output),
                        let currentSeconds = timeToSeconds(timeString) {
@@ -928,6 +1001,8 @@ public struct FFmpegWrapper {
             
             process.waitUntilExit()
             reader.readabilityHandler = nil
+            let rest = reader.availableData
+            if !rest.isEmpty { stderrBuffer.append(rest) }
             if context.isCancelled { return false }
             if process.terminationStatus == 0 {
                 session.enqueueProgress(
@@ -942,8 +1017,12 @@ public struct FFmpegWrapper {
                 )
                 return true
             }
+            let details = String(data: stderrBuffer.snapshot(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let suffix = details.map { $0.isEmpty ? "" : "\n\($0)" } ?? ""
             session.enqueueLog(
-                "❌ KRITISCHER FEHLER beim finalen Zusammenfügen. Exit-Code: \(process.terminationStatus)",
+                "❌ KRITISCHER FEHLER beim finalen Zusammenfügen. "
+                + "Exit-Code: \(process.terminationStatus)\(suffix)",
                 type: .highlight
             )
             return false
@@ -1035,9 +1114,29 @@ public struct FFmpegWrapper {
         ownerPID: pid_t = ProcessInfo.processInfo.processIdentifier
     ) -> URL {
         let parent = finalURL.deletingLastPathComponent()
-        let basename = finalURL.deletingPathExtension().lastPathComponent
         let ext = finalURL.pathExtension.isEmpty ? "m4b" : finalURL.pathExtension
+        let basename = stagingBasename(for: finalURL)
         return parent.appendingPathComponent(".\(basename).partial-\(ownerPID)-\(id.uuidString)").appendingPathExtension(ext)
+    }
+
+    /// Reserviert im Dateinamen Platz für Punkt, Marker, maximale PID, UUID und
+    /// Endung. Die Kürzung arbeitet in UTF-8-Bytes, weil `NAME_MAX` Bytes und
+    /// nicht Swift-Zeichen begrenzt.
+    private static func stagingBasename(for finalURL: URL) -> String {
+        let original = finalURL.deletingPathExtension().lastPathComponent
+        let ext = finalURL.pathExtension.isEmpty ? "m4b" : finalURL.pathExtension
+        let longestSuffix = ".partial-\(Int32.max)-00000000-0000-0000-0000-000000000000"
+        let reservedBytes = 1 + longestSuffix.utf8.count + 1 + ext.utf8.count
+        let limit = max(1, Int(NAME_MAX) - reservedBytes)
+        var result = ""
+        var byteCount = 0
+        for character in original {
+            let characterBytes = String(character).utf8.count
+            if byteCount + characterBytes > limit { break }
+            result.append(character)
+            byteCount += characterBytes
+        }
+        return result.isEmpty ? "output" : result
     }
 
     /// Liest die Besitzer-PID aus einem Staging-Dateinamen
@@ -1069,11 +1168,13 @@ public struct FFmpegWrapper {
     /// ohne PID-Marke bleiben unangetastet.
     static func removeOrphanedStagedOutputs(
         for finalURL: URL,
+        caseSensitiveNames: Bool? = nil,
+        log: @Sendable (String) -> Void = { _ in },
         beforeUnlink: ((URL) -> Void)? = nil
     ) {
         let fileManager = FileManager.default
         let parent = finalURL.deletingLastPathComponent()
-        let basename = finalURL.deletingPathExtension().lastPathComponent
+        let basename = stagingBasename(for: finalURL)
         let prefix = ".\(basename).partial-"
         let expectedExtension = finalURL.pathExtension.isEmpty
             ? "m4b" : finalURL.pathExtension
@@ -1083,11 +1184,13 @@ public struct FFmpegWrapper {
         // einem case-sensitiven zwei verschiedene. Vorher wurde die Endung
         // immer kleingeschrieben verglichen, der Basisname aber immer exakt —
         // beides ging je nach Volume daneben (Review-Fund 2026-08-17).
-        // Lässt sich die Eigenschaft nicht ermitteln, gilt case-sensitiv: das
-        // vergleicht enger und bleibt damit innerhalb von „genau dieses Ziel".
-        let caseSensitive = (try? parent.resourceValues(
-            forKeys: [.volumeSupportsCaseSensitiveNamesKey]
-        ))?.volumeSupportsCaseSensitiveNames ?? true
+        // Liefert das Volume die Eigenschaft nicht (bei Netz-/FUSE-Mounts
+        // möglich), gilt das macOS-Standardverhalten: case-insensitiv.
+        let caseSensitive = caseSensitiveNames
+            ?? (try? parent.resourceValues(
+                forKeys: [.volumeSupportsCaseSensitiveNamesKey]
+            ))?.volumeSupportsCaseSensitiveNames
+            ?? false
         func sameName(_ candidate: String, _ expected: String) -> Bool {
             caseSensitive ? candidate == expected
                 : candidate.compare(expected, options: .caseInsensitive) == .orderedSame
@@ -1103,20 +1206,23 @@ public struct FFmpegWrapper {
         ) else { return }
         for url in contents where startsWithPrefix(url.lastPathComponent)
             && sameName(url.pathExtension, expectedExtension) {
-            // `contentsOfDirectory` liefert auch Ordner. Ein passend benannter
-            // Ordner würde von `removeItem` samt Inhalt gelöscht — deshalb hier
-            // nur echte Dateien zulassen.
-            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { continue }
             guard let owner = stagedOutputOwnerPID(url) else { continue }
             // Gleiche Lebend-Prüfung wie bei den Temp-Verzeichnissen: EPERM
             // heißt "existiert, gehört jemand anderem" — also nicht anfassen.
             if Darwin.kill(owner, 0) == 0 || errno == EPERM { continue }
+            // `contentsOfDirectory` liefert auch Ordner. Nie rekursiv löschen;
+            // den liegengebliebenen Eintrag aber sichtbar melden.
+            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?
+                .isRegularFile == true else {
+                log("⚠️ Staging-Eintrag ist keine reguläre Datei und bleibt liegen: \(url.path)")
+                continue
+            }
             // Der Hook macht im Test den Typwechsel nach der Prüfung
             // deterministisch. `unlink` entfernt genau diesen Verzeichniseintrag
             // und verweigert einen inzwischen eingesetzten Ordner atomar; anders
             // als `removeItem` kann es dessen Inhalt nicht rekursiv löschen.
             beforeUnlink?(url)
-            _ = url.path.withCString { Darwin.unlink($0) }
+            ConversionContext.unlinkStagedOutput(url, log: log)
         }
     }
 
@@ -1247,6 +1353,14 @@ public struct FFmpegWrapper {
 }
 
 extension FFmpegWrapper {
+    static func ffmpegTimeArgument(_ seconds: TimeInterval) -> String {
+        String(
+            format: "%.6f",
+            locale: Locale(identifier: "en_US_POSIX"),
+            seconds
+        )
+    }
+
     static func getArgsForStandardSlicing(
         file: AudioFile,
         url: URL,
@@ -1259,7 +1373,7 @@ extension FFmpegWrapper {
         // WAV ist der Temp-Treiber (Standard-Modus hält ALLE Slices gleichzeitig),
         // und für ein Mono-Hörbuch (Default) halbiert Mono-Slicing den Temp-Bedarf.
         // Der finale `-ac`-Downmix bleibt identisch, nur eben schon beim Slicen.
-        return ["-nostdin", "-y", "-ss", "\(file.startTime)", "-t", "\(file.duration)", "-i", file.url.path, "-vn", "-acodec", "pcm_s16le", "-ar", "\(settings.sampleRate)", "-ac", settings.isMono ? "1" : "2", url.path]
+        return ["-nostdin", "-y", "-ss", ffmpegTimeArgument(file.startTime), "-t", ffmpegTimeArgument(file.duration), "-i", file.url.path, "-vn", "-acodec", "pcm_s16le", "-ar", "\(settings.sampleRate)", "-ac", settings.isMono ? "1" : "2", url.path]
     }
 
     static func getArgsForParallelEncoding(
@@ -1267,6 +1381,6 @@ extension FFmpegWrapper {
         url: URL,
         settings: AudioSettings
     ) -> [String] {
-        return ["-nostdin", "-y", "-ss", "\(file.startTime)", "-t", "\(file.duration)", "-i", file.url.path, "-vn", "-c:a", "aac_at", "-aac_at_mode", "cvbr", "-b:a", settings.bitrate, "-ar", "\(settings.sampleRate)", "-ac", settings.isMono ? "1" : "2", url.path]
+        return ["-nostdin", "-y", "-ss", ffmpegTimeArgument(file.startTime), "-t", ffmpegTimeArgument(file.duration), "-i", file.url.path, "-vn", "-c:a", "aac_at", "-aac_at_mode", "cvbr", "-b:a", settings.bitrate, "-ar", "\(settings.sampleRate)", "-ac", settings.isMono ? "1" : "2", url.path]
     }
 }

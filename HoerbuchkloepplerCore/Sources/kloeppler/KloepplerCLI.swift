@@ -249,10 +249,10 @@ struct KloepplerCLI: AsyncParsableCommand {
             throw ValidationError("Ungültiger --mode '\(mode)'. Erlaubt: 'parallel' oder 'standard'.")
         }
         if let bitrate = bitrate, !AudioSettings.isValidBitrate(bitrate) {
-            throw ValidationError("Ungültige --bitrate '\(bitrate)'. Erwartet wird eine positive Zahl mit optionalem 'k', z.B. '48k' oder '64000'.")
+            throw ValidationError("Ungültige --bitrate '\(bitrate)'. Erwartet werden 8 bis 320 kbit/s, z.B. '48k' oder '64000'.")
         }
-        if let samplerate = samplerate, !(8000...192000).contains(samplerate) {
-            throw ValidationError("Ungültige --samplerate \(samplerate). Erlaubt: 8000–192000 Hz (z.B. 32000, 44100, 48000).")
+        if let samplerate = samplerate, !(8000...48000).contains(samplerate) {
+            throw ValidationError("Ungültige --samplerate \(samplerate). Erlaubt: 8000–48000 Hz (z.B. 32000, 44100, 48000).")
         }
         if let maxDuration, maxDuration < 0 {
             throw ValidationError("Ungültige --max-duration \(maxDuration). Erlaubt: 0 (unbegrenzt) oder eine positive Stundenzahl.")

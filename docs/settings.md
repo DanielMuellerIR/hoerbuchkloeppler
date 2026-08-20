@@ -24,6 +24,10 @@ gewählt (kleine Dateien, praktisch unhörbar vs. hohe Qualität) — Begründun
   Ordner wird bei Bedarf angelegt.
 - Beim Laden und Speichern werden ungültige Bitrate, Abtastrate und maximale
   Dauer feldweise auf ihre Defaults zurückgesetzt.
+- Gültig sind Bitraten von `8k`/`8000` bis `320k`/`320000` bit/s und
+  Abtastraten von 8.000 bis 48.000 Hz. Werte außerhalb dieser Grenzen erreichen
+  `aac_at` nicht, sondern fallen vor dem ffmpeg-Aufruf auf den jeweiligen
+  Default zurück.
 - Fehlende oder falsch typisierte JSON-Felder werden ebenfalls einzeln ersetzt;
   gültige Nachbarfelder bleiben erhalten.
 - `saveSettings(_:)` meldet Schreibfehler an die GUI; sie zeigt den Fehler an,

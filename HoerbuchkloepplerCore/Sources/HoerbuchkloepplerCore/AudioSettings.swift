@@ -26,15 +26,6 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         self.isVerbose = isVerbose
     }
 
-    private enum CodingKeys: String, CodingKey {
-        case isMono
-        case bitrate
-        case sampleRate
-        case maxDurationHours
-        case useParallelEncoding
-        case isVerbose
-    }
-
     /// Liest jedes Feld unabhängig. Eine alte oder von Hand bearbeitete Datei
     /// darf dadurch ein einzelnes fehlendes/falsch typisiertes Feld verlieren,
     /// ohne alle übrigen gültigen Einstellungen zu verwerfen.
@@ -56,7 +47,13 @@ public struct AudioSettings: Codable, Equatable, Sendable {
             return false
         }
         let digits = value.hasSuffix("k") ? String(value.dropLast()) : value
-        return Int(digits).map { $0 > 0 } ?? false
+        guard let number = Int(digits), number > 0 else { return false }
+        if value.hasSuffix("k") {
+            let bitsPerSecond = number.multipliedReportingOverflow(by: 1_000)
+            return !bitsPerSecond.overflow
+                && (8_000...320_000).contains(bitsPerSecond.partialValue)
+        }
+        return (8_000...320_000).contains(number)
     }
 
     /// Korrupte oder manuell bearbeitete Persistenz darf keine ungültigen
@@ -68,7 +65,7 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         if !Self.isValidBitrate(result.bitrate) {
             result.bitrate = defaults.bitrate
         }
-        if !(8_000...192_000).contains(result.sampleRate) {
+        if !(8_000...48_000).contains(result.sampleRate) {
             result.sampleRate = defaults.sampleRate
         }
         if let hours = result.maxDurationHours, hours <= 0 {

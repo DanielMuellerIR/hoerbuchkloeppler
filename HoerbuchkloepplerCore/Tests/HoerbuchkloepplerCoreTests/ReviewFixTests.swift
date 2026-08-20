@@ -14,6 +14,37 @@ private func makeExecutable(_ url: URL, contents: String) throws {
     try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
 }
 
+private func writeSilentWAV(to url: URL, duration: TimeInterval = 0.25) throws {
+    let sampleRate = 8_000.0
+    let format = try #require(
+        AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)
+    )
+    let frameCount = AVAudioFrameCount(sampleRate * duration)
+    let buffer = try #require(
+        AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount)
+    )
+    buffer.frameLength = frameCount
+    let file = try AVAudioFile(forWriting: url, settings: format.settings)
+    try file.write(from: buffer)
+}
+
+private final class ThreadSafeLogProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages: [String] = []
+
+    func append(_ message: String) {
+        lock.lock()
+        messages.append(message)
+        lock.unlock()
+    }
+
+    func snapshot() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return messages
+    }
+}
+
 private actor PreparationCancellationProbe {
     private var started = false
     private var observedCancellation = false
@@ -180,6 +211,21 @@ struct OutputSafetyTests {
         #expect(FFmpegWrapper.stagedOutputOwnerPID(staged) == ProcessInfo.processInfo.processIdentifier)
     }
 
+    @Test("Staging-Namen bleiben auch bei langen UTF-8-Titeln unter NAME_MAX")
+    func stagingURLTruncatesLongBasenameByUTF8Bytes() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // 125 Umlaute = 250 UTF-8-Bytes; der finale Name passt gerade noch,
+        // der ungekürzte Staging-Zusatz dagegen nicht.
+        let final = directory.appendingPathComponent(String(repeating: "ä", count: 125) + ".m4b")
+        let staged = FFmpegWrapper.stagingOutputURL(for: final, ownerPID: 987_654)
+        #expect(staged.lastPathComponent.utf8.count <= Int(NAME_MAX))
+
+        try Data("unvollständig".utf8).write(to: staged)
+        FFmpegWrapper.removeOrphanedStagedOutputs(for: final)
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+    }
+
     @Test("Altformat-Partials ohne PID-Marke liefern keine Besitzer-PID")
     func legacyStagingNameHasNoOwner() {
         // Alte Namen waren `.partial-<uuid>`; eine rein numerische erste
@@ -213,46 +259,38 @@ struct OutputSafetyTests {
         #expect(FileManager.default.fileExists(atPath: otherTarget.path))
     }
 
-    /// Behandelt das Volume dieses Ordners `a.txt` und `A.txt` als denselben Namen?
-    private func volumeIsCaseInsensitive(_ directory: URL) -> Bool {
-        ((try? directory.resourceValues(
-            forKeys: [.volumeSupportsCaseSensitiveNamesKey]
-        ))?.volumeSupportsCaseSensitiveNames ?? true) == false
-    }
-
-    @Test("Groß-/Kleinschreibung wird nach der Regel des Volumes verglichen")
-    func comparesStagedOutputNamesByVolumeSemantics() throws {
-        // Auf einem case-insensitiven Volume (macOS-Standard) sind `Buch.M4B`
-        // und `Buch.m4b` dasselbe Ziel — die Leiche muss weg. Auf einem
-        // case-sensitiven Volume sind es zwei Ziele — sie muss liegen bleiben.
-        // Vorher galt für die Endung immer „egal", für den Basisnamen immer
-        // „exakt"; je nach Volume war eines davon falsch (Review-Fund 2026-08-17).
+    @Test("Case-insensitive Volumes entfernen abweichende Schreibweisen")
+    func caseInsensitiveVolumeRemovesDifferentCasing() throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let uppercaseFinal = directory.appendingPathComponent("Buch.M4B")
-        let lowercaseFinal = directory.appendingPathComponent("Buch.m4b")
-        let orphan = FFmpegWrapper.stagingOutputURL(for: uppercaseFinal, ownerPID: 987_654)
-        try Data("unvollständig".utf8).write(to: orphan)
-
-        FFmpegWrapper.removeOrphanedStagedOutputs(for: lowercaseFinal)
-
-        let entferntErwartet = volumeIsCaseInsensitive(directory)
-        #expect(FileManager.default.fileExists(atPath: orphan.path) != entferntErwartet)
-    }
-
-    @Test("Auch der Basisname folgt der Volume-Regel")
-    func comparesStagedOutputBasenameByVolumeSemantics() throws {
-        let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let uppercaseFinal = directory.appendingPathComponent("BUCH.m4b")
+        let uppercaseFinal = directory.appendingPathComponent("BUCH.M4B")
         let lowercaseFinal = directory.appendingPathComponent("buch.m4b")
         let orphan = FFmpegWrapper.stagingOutputURL(for: uppercaseFinal, ownerPID: 987_654)
         try Data("unvollständig".utf8).write(to: orphan)
 
-        FFmpegWrapper.removeOrphanedStagedOutputs(for: lowercaseFinal)
+        FFmpegWrapper.removeOrphanedStagedOutputs(
+            for: lowercaseFinal,
+            caseSensitiveNames: false
+        )
 
-        let entferntErwartet = volumeIsCaseInsensitive(directory)
-        #expect(FileManager.default.fileExists(atPath: orphan.path) != entferntErwartet)
+        #expect(!FileManager.default.fileExists(atPath: orphan.path))
+    }
+
+    @Test("Case-sensitive Volumes behalten abweichende Schreibweisen")
+    func caseSensitiveVolumeKeepsDifferentCasing() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let uppercaseFinal = directory.appendingPathComponent("BUCH.M4B")
+        let lowercaseFinal = directory.appendingPathComponent("buch.m4b")
+        let orphan = FFmpegWrapper.stagingOutputURL(for: uppercaseFinal, ownerPID: 987_654)
+        try Data("unvollständig".utf8).write(to: orphan)
+
+        FFmpegWrapper.removeOrphanedStagedOutputs(
+            for: lowercaseFinal,
+            caseSensitiveNames: true
+        )
+
+        #expect(FileManager.default.fileExists(atPath: orphan.path))
     }
 
     @Test("Ein Ziel mit `.partial-` im eigenen Namen wird trotzdem aufgeräumt")
@@ -293,10 +331,12 @@ struct OutputSafetyTests {
         let payload = decoyDirectory.appendingPathComponent("wichtig.txt")
         try Data("nicht anfassen".utf8).write(to: payload)
 
-        FFmpegWrapper.removeOrphanedStagedOutputs(for: final)
+        let logs = ThreadSafeLogProbe()
+        FFmpegWrapper.removeOrphanedStagedOutputs(for: final, log: logs.append)
 
         #expect(FileManager.default.fileExists(atPath: decoyDirectory.path))
         #expect(FileManager.default.fileExists(atPath: payload.path))
+        #expect(logs.snapshot().contains { $0.contains("keine reguläre Datei") })
     }
 
     @Test("Ein nach der Typprüfung eingesetzter Ordner wird nicht rekursiv gelöscht")
@@ -309,7 +349,7 @@ struct OutputSafetyTests {
         var replacementError: (any Error)?
         let payload = orphan.appendingPathComponent("wichtig.txt")
 
-        FFmpegWrapper.removeOrphanedStagedOutputs(for: final) { checkedURL in
+        FFmpegWrapper.removeOrphanedStagedOutputs(for: final, beforeUnlink: { checkedURL in
             do {
                 try FileManager.default.removeItem(at: checkedURL)
                 try FileManager.default.createDirectory(
@@ -320,7 +360,7 @@ struct OutputSafetyTests {
             } catch {
                 replacementError = error
             }
-        }
+        })
 
         #expect(replacementError == nil)
         #expect(FileManager.default.fileExists(atPath: orphan.path))
@@ -353,6 +393,52 @@ struct OutputSafetyTests {
 
         #expect(zip(values, values.dropFirst()).allSatisfy { $0 <= $1 })
         #expect(values.last == 1)
+    }
+
+    @Test("Sehr kurze Zeiten werden ohne Exponentialschreibweise an ffmpeg übergeben")
+    func tinyTimesUseFixedDecimalArguments() {
+        let file = AudioFile(
+            url: URL(fileURLWithPath: "/tmp/kurz.m4b"),
+            startTime: 0.00001,
+            duration: 0.00002,
+            chapterTitle: "Kurz"
+        )
+        let args = FFmpegWrapper.getArgsForStandardSlicing(
+            file: file,
+            url: URL(fileURLWithPath: "/tmp/kurz.wav"),
+            settings: AudioSettings()
+        )
+
+        #expect(args[args.firstIndex(of: "-ss")! + 1] == "0.000010")
+        #expect(args[args.firstIndex(of: "-t")! + 1] == "0.000020")
+        #expect(!args.contains { $0.lowercased().contains("e-") })
+    }
+
+    @Test("Der finale ffmpeg-Fehler enthält dessen stderr-Ursache")
+    @MainActor
+    func finalProcessFailureIncludesStderr() async {
+        let session = ConversionSession(settings: AudioSettings())
+        let context = session.beginConversionRun()
+
+        let succeeded = FFmpegWrapper.runFinalProcess(
+            args: ["-nostdin", "-definitely-not-an-option"],
+            session: session,
+            context: context,
+            progressBase: 0,
+            progressWeight: 1,
+            phaseDuration: 1,
+            logMessage: "Testlauf",
+            pacmanTitle: "Test"
+        )
+        for _ in 0..<10 where !session.eventLogs.contains(where: {
+            $0.message.contains("Exit-Code")
+        }) {
+            await Task.yield()
+        }
+
+        #expect(!succeeded)
+        let failure = session.eventLogs.first { $0.message.contains("Exit-Code") }?.message
+        #expect(failure?.contains("Unrecognized option") == true)
     }
 }
 
@@ -436,6 +522,23 @@ struct ToolResolutionTests {
         try makeExecutable(bad, contents: "#!/bin/sh\necho 'ffmpeg version kaputt'\nexit 3\n")
         #expect(FFmpegWrapper.toolVersion(at: good, name: "ffmpeg") == "7.1")
         #expect(FFmpegWrapper.toolVersion(at: bad, name: "ffmpeg") == nil)
+    }
+
+    @Test("Große Versionsausgabe blockiert nicht am Pipe-Puffer")
+    func drainsLargeVersionOutputBeforeWaiting() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let tool = directory.appendingPathComponent("large-output")
+        try makeExecutable(
+            tool,
+            contents: """
+            #!/bin/sh
+            /usr/bin/yes x | /usr/bin/head -c 200000
+            printf '\nffmpeg version 7.1\n'
+            """
+        )
+
+        #expect(FFmpegWrapper.toolVersion(at: tool, name: "ffmpeg") == "7.1")
     }
 }
 
@@ -635,7 +738,7 @@ struct MetadataAndCLITests {
             chapterTitle: "Alt"
         )
         let scanned = ConversionSession.ScannedFolder(
-            sourceURL: URL(fileURLWithPath: "/tmp/alt"),
+            folderURL: URL(fileURLWithPath: "/tmp/alt"),
             audioFiles: [file],
             imageURLs: [],
             embeddedArtwork: nil
@@ -658,7 +761,7 @@ struct MetadataAndCLITests {
             chapterTitle: "Kapitel 1"
         )
         await session.applyScannedFolder(.init(
-            sourceURL: source,
+            folderURL: source,
             audioFiles: [file],
             imageURLs: [],
             embeddedArtwork: nil
@@ -867,7 +970,7 @@ struct ImportLifecycleTests {
 
         session.audioFiles.removeAll()
         await session.applyScannedFolder(.init(
-            sourceURL: URL(fileURLWithPath: "/tmp/veraltet"),
+            folderURL: URL(fileURLWithPath: "/tmp/veraltet"),
             audioFiles: [file],
             imageURLs: [],
             embeddedArtwork: nil
@@ -913,7 +1016,7 @@ struct ImportLifecycleTests {
         let session = ConversionSession(settings: AudioSettings())
         session.removeCover()
         await session.applyScannedFolder(.init(
-            sourceURL: URL(fileURLWithPath: "/tmp/Buch"),
+            folderURL: URL(fileURLWithPath: "/tmp/Buch"),
             audioFiles: [],
             imageURLs: [URL(fileURLWithPath: "/tmp/folder.jpg")],
             embeddedArtwork: Data("kein echtes Bild".utf8)
@@ -947,6 +1050,23 @@ struct SettingsPersistenceTests {
         #expect(normalized.maxDurationHours == nil)
         #expect(!normalized.useParallelEncoding)
         #expect(normalized.isVerbose)
+    }
+
+    @Test("Bitrate und Abtastrate bleiben innerhalb der aac_at-Grenzen")
+    func excessiveAudioSettingsAreRejected() {
+        #expect(AudioSettings.isValidBitrate("320k"))
+        #expect(AudioSettings.isValidBitrate("320000"))
+        #expect(AudioSettings.isValidBitrate("8k"))
+        #expect(!AudioSettings.isValidBitrate("1"))
+        #expect(!AudioSettings.isValidBitrate("321k"))
+        #expect(!AudioSettings.isValidBitrate("9000000k"))
+
+        let normalized = AudioSettings(
+            bitrate: "9000000k",
+            sampleRate: 192_000
+        ).normalized()
+        #expect(normalized.bitrate == AudioSettings().bitrate)
+        #expect(normalized.sampleRate == AudioSettings().sampleRate)
     }
 
     @Test("Laden nutzt AudioSettings als einzige Default-Quelle")
@@ -1000,9 +1120,10 @@ struct SettingsPersistenceTests {
 }
 
 @Suite("Review-Fixes 2026-08-17 – Symlinks und Staging-Bereinigung")
+@MainActor
 struct ReviewFixes20260817Tests {
-    @Test("Ein Dateisymlink behält seinen sichtbaren Namen als Quellpfad")
-    func symlinkKeepsVisibleNameAsSourcePath() throws {
+    @Test("Links gewinnen gegen danebenliegende Ziele und bestimmen die Reihenfolge")
+    func symlinksReplaceAdjacentTargetsWithoutDuplicateImport() async throws {
         // Zwei gegenläufig benannte Link-/Ziel-Paare: die vom Nutzer gewollte
         // Reihenfolge (01, 02) ist genau die umgekehrte der Zielnamen (A, B).
         // Wird nur das aufgelöste Ziel weitergereicht, kippt die Reihenfolge
@@ -1011,23 +1132,22 @@ struct ReviewFixes20260817Tests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let zielB = directory.appendingPathComponent("Original-B.wav")
         let zielA = directory.appendingPathComponent("Original-A.wav")
-        try Data("B".utf8).write(to: zielB)
-        try Data("A".utf8).write(to: zielA)
+        try writeSilentWAV(to: zielB)
+        try writeSilentWAV(to: zielA)
         let linkEins = directory.appendingPathComponent("01.wav")
         let linkZwei = directory.appendingPathComponent("02.wav")
         try FileManager.default.createSymbolicLink(at: linkEins, withDestinationURL: zielB)
         try FileManager.default.createSymbolicLink(at: linkZwei, withDestinationURL: zielA)
 
-        let gefunden = ConversionSession.recursiveFileURLs(in: directory)
-        let links = gefunden
-            .filter { ["01.wav", "02.wav"].contains($0.source.lastPathComponent) }
-            .sorted { $0.source.lastPathComponent < $1.source.lastPathComponent }
+        let session = ConversionSession(settings: AudioSettings())
+        let scanned = await session.scanFolder(directory)
+        await session.applyScannedFolder(scanned)
 
-        #expect(links.count == 2)
-        #expect(links.first?.source.lastPathComponent == "01.wav")
-        #expect(links.first?.resolved.lastPathComponent == "Original-B.wav")
-        #expect(links.last?.source.lastPathComponent == "02.wav")
-        #expect(links.last?.resolved.lastPathComponent == "Original-A.wav")
+        #expect(session.audioFiles.map(\.name) == ["01.wav", "02.wav"])
+        #expect(session.audioFiles.map { $0.url.lastPathComponent } == [
+            "Original-B.wav", "Original-A.wav"
+        ])
+        #expect(session.eventLogs.contains { $0.message.contains("Mehrere Ordner-Einträge") })
     }
 
     @Test("Name und Fallback-Kapiteltitel folgen dem Linknamen, gelesen wird das Ziel")
@@ -1040,11 +1160,110 @@ struct ReviewFixes20260817Tests {
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: ziel)
 
         // Ohne Titel-Tag (die Datei ist kein echtes Audio) greift der Fallback.
-        let datei = await AudioFile(url: ziel, sourceURL: link)
+        let datei = await AudioFile(foundFile: FoundFile(source: link, resolved: ziel))
 
         #expect(datei.name == "01.wav")
         #expect(datei.chapterTitle == "01")
         #expect(datei.url.lastPathComponent == "Original-B.wav")
+    }
+
+    @Test("Ein Link ohne Endung wird über die Zielendung als Audio erkannt")
+    func extensionlessSymlinkUsesResolvedAudioType() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let target = directory.appendingPathComponent("Original.wav")
+        try writeSilentWAV(to: target)
+        let link = directory.appendingPathComponent("01")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        let session = ConversionSession(settings: AudioSettings())
+        let found = try #require(ConversionSession.foundFile(at: link))
+        let loaded = await session.loadAudioFiles(from: found)
+
+        #expect(loaded.files.count == 1)
+        #expect(loaded.files.first?.name == "01")
+        #expect(loaded.files.first?.url == target.resolvingSymlinksInPath())
+    }
+
+    @Test("Falsche sichtbare Audio-Endung importiert keine Null-Dauer-Datei")
+    func misleadingAudioExtensionIsLoggedAndSkipped() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let target = directory.appendingPathComponent("Notiz.txt")
+        try Data("kein Audio".utf8).write(to: target)
+        let link = directory.appendingPathComponent("01.mp3")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        let session = ConversionSession(settings: AudioSettings())
+        let found = try #require(ConversionSession.foundFile(at: link))
+        let loaded = await session.loadAudioFiles(from: found)
+
+        #expect(loaded.files.isEmpty)
+        #expect(loaded.warnings.contains { $0.contains("keine positive Audiodauer") })
+    }
+
+    @Test("Kapitelcontainer und Bilder dürfen nur am Ziel eine Endung tragen")
+    func resolvedExtensionsDetermineContainersAndImages() {
+        let chapter = FoundFile(
+            source: URL(fileURLWithPath: "/tmp/Teil 1"),
+            resolved: URL(fileURLWithPath: "/tmp/Buch.m4b")
+        )
+        let image = FoundFile(
+            source: URL(fileURLWithPath: "/tmp/cover"),
+            resolved: URL(fileURLWithPath: "/tmp/Cover.jpg")
+        )
+        let misleading = FoundFile(
+            source: URL(fileURLWithPath: "/tmp/Teil.m4b"),
+            resolved: URL(fileURLWithPath: "/tmp/Notiz.txt")
+        )
+
+        #expect(chapter.kind == .audio)
+        #expect(chapter.isChapterContainer)
+        #expect(image.kind == .image)
+        #expect(!misleading.isChapterContainer)
+    }
+
+    @Test("Kapitelextraktion prüft die Lese-URL statt des sichtbaren Namens")
+    func chapterExtractionUsesResolvedExtension() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let container = directory.appendingPathComponent("Buch.m4b")
+        try Data("kein echter Container".utf8).write(to: container)
+        let extensionless = FoundFile(
+            source: directory.appendingPathComponent("Teil 1"),
+            resolved: container
+        )
+        let misleading = FoundFile(
+            source: directory.appendingPathComponent("Teil 2.m4b"),
+            resolved: directory.appendingPathComponent("Notiz.txt")
+        )
+
+        let fallback = await AudioFile.extractChapters(from: extensionless)
+        let ignored = await AudioFile.extractChapters(from: misleading)
+        #expect(fallback?.first?.name == "Teil 1")
+        #expect(ignored == nil)
+    }
+
+    @Test("Unterordner werden vor Dateinamen sortiert")
+    func nestedFoldersKeepDiscOrder() async {
+        let root = URL(fileURLWithPath: "/tmp/Buch")
+        let paths = ["CD2/02.mp3", "CD1/02.mp3", "CD2/01.mp3", "CD1/01.mp3"]
+        let files = paths.map { path in
+            let url = root.appendingPathComponent(path)
+            return AudioFile(
+                foundFile: FoundFile(source: url, resolved: url),
+                startTime: 0,
+                duration: 1,
+                chapterTitle: path
+            )
+        }
+        let session = ConversionSession(settings: AudioSettings())
+
+        await session.processIncomingFiles(files, skipCoverExtraction: true)
+
+        #expect(session.audioFiles.map(\.chapterTitle) == [
+            "CD1/01.mp3", "CD1/02.mp3", "CD2/01.mp3", "CD2/02.mp3"
+        ])
     }
 
     @Test("Eine gewöhnliche Datei führt beide Pfade identisch")
@@ -1069,11 +1288,13 @@ struct ReviewFixes20260817Tests {
         let inhalt = staging.appendingPathComponent("wichtig.txt")
         try Data("nicht löschen".utf8).write(to: inhalt)
 
-        let context = ConversionContext()
+        let logs = ThreadSafeLogProbe()
+        let context = ConversionContext(log: logs.append)
         context.registerStagedOutput(staging)
         context.discardStagedOutput(staging)
 
         #expect(FileManager.default.fileExists(atPath: inhalt.path))
+        #expect(logs.snapshot().contains { $0.contains("konnte nicht entfernt werden") })
     }
 
     @Test("cancel löscht einen untergeschobenen Ordner nicht rekursiv")
@@ -1092,17 +1313,4 @@ struct ReviewFixes20260817Tests {
         #expect(FileManager.default.fileExists(atPath: inhalt.path))
     }
 
-    @Test("Eine registrierte Staging-DATEI wird beim Abbruch trotzdem entfernt")
-    func cancelStillRemovesStagedFiles() throws {
-        let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let staging = directory.appendingPathComponent(".Buch.partial-9999.m4b")
-        try Data("unvollständig".utf8).write(to: staging)
-
-        let context = ConversionContext()
-        context.registerStagedOutput(staging)
-        context.cancel()
-
-        #expect(!FileManager.default.fileExists(atPath: staging.path))
-    }
 }

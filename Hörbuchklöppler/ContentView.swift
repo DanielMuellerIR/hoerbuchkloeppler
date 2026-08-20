@@ -329,17 +329,10 @@ struct ContentView: View {
         session: ConversionSession,
         importToken: ImportToken
     ) async {
-        let ext = url.pathExtension.lowercased()
-        let files: [AudioFile]?
-        if ["m4b", "mp4"].contains(ext) {
-            files = await session.extractChapters(from: url)
-        } else if ["mp3", "m4a", "wav", "flac"].contains(ext) {
-            files = [await AudioFile(url: url)]
-        } else {
-            files = nil
-        }
-        if let files {
-            await session.processIncomingFiles(files, importToken: importToken)
+        if let found = ConversionSession.foundFile(at: url) {
+            let loaded = await session.loadAudioFiles(from: found)
+            loaded.warnings.forEach { session.addLog($0) }
+            await session.processIncomingFiles(loaded.files, importToken: importToken)
         }
         await session.finishImport(importToken)
     }

@@ -43,6 +43,65 @@ struct MetadataResolution: Equatable, Sendable {
     let shouldShowSelection: Bool
 }
 
+/// Eine gefundene Datei mit sichtbarem Quellpfad und physischer Lese-URL.
+///
+/// `source` ist der Pfad, unter dem der Nutzer die Datei sieht. `resolved` ist
+/// die reguläre Datei, die AVFoundation und ffmpeg öffnen. Bei gewöhnlichen
+/// Dateien sind beide gleich; bei einem Symlink bleibt so dessen bewusst
+/// gewählter Name erhalten, ohne den Link selbst an Audio-APIs zu übergeben.
+public struct FoundFile: Equatable, Sendable {
+    public enum Kind: Equatable, Sendable {
+        case audio
+        case image
+        case unsupported
+    }
+
+    private static let audioExtensions: Set<String> = [
+        "mp3", "m4a", "wav", "flac", "m4b", "mp4"
+    ]
+    private static let imageExtensions: Set<String> = ["jpg", "jpeg", "png"]
+    private static let chapterContainerExtensions: Set<String> = ["m4b", "mp4"]
+
+    public let source: URL
+    public let resolved: URL
+
+    public init(source: URL, resolved: URL) {
+        self.source = source
+        self.resolved = resolved
+    }
+
+    public var readURL: URL { resolved }
+
+    /// Der Typ darf am sichtbaren Namen oder am Ziel erkennbar sein. Ob eine
+    /// Datei Kapitelcontainer ist, entscheidet dagegen ausschließlich die
+    /// wirklich gelesene Datei.
+    public var kind: Kind {
+        let extensions = [source.pathExtension, resolved.pathExtension]
+            .map { $0.lowercased() }
+        if extensions.contains(where: Self.audioExtensions.contains) { return .audio }
+        if extensions.contains(where: Self.imageExtensions.contains) { return .image }
+        return .unsupported
+    }
+
+    public var isChapterContainer: Bool {
+        Self.chapterContainerExtensions.contains(resolved.pathExtension.lowercased())
+    }
+
+    var isSymbolicLink: Bool {
+        source.standardizedFileURL != resolved.standardizedFileURL
+    }
+}
+
+public struct AudioLoadResult: Sendable {
+    public let files: [AudioFile]
+    public let warnings: [String]
+
+    public init(files: [AudioFile], warnings: [String] = []) {
+        self.files = files
+        self.warnings = warnings
+    }
+}
+
 /// Besitzt nur die externen Prozesse des Imports (Kapitel- und Metadatenanalyse).
 /// Damit kann die CLI schon vor dem eigentlichen Konvertierungs-Context auf
 /// Ctrl-C reagieren, ohne Prozesse eines anderen Fensters anzufassen.
@@ -147,8 +206,8 @@ private final class ConversionCoordinator: @unchecked Sendable {
     private var active: ConversionContext?
     private var finished = false
 
-    func begin() -> ConversionContext {
-        let next = ConversionContext()
+    func begin(log: @escaping @Sendable (String) -> Void) -> ConversionContext {
+        let next = ConversionContext(log: log)
         lock.lock()
         let previous = active
         active = next
@@ -286,14 +345,13 @@ public final class ConversionSession: ObservableObject, Identifiable {
         }
     }
 
-    /// Liest Kapitel mit einem optional laufenden Vorbereitungs-Context. Die
-    /// öffentliche Methode hält diese Prozessverwaltung aus `ContentView`.
-    public nonisolated func extractChapters(from url: URL,
-                                            sourceURL: URL? = nil) async -> [AudioFile]? {
+    /// Liest Kapitel mit einem optional laufenden Vorbereitungs-Context. Das
+    /// strukturierte Dateipaar verhindert, dass sichtbarer Pfad und Lese-URL
+    /// an zwei gleich typisierten Parametern vertauscht werden.
+    public nonisolated func extractChapters(from file: FoundFile) async -> [AudioFile]? {
         let context = currentPreparationContext()
         return await AudioFile.extractChaptersControlled(
-            from: url,
-            sourceURL: sourceURL,
+            from: file,
             shouldCancel: { context?.isCancelled ?? false },
             registerProcess: { context?.register($0) ?? true },
             unregisterProcess: { context?.unregister($0) },
@@ -303,11 +361,39 @@ public final class ConversionSession: ObservableObject, Identifiable {
         )
     }
 
+    /// Analysiert genau eine gefundene Audiodatei. Ordner- und Einzeldatei-
+    /// Import benutzen damit dieselbe Typ-, Symlink- und Dauerlogik.
+    public nonisolated func loadAudioFiles(from file: FoundFile) async -> AudioLoadResult {
+        guard file.kind == .audio else { return AudioLoadResult(files: []) }
+        let candidates: [AudioFile]
+        if file.isChapterContainer {
+            candidates = await extractChapters(from: file) ?? []
+        } else {
+            candidates = [await AudioFile(foundFile: file)]
+        }
+        guard !preparationCancellationRequested() else { return AudioLoadResult(files: []) }
+
+        var valid: [AudioFile] = []
+        var warnings: [String] = []
+        for candidate in candidates {
+            guard candidate.duration.isFinite, candidate.duration > 0 else {
+                warnings.append(
+                    "⚠️ Überspringe \(file.source.lastPathComponent): keine positive Audiodauer lesbar."
+                )
+                continue
+            }
+            valid.append(candidate)
+        }
+        return AudioLoadResult(files: valid, warnings: warnings)
+    }
+
     /// Startet einen neuen Lauf und macht einen eventuell noch auslaufenden
     /// Vorgänger ungültig. Dessen spätere Completion darf den neuen UI-State
     /// dadurch nicht mehr überschreiben.
     nonisolated func beginConversionRun() -> ConversionContext {
-        conversionCoordinator.begin()
+        conversionCoordinator.begin { [weak self] message in
+            self?.enqueueLog(message, type: .highlight)
+        }
     }
 
     nonisolated func currentConversionContext() -> ConversionContext? {
@@ -691,18 +777,12 @@ public final class ConversionSession: ObservableObject, Identifiable {
         let canRepresentFolder = audioFiles.isEmpty && sourceFolderForCLI != nil
         addLog("📥 Importiere \(newFiles.count) Datei(en)...")
         self.audioFiles.append(contentsOf: newFiles)
-        self.audioFiles.sort { (a, b) -> Bool in
-            // Natürliche Sortierung wie im Finder: "Teil 2" kommt vor "Teil 10".
-            // Reines String-< würde unnummerierte Ziffernfolgen falsch ordnen
-            // (1, 10, 11, ..., 2) und damit die Kapitelreihenfolge zerstören.
-            if a.name != b.name { return a.name.localizedStandardCompare(b.name) == .orderedAscending }
-            return a.startTime < b.startTime
-        }
-        if canRepresentFolder, let sourceFolderForCLI, !newFiles.isEmpty {
+        self.audioFiles.sort(by: Self.audioFileComesBefore)
+        if canRepresentFolder, let sourceFolderForCLI {
             cliSourceFolderURL = sourceFolderForCLI
             cliRepresentedFileIDs = Set(audioFiles.map(\.id))
             cliRepresentedChapterTitles = Dictionary(uniqueKeysWithValues: audioFiles.map { ($0.id, $0.chapterTitle) })
-        } else if !newFiles.isEmpty {
+        } else {
             cliSourceFolderURL = nil
             cliRepresentedFileIDs = []
             cliRepresentedChapterTitles = [:]
@@ -756,6 +836,32 @@ public final class ConversionSession: ObservableObject, Identifiable {
                 await importGlobalMetadata(from: first, importToken: importToken)
             }
         }
+    }
+
+    /// Vergleicht den gesamten sichtbaren Pfad komponentenweise in natürlicher
+    /// Finder-Reihenfolge. Dadurch bleiben `CD1/01`, `CD1/02`, `CD2/01` und
+    /// `CD2/02` gruppiert. Kapitel derselben Quelldatei folgen erst danach ihrer
+    /// Startzeit.
+    private static func audioFileComesBefore(_ left: AudioFile, _ right: AudioFile) -> Bool {
+        if left.sourceURL == right.sourceURL {
+            return left.startTime < right.startTime
+        }
+
+        let leftComponents = left.sourceURL.standardizedFileURL.pathComponents
+        let rightComponents = right.sourceURL.standardizedFileURL.pathComponents
+        for (leftComponent, rightComponent) in zip(leftComponents, rightComponents) {
+            let natural = leftComponent.localizedStandardCompare(rightComponent)
+            if natural != .orderedSame { return natural == .orderedAscending }
+            // `localizedStandardCompare` kann unterschiedliche Schreibweisen
+            // gleich behandeln. Der literale Tiebreak erhält eine stabile,
+            // strenge Reihenfolge, ohne vorzeitig die Kapitelzeit zu benutzen.
+            let literal = leftComponent.compare(rightComponent, options: .literal)
+            if literal != .orderedSame { return literal == .orderedAscending }
+        }
+        if leftComponents.count != rightComponents.count {
+            return leftComponents.count < rightComponents.count
+        }
+        return left.url.path < right.url.path
     }
 
     private func importGlobalMetadata(
@@ -912,10 +1018,25 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// Ergebnis eines Ordner-Scans. Enthält keinen `@Published`-State und kann
     /// deshalb sicher von der Audioanalyse zum Main Actor übertragen werden.
     public struct ScannedFolder: Sendable {
-        public var sourceURL: URL
+        public var folderURL: URL
         public var audioFiles: [AudioFile]
         public var imageURLs: [URL]
         public var embeddedArtwork: Data?
+        public var warnings: [String]
+
+        public init(
+            folderURL: URL,
+            audioFiles: [AudioFile],
+            imageURLs: [URL],
+            embeddedArtwork: Data?,
+            warnings: [String] = []
+        ) {
+            self.folderURL = folderURL
+            self.audioFiles = audioFiles
+            self.imageURLs = imageURLs
+            self.embeddedArtwork = embeddedArtwork
+            self.warnings = warnings
+        }
     }
 
     /// Schwerer Teil des Ordner-Imports: rekursiv scannen, m4b-Kapitel via ffmpeg
@@ -923,29 +1044,40 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// `@Published`-State an. Die AVFoundation-Aufrufe suspendieren asynchron;
     /// der Dateisystem- und ffmpeg-Anteil läuft außerhalb des Main Actors.
     public nonisolated func scanFolder(_ url: URL) async -> ScannedFolder {
-        var foundAudio: [AudioFile] = []; var foundImages: [URL] = []
-        for found in Self.recursiveFileURLs(
+        var foundAudio: [AudioFile] = []
+        var foundImages: [URL] = []
+        var warnings: [String] = []
+        let discovered = Self.recursiveFileURLs(
             in: url,
             cancellationRequested: { preparationCancellationRequested() }
-        ) {
+        )
+        let supported = discovered.filter { $0.kind != .unsupported }
+        let deduplicated = Self.deduplicateFoundFiles(supported)
+        var loggedTargets = Set<String>()
+        for discarded in deduplicated.discarded {
+            let target = discarded.resolved.standardizedFileURL.path
+            guard loggedTargets.insert(target).inserted else { continue }
+            let kept = deduplicated.files.first {
+                $0.resolved.standardizedFileURL.path == target
+            }
+            warnings.append(
+                "⚠️ Mehrere Ordner-Einträge zeigen auf \(discarded.resolved.lastPathComponent); "
+                + "importiert wird nur \(kept?.source.lastPathComponent ?? discarded.source.lastPathComponent)."
+            )
+        }
+
+        for found in deduplicated.files {
             if preparationCancellationRequested() { break }
-            let fileURL = found.resolved
-            // Der Dateityp folgt dem SICHTBAREN Namen: unter diesem Namen hat
-            // der Nutzer die Datei in den Ordner gelegt.
-            let ext = found.source.pathExtension.lowercased()
-            if ["mp3", "m4a", "wav", "flac", "m4b", "mp4"].contains(ext) {
-                if ["m4b", "mp4"].contains(ext),
-                   let chapters = await extractChapters(from: fileURL,
-                                                        sourceURL: found.source) {
-                    if preparationCancellationRequested() { break }
-                    foundAudio.append(contentsOf: chapters)
-                } else {
-                    let audioFile = await AudioFile(url: fileURL,
-                                                    sourceURL: found.source)
-                    if preparationCancellationRequested() { break }
-                    foundAudio.append(audioFile)
-                }
-            } else if ["jpg", "jpeg", "png"].contains(ext) { foundImages.append(fileURL) }
+            switch found.kind {
+            case .audio:
+                let loaded = await loadAudioFiles(from: found)
+                foundAudio.append(contentsOf: loaded.files)
+                warnings.append(contentsOf: loaded.warnings)
+            case .image:
+                foundImages.append(found.readURL)
+            case .unsupported:
+                break
+            }
         }
         var embedded: Data? = nil
         for audioFile in foundAudio {
@@ -956,26 +1088,61 @@ public final class ConversionSession: ObservableObject, Identifiable {
                 break
             }
         }
-        return ScannedFolder(sourceURL: url, audioFiles: foundAudio, imageURLs: foundImages, embeddedArtwork: embedded)
+        return ScannedFolder(
+            folderURL: url,
+            audioFiles: foundAudio,
+            imageURLs: foundImages,
+            embeddedArtwork: embedded,
+            warnings: warnings
+        )
+    }
+
+    /// Löst genau einen Dateipfad nach denselben Regeln wie der Ordnerscan auf.
+    /// Verzeichnis- und defekte Symlinks sind keine importierbaren Dateien.
+    public nonisolated static func foundFile(at url: URL) -> FoundFile? {
+        guard let values = try? url.resourceValues(
+            forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+        ) else { return nil }
+        if values.isRegularFile == true {
+            return FoundFile(source: url, resolved: url)
+        }
+        guard values.isSymbolicLink == true else { return nil }
+        let resolved = url.resolvingSymlinksInPath()
+        guard (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?
+            .isRegularFile == true else { return nil }
+        return FoundFile(source: url, resolved: resolved)
+    }
+
+    /// Entfernt physische Dubletten. Ein bewusst benannter Symlink gewinnt
+    /// gegen die danebenliegende Zieldatei; bei mehreren Links bleibt der erste
+    /// Enumerator-Treffer erhalten.
+    nonisolated static func deduplicateFoundFiles(
+        _ files: [FoundFile]
+    ) -> (files: [FoundFile], discarded: [FoundFile]) {
+        var kept: [FoundFile] = []
+        var indexByTarget: [String: Int] = [:]
+        var discarded: [FoundFile] = []
+        for file in files {
+            let target = file.resolved.standardizedFileURL.path
+            guard let index = indexByTarget[target] else {
+                indexByTarget[target] = kept.count
+                kept.append(file)
+                continue
+            }
+            if file.isSymbolicLink, !kept[index].isSymbolicLink {
+                discarded.append(kept[index])
+                kept[index] = file
+            } else {
+                discarded.append(file)
+            }
+        }
+        return (kept, discarded)
     }
 
     /// `FileManager.DirectoryEnumerator` ist absichtlich nicht über einen
     /// asynchronen Aufruf hinweg haltbar. Die Dateiliste wird deshalb synchron
     /// aufgebaut, prüft den laufbezogenen Abbruch aber vor und nach jedem
     /// `nextObject()`, damit auch ein großer Ordnerscan sofort enden kann.
-    /// Eine gefundene Datei mit ihren beiden Pfaden.
-    ///
-    /// `source` ist der Pfad, unter dem der Nutzer die Datei im Ordner sieht —
-    /// bei einem Symlink also der Linkname. `resolved` ist die reguläre Datei,
-    /// aus der wirklich gelesen wird. Für eine gewöhnliche Datei sind beide
-    /// gleich. Getrennt geführt, weil Sortierung und Kapiteltitel dem sichtbaren
-    /// Namen folgen müssen, AVFoundation und ffmpeg aber dem Ziel
-    /// (Review-Fund 2026-08-17).
-    nonisolated struct FoundFile: Sendable {
-        let source: URL
-        let resolved: URL
-    }
-
     nonisolated static func recursiveFileURLs(
         in url: URL,
         cancellationRequested: () -> Bool = { false }
@@ -1012,10 +1179,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
             // aus `01.wav -> Original-B.wav`, `02.wav -> Original-A.wav` die
             // vom Nutzer festgelegte Reihenfolge auf (Review-Fund 2026-08-17).
             enumerator.skipDescendants()
-            let resolvedURL = fileURL.resolvingSymlinksInPath()
-            guard (try? resolvedURL.resourceValues(forKeys: [.isRegularFileKey]))?
-                .isRegularFile == true else { continue }
-            files.append(FoundFile(source: fileURL, resolved: resolvedURL))
+            if let found = foundFile(at: fileURL) { files.append(found) }
         }
         return files
     }
@@ -1028,6 +1192,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     ) async {
         if AudioFile.taskCancellationRequested() { return }
         if let importToken, !isCurrentImport(importToken) { return }
+        for warning in scanned.warnings { addLog(warning) }
         let expectedCoverRevision = importToken?.coverRevision ?? coverRevision
         if coverRevision == expectedCoverRevision, !isCoverSuppressed,
            coverImage == nil, coverPath == nil,
@@ -1045,7 +1210,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
             scanned.audioFiles,
             skipCoverExtraction: true,
             importToken: importToken,
-            sourceFolderForCLI: scanned.sourceURL
+            sourceFolderForCLI: scanned.folderURL
         )
         if coverRevision == expectedCoverRevision,
            !isCoverSuppressed,
@@ -1125,45 +1290,66 @@ public struct AudioFile: Identifiable, Sendable {
     public var chapterTitle: String
     public var name: String { sourceURL.lastPathComponent }
 
-    /// Lädt Dauer und Kapiteltitel über die seit macOS 13 vorgesehenen
-    /// AVFoundation-Async-Properties. Fehlerhafte oder nicht lesbare Tags
-    /// verhindern den Import nicht; sie fallen auf sichere Standardwerte zurück.
-    /// `sourceURL` weglassen heißt: der sichtbare Pfad ist die Datei selbst.
-    public init(url: URL, sourceURL: URL? = nil) async {
+    /// Lädt Dauer und Kapiteltitel einer gewöhnlichen Datei. Für Symlinks
+    /// muss der strukturierte `FoundFile`-Initializer benutzt werden.
+    public init(url: URL) async {
+        let analyzed = await Self.loadDurationAndTitle(readURL: url, visibleURL: url)
         self.url = url
-        self.sourceURL = sourceURL ?? url
+        self.sourceURL = url
         self.startTime = 0
-        let fallbackTitle = (sourceURL ?? url).deletingPathExtension().lastPathComponent
-        guard !Self.taskCancellationRequested() else {
-            self.duration = 0
-            self.chapterTitle = fallbackTitle
-            return
-        }
-        let asset = AVAsset(url: url)
-        // CMTimeGetSeconds kann NaN/Infinity liefern (korrupte/unlesbare Datei).
-        // An der Quelle auf einen endlichen, nicht-negativen Wert klemmen — sonst
-        // crashen spätere Int()-Casts (Int(NaN)) und Divisionen durch die Dauer.
-        let loadedDuration = try? await asset.load(.duration)
-        self.duration = AudioFile.sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
-        guard !Self.taskCancellationRequested() else {
-            self.chapterTitle = fallbackTitle
-            return
-        }
-        let metadata = (try? await asset.load(.metadata)) ?? []
-        guard !Self.taskCancellationRequested() else {
-            self.chapterTitle = fallbackTitle
-            return
-        }
-        self.chapterTitle = await AudioFile.findRobustTag(for: "title", in: metadata)
-            ?? fallbackTitle
+        self.duration = analyzed.duration
+        self.chapterTitle = analyzed.title
     }
+
+    /// Lädt aus der physischen Ziel-Datei, behält aber sichtbaren Namen und
+    /// Fallback-Titel des Quellpfads bei.
+    public init(foundFile: FoundFile) async {
+        let analyzed = await Self.loadDurationAndTitle(
+            readURL: foundFile.readURL,
+            visibleURL: foundFile.source
+        )
+        self.url = foundFile.readURL
+        self.sourceURL = foundFile.source
+        self.startTime = 0
+        self.duration = analyzed.duration
+        self.chapterTitle = analyzed.title
+    }
+
     public init(url: URL, startTime: TimeInterval, duration: TimeInterval,
-                chapterTitle: String, sourceURL: URL? = nil) {
+                chapterTitle: String) {
         self.url = url
-        self.sourceURL = sourceURL ?? url
+        self.sourceURL = url
         self.startTime = AudioFile.sanitizeDuration(startTime)
         self.duration = AudioFile.sanitizeDuration(duration)
         self.chapterTitle = chapterTitle
+    }
+
+    public init(foundFile: FoundFile, startTime: TimeInterval,
+                duration: TimeInterval, chapterTitle: String) {
+        self.url = foundFile.readURL
+        self.sourceURL = foundFile.source
+        self.startTime = AudioFile.sanitizeDuration(startTime)
+        self.duration = AudioFile.sanitizeDuration(duration)
+        self.chapterTitle = chapterTitle
+    }
+
+    /// Gemeinsame AVFoundation-Analyse für reguläre Dateien und Symlink-Ziele.
+    /// CMTime-Werte werden an der Quelle auf endlich und nicht-negativ geklemmt;
+    /// unlesbare oder abgebrochene Metadaten fallen auf den sichtbaren Namen zurück.
+    private static func loadDurationAndTitle(
+        readURL: URL,
+        visibleURL: URL
+    ) async -> (duration: TimeInterval, title: String) {
+        let fallbackTitle = visibleURL.deletingPathExtension().lastPathComponent
+        guard !taskCancellationRequested() else { return (0, fallbackTitle) }
+        let asset = AVAsset(url: readURL)
+        let loadedDuration = try? await asset.load(.duration)
+        let duration = sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
+        guard !taskCancellationRequested() else { return (duration, fallbackTitle) }
+        let metadata = (try? await asset.load(.metadata)) ?? []
+        guard !taskCancellationRequested() else { return (duration, fallbackTitle) }
+        let title = await findRobustTag(for: "title", in: metadata) ?? fallbackTitle
+        return (duration, title)
     }
 
     /// Macht eine Sekundenangabe für Berechnungen sicher: NaN/Infinity/negativ → 0.

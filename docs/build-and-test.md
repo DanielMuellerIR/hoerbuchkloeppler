@@ -49,7 +49,8 @@ kloeppler <ordner> [--mode parallel|standard] [--bitrate 48k] \
   benannt nach Titel-Tag bzw. Ordnername (sanitisiert) — `--output` ist nötig,
   wenn die Quelle auf einem vollen/schreibgeschützten Datenträger liegt.
 - **Eingabe-Validierung:** `--mode` (nur `parallel`/`standard`), `--bitrate`
-  (`<zahl>[k]`) und `--samplerate` (8000–192000) werden vorab geprüft; ungültige
+  (8–320 kbit/s als `<zahl>[k]`) und `--samplerate` (8000–48000) werden vorab
+  geprüft; ungültige
   Werte brechen mit Usage-Fehler (Exit 64) ab, statt erst später in ffmpeg.
 - Existiert die Zieldatei: ohne `--force` interaktive Nachfrage; bei
   Pipe/Non-TTY bricht sie mit Fehlercode ab (Hinweis auf `--force`).
@@ -74,14 +75,15 @@ nicht nur „Build grün".
 ## Unit-Tests (Core)
 
 ```bash
-cd HoerbuchkloepplerCore && swift test        # 94 Tests, 17 Suites
+cd HoerbuchkloepplerCore && swift test        # 110 Tests, 18 Suites
 ```
 
 Deckt die reine Kernlogik ab: FFMETADATA-Escaping/Parsing, Kapitel-Arithmetik
 (`buildChapterMetadata`), Auto-Split, Ausgabe-Dateinamen, Zeit-Parsing,
 NaN/Infinity-Härtung sowie Ausgabeplan/atomare Übernahme, Tool-Auflösung,
 laufbezogenen Abbruch, Metadatenentscheidung, echte asynchrone
-AVFoundation-Analyse einer WAV-Datei und shell-sicheren CLI-Handoff.
+AVFoundation-Analyse einer WAV-Datei, Symlink-Deduplizierung, Unterordner-
+Sortierung, Staging-Namensgrenzen und shell-sicheren CLI-Handoff.
 Bewusst **nicht** dabei: das reale Encoding-Ergebnis — dafür ist das Rezept oben da.
 
 Die geprüften Funktionen sind `internal` statt `private`, damit `@testable

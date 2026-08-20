@@ -25,6 +25,18 @@ Core.
   `AVAsset.load(...)` beziehungsweise `AVMetadataItem.load(...)` geladen. GUI
   und CLI erwarten denselben asynchronen Import-Lebenszyklus; die frühere
   `metadataGroup: DispatchGroup`-Sonderbehandlung der CLI entfällt.
+- **Quellpfad und Lese-URL:** `FoundFile.source` ist der sichtbare Pfad, der
+  Anzeige, Sortierung und Fallback-Kapiteltitel bestimmt. `FoundFile.resolved`
+  ist das aufgelöste reguläre Ziel, das AVFoundation, ffmpeg, mediainfo und die
+  Größenermittlung öffnen. `AudioFile.sourceURL` und `AudioFile.url` bewahren
+  diese Trennung. Gewöhnliche Dateien tragen zweimal denselben Pfad;
+  Dateisymlinks behalten ihren Linknamen, Verzeichnissymlinks werden nicht
+  verfolgt. Ordner- und Einzeldatei-Import benutzen dieselbe `FoundFile`-Logik.
+- Der Ordnerscan dedupliziert nach der aufgelösten Lese-URL. Liegen ein Symlink
+  und sein Ziel nebeneinander, gewinnt der bewusst benannte Symlink; der Scan
+  protokolliert das verworfene Duplikat. Die Sortierung vergleicht danach den
+  gesamten sichtbaren Pfad komponentenweise, bevor Kapitel derselben Datei über
+  ihre Startzeit geordnet werden.
 - Laufbezogene Abbrüche bleiben synchron erreichbar: kleine, sperrengeschützte
   Koordinatoren besitzen den Swift-Vorbereitungstask sowie die Vorbereitungs-
   und Konvertierungsprozesse. Dadurch kann SIGINT abbrechen, ohne die
@@ -47,7 +59,7 @@ Symbolnamen als Anker (bewusst **ohne** Zeilennummern — die driften bei jeder
 |---|---|---|
 | `FFmpegWrapper.swift` | Zentraler Ausgabeplan, unveränderlicher Worker-Snapshot, atomare Partial→Ziel-Übernahme, Prozessausführung, Concat/Muxing, laufbezogene Cancellation | `ConversionJob` · `makeConversionPlan` · `convert(session:plan:)` · `commitStagedOutput` · `performSequentialConversion` · `performParallelConversion` · `runFinalProcess` · `splitAudioFilesIfNeeded` |
 | `CLIInvocation.swift` | Vollständiger, POSIX-shell-sicherer GUI→CLI-Handoff | `CLIInvocation.arguments` · `shellCommand` |
-| `ConversionSession.swift` | Main-Actor-isolierter Lebenszyklus und `@Published`-State, abbrechbarer asynchroner Import, Worker→UI-Nachrichten | `addLog` · `fetchRawMediaInfo` · `processIncomingFiles` · `importGlobalMetadata` · `scanFolder` · `prepareFolder` · `addFolder` · `selectCover` |
+| `ConversionSession.swift` | Main-Actor-isolierter Lebenszyklus und `@Published`-State, gemeinsame Pfad-/Symlink-Auflösung, abbrechbarer asynchroner Import, Worker→UI-Nachrichten | `FoundFile` · `foundFile(at:)` · `recursiveFileURLs` · `deduplicateFoundFiles` · `loadAudioFiles` · `processIncomingFiles` · `scanFolder` · `prepareFolder` · `addFolder` · `addLog` |
 | `AudioSettings.swift` | Einstellungs-Struct (`Codable`) | Felder → [settings.md](settings.md) |
 | `SettingsManager.swift` | Laden/Speichern `~/.Hoerbuchkloeppler/settings.json` | `shared` · `loadSettings` · `saveSettings` |
 | `AudioFile+Extensions.swift` | Asynchrone AVFoundation-Artwork-Analyse, Kapitel-Extraktion via **gebündeltem ffmpeg** (`-f ffmetadata`) | `extractEmbeddedArtwork` · `extractChapters` · `parseFFMetadataChapters` |
