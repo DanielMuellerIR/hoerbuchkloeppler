@@ -1,6 +1,55 @@
 import Testing
 @testable import HoerbuchkloepplerCore
 import Foundation
+import CoreGraphics
+import ImageIO
+import Darwin
+
+private func conversionTestDirectory() throws -> URL {
+    let url = FileManager.default.temporaryDirectory
+        .appendingPathComponent("FFmpegWrapperTests-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(
+        at: url,
+        withIntermediateDirectories: false
+    )
+    return url
+}
+
+private func writeExecutable(_ url: URL, _ source: String) throws {
+    try source.write(to: url, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: url.path
+    )
+}
+
+private func onePixelPNGData() throws -> Data {
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let bytes = [UInt8](repeating: 255, count: 4)
+    let image = bytes.withUnsafeBytes { storage -> CGImage? in
+        guard let context = CGContext(
+            data: UnsafeMutableRawPointer(mutating: storage.baseAddress),
+            width: 1,
+            height: 1,
+            bitsPerComponent: 8,
+            bytesPerRow: 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        return context.makeImage()
+    }
+    let cgImage = try #require(image)
+    let data = NSMutableData()
+    let destination = try #require(CGImageDestinationCreateWithData(
+        data,
+        "public.png" as CFString,
+        1,
+        nil
+    ))
+    CGImageDestinationAddImage(destination, cgImage, nil)
+    #expect(CGImageDestinationFinalize(destination))
+    return data as Data
+}
 
 // Diese Tests decken die reine Kernlogik ab — also alles, was ohne echte
 // Audiodateien, ohne ffmpeg-Prozess und ohne Oberfläche prüfbar ist:
@@ -381,6 +430,1688 @@ struct ExtractTimeTests {
 
     @Test("Leerer String → nil")
     func empty() { #expect(FFmpegWrapper.extractTimeFromFFmpeg("") == nil) }
+}
+
+// MARK: - H) Prozessausgabe und Fortschrittsgrenzen
+
+@Suite("FFmpegWrapper – serieller Pipe-Leser")
+struct ProcessPipeReaderTests {
+    @Test("Ein nie gestarteter Reader wird ohne offene Group freigegeben")
+    func unstartedReaderIsReleased() {
+        weak var releasedReader: ProcessPipeReader?
+        do {
+            let reader = ProcessPipeReader(handle: Pipe().fileHandleForReading)
+            releasedReader = reader
+        }
+        #expect(releasedReader == nil)
+    }
+
+    @Test("waitUntilEOF wartet auf einen noch laufenden Callback")
+    func waitsForCallbackJoin() throws {
+        let pipe = Pipe()
+        let reader = ProcessPipeReader(handle: pipe.fileHandleForReading)
+        let callbackStarted = DispatchSemaphore(value: 0)
+        let releaseCallback = DispatchSemaphore(value: 0)
+        let waitFinished = DispatchSemaphore(value: 0)
+
+        reader.start { _ in
+            callbackStarted.signal()
+            releaseCallback.wait()
+        }
+        try pipe.fileHandleForWriting.write(contentsOf: Data("stderr".utf8))
+        try pipe.fileHandleForWriting.close()
+        #expect(callbackStarted.wait(timeout: .now() + 1) == .success)
+
+        DispatchQueue.global().async {
+            _ = reader.waitUntilEOF()
+            waitFinished.signal()
+        }
+        let premature = waitFinished.wait(timeout: .now() + 0.05)
+        releaseCallback.signal()
+        #expect(premature == .timedOut)
+        #expect(waitFinished.wait(timeout: .now() + 1) == .success)
+    }
+
+    @Test("Zeitwerte funktionieren über jede Chunk-Grenze und der neueste gewinnt")
+    func parsesSplitAndLatestProgress() {
+        let bytes = Data("frame=1 time=00:00:01.23 speed=1x".utf8)
+        for split in 1..<bytes.count {
+            let parser = FFmpegProgressParser()
+            _ = parser.consume(Data(bytes[..<split]))
+            #expect(parser.consume(Data(bytes[split...])) == 1.23)
+        }
+
+        let parser = FFmpegProgressParser()
+        let newest = parser.consume(
+            Data("time=00:00:01.00\rtime=00:00:02.50\r".utf8)
+        )
+        #expect(newest == 2.5)
+    }
+
+    @Test("Begrenzter Prozess eskaliert und Exit ungleich null bleibt sichtbar")
+    func capturedProcessHonorsTimeoutAndStatus() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let hanging = directory.appendingPathComponent("hanging")
+        let failing = directory.appendingPathComponent("failing")
+        try writeExecutable(hanging, "#!/bin/sh\ntrap '' TERM\nwhile :; do :; done\n")
+        try writeExecutable(failing, "#!/bin/sh\nprintf 'diagnose'\nexit 3\n")
+
+        let start = Date()
+        let timed = FFmpegWrapper.runCapturedProcess(
+            executableURL: hanging,
+            arguments: [],
+            timeout: 0.05
+        )
+        guard case .timedOut = timed else {
+            Issue.record("Hängender Prozess lieferte nicht .timedOut")
+            return
+        }
+        #expect(Date().timeIntervalSince(start) < 2)
+
+        let failed = FFmpegWrapper.runCapturedProcess(
+            executableURL: failing,
+            arguments: [],
+            timeout: 1
+        )
+        guard case .completed(let status, let output) = failed else {
+            Issue.record("Beendeter Prozess lieferte kein Ergebnis")
+            return
+        }
+        #expect(status == 3)
+        #expect(String(data: output, encoding: .utf8) == "diagnose")
+    }
+
+    @Test("Ein Kind mit geerbtem stdout blockiert den Pipe-Join nicht")
+    func inheritedPipeDescriptorDoesNotHang() throws {
+        let script = """
+        import subprocess, sys
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+        print(child.pid, flush=True)
+        """
+        let start = Date()
+        let result = FFmpegWrapper.runCapturedProcess(
+            executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
+            arguments: ["-c", script],
+            timeout: 2
+        )
+        guard case .completed(let status, let output) = result,
+              let text = String(data: output, encoding: .utf8),
+              let childPID = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            Issue.record("Helferprozess lieferte PID und Exit-Status nicht")
+            return
+        }
+        defer { _ = Darwin.kill(childPID, SIGKILL) }
+        #expect(status == 0)
+        #expect(Date().timeIntervalSince(start) < 2)
+    }
+}
+
+// MARK: - I) Ausgabe-, Eingabe- und Temp-Besitz
+
+@Suite("FFmpegWrapper – Dateibesitz")
+struct ConversionFileOwnershipTests {
+    private func audio(_ url: URL, duration: TimeInterval = 1) -> AudioFile {
+        AudioFile(
+            url: url,
+            startTime: 0,
+            duration: duration,
+            chapterTitle: url.lastPathComponent
+        )
+    }
+
+    @Test("Ein nach der Planung angelegtes Ziel wird nicht überschrieben")
+    func missingDestinationUsesExclusiveRename() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let staged = directory.appendingPathComponent(".staged.m4b")
+        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        try Data("fremd".utf8).write(to: final)
+        try Data("neu".utf8).write(to: staged)
+
+        #expect(throws: ConversionOutputError.self) {
+            try FFmpegWrapper.commitStagedOutput(
+                staged,
+                to: final,
+                expectedDestination: expected
+            )
+        }
+        #expect(try String(contentsOf: final, encoding: .utf8) == "fremd")
+        #expect(try String(contentsOf: staged, encoding: .utf8) == "neu")
+    }
+
+    @Test("Ein nach Bestätigung ausgetauschtes Ziel wird zurückbehalten")
+    func changedDestinationIsNotReplaced() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let staged = directory.appendingPathComponent(".staged.m4b")
+        try Data("bestätigt".utf8).write(to: final)
+        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        try FileManager.default.removeItem(at: final)
+        try Data("inzwischen neu".utf8).write(to: final)
+        try Data("Konvertierung".utf8).write(to: staged)
+
+        #expect(throws: ConversionOutputError.self) {
+            try FFmpegWrapper.commitStagedOutput(
+                staged,
+                to: final,
+                expectedDestination: expected
+            )
+        }
+        #expect(try String(contentsOf: final, encoding: .utf8) == "inzwischen neu")
+        #expect(try String(contentsOf: staged, encoding: .utf8) == "Konvertierung")
+    }
+
+    @Test("Ein direkt vor dem Rename ausgetauschtes Staging wird zurückgerollt")
+    func replacedStagingEntryIsNotCommitted() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let staged = directory.appendingPathComponent(".staged.m4b")
+        let replacement = directory.appendingPathComponent("fremd.m4b")
+        try Data("bestätigtes Ziel".utf8).write(to: final)
+        try Data("eigene Ausgabe".utf8).write(to: staged)
+        try Data("fremder Ersatz".utf8).write(to: replacement)
+        let expected = FFmpegWrapper.captureSnapshot(of: final)
+
+        #expect(throws: ConversionOutputError.self) {
+            try FFmpegWrapper.commitStagedOutput(
+                staged,
+                to: final,
+                expectedDestination: expected,
+                beforeRename: {
+                    try? FileManager.default.removeItem(at: staged)
+                    try? FileManager.default.moveItem(at: replacement, to: staged)
+                }
+            )
+        }
+        #expect(try String(contentsOf: final, encoding: .utf8) == "bestätigtes Ziel")
+        #expect(try String(contentsOf: staged, encoding: .utf8) == "fremder Ersatz")
+    }
+
+    @Test("Ein vor dem Commit ausgetauschtes Staging wird nicht übernommen")
+    func stagingOwnershipSpansCreationAndCommit() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let staged = FFmpegWrapper.stagingOutputURL(for: final)
+        try Data("bestätigtes Ziel".utf8).write(to: final)
+        let expectedDestination = FFmpegWrapper.captureSnapshot(of: final)
+        let ownership = try FFmpegWrapper.createOwnedStagingOutput(staged)
+        try Data("eigene Ausgabe".utf8).write(to: staged)
+        try FileManager.default.removeItem(at: staged)
+        try Data("fremder Ersatz".utf8).write(to: staged)
+
+        #expect(throws: ConversionOutputError.self) {
+            try FFmpegWrapper.commitStagedOutput(
+                staged,
+                to: final,
+                expectedDestination: expectedDestination,
+                expectedStagingOwnership: ownership
+            )
+        }
+        #expect(try String(contentsOf: final, encoding: .utf8) == "bestätigtes Ziel")
+        #expect(try String(contentsOf: staged, encoding: .utf8) == "fremder Ersatz")
+    }
+
+    @Test("ffmpeg startet nicht mit einem ausgetauschten geschützten Staging-Pfad")
+    @MainActor
+    func protectedStagingIsRecheckedBeforeProcessStart() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let sentinel = directory.appendingPathComponent("wichtig.txt")
+        try Data("nicht verändern".utf8).write(to: sentinel)
+        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        try FileManager.default.removeItem(at: staging.url)
+        try FileManager.default.createSymbolicLink(
+            at: staging.url,
+            withDestinationURL: sentinel
+        )
+        let session = ConversionSession(settings: AudioSettings())
+        let context = session.beginConversionRun()
+
+        let succeeded = FFmpegWrapper.runFinalProcess(
+            args: ["-version"],
+            session: session,
+            context: context,
+            progressBase: 0,
+            progressWeight: 1,
+            phaseDuration: 1,
+            logMessage: "Testlauf",
+            pacmanTitle: "Test",
+            stagingURL: staging.url,
+            expectedStagingOwnership: staging.ownership
+        )
+
+        #expect(!succeeded)
+        #expect(try String(contentsOf: sentinel, encoding: .utf8) == "nicht verändern")
+    }
+
+    @Test("ffmpeg schreibt nach der Vorprüfung weiter auf den geöffneten Staging-Inode")
+    @MainActor
+    func finalProcessOutputIsBoundToDescriptor() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        let protectedDirectory = try #require(
+            staging.ownership.protectedDirectory
+        )
+        let parkedDirectory = directory.appendingPathComponent("geparktes-staging")
+        let decoyDirectory = directory.appendingPathComponent("fremdes-ziel")
+        try FileManager.default.createDirectory(
+            at: decoyDirectory,
+            withIntermediateDirectories: false
+        )
+        let decoy = decoyDirectory.appendingPathComponent("entry.m4b")
+        try Data("nicht verändern".utf8).write(to: decoy)
+        let session = ConversionSession(settings: AudioSettings())
+        let context = session.beginConversionRun()
+        var hookError: (any Error)?
+
+        let succeeded = FFmpegWrapper.runFinalProcess(
+            args: [
+                "-nostdin", "-y", "-f", "lavfi", "-i",
+                "sine=frequency=1000:duration=0.05",
+                "-c:a", "aac", "-f", "ipod", "/dev/fd/0"
+            ],
+            session: session,
+            context: context,
+            progressBase: 0,
+            progressWeight: 1,
+            phaseDuration: 0.05,
+            logMessage: "Testlauf",
+            pacmanTitle: "Test",
+            stagingURL: staging.url,
+            expectedStagingOwnership: staging.ownership,
+            stagingHandle: staging,
+            beforeProcessStart: {
+                do {
+                    try FileManager.default.moveItem(
+                        at: protectedDirectory,
+                        to: parkedDirectory
+                    )
+                    try FileManager.default.createSymbolicLink(
+                        at: protectedDirectory,
+                        withDestinationURL: decoyDirectory
+                    )
+                } catch {
+                    hookError = error
+                }
+            }
+        )
+
+        #expect(hookError == nil)
+        #expect(succeeded)
+        #expect(try String(contentsOf: decoy, encoding: .utf8) == "nicht verändern")
+        #expect(FFmpegWrapper.regularFileSize(
+            parkedDirectory.appendingPathComponent("entry.m4b")
+        ) != nil)
+    }
+
+    @Test("Neue Ausgaben behalten allgemein lesbare Dateirechte")
+    func committedOutputUsesExpectedPermissions() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let staged = FFmpegWrapper.stagingOutputURL(for: final)
+        let ownership = try FFmpegWrapper.createOwnedStagingOutput(staged)
+        try Data("Ausgabe".utf8).write(to: staged)
+
+        _ = try FFmpegWrapper.commitStagedOutput(
+            staged,
+            to: final,
+            expectedDestination: .missing,
+            expectedStagingOwnership: ownership
+        )
+
+        let identity = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: final, followSymlink: false)
+        )
+        #expect(identity.mode & mode_t(0o777) == mode_t(0o644))
+    }
+
+    @Test("Ein erfolgreicher geschützter Commit entfernt seinen Staging-Ordner")
+    func protectedCommitRemovesStagingDirectory() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        try Data("alt".utf8).write(to: final)
+        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        try Data("neu".utf8).write(to: staging.url)
+        let context = ConversionContext()
+        context.registerStagedOutput(
+            staging.url,
+            ownership: staging.ownership
+        )
+
+        let removed = try FFmpegWrapper.commitStagedOutput(
+            staging.url,
+            to: final,
+            expectedDestination: expected,
+            expectedStagingOwnership: staging.ownership
+        )
+        #expect(removed)
+        context.completeStagedOutput(staging.url)
+
+        #expect(try String(contentsOf: final, encoding: .utf8) == "neu")
+        #expect(!FileManager.default.fileExists(
+            atPath: try #require(staging.ownership.protectedDirectory).path
+        ))
+    }
+
+    @Test("Absturz nach dem Zieltausch hinterlässt einen bereinigbaren Staging-Ordner")
+    func crashAfterSwapCanSweepDisplacedDestination() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let deadOwner: pid_t = 987_654
+        let final = directory.appendingPathComponent("Buch.m4b")
+        try Data("alt".utf8).write(to: final)
+        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        var staging: StagingOutputHandle? = try FFmpegWrapper
+            .createProtectedStagingOutput(for: final, ownerPID: deadOwner)
+        let stagingURL = try #require(staging?.url)
+        let ownership = try #require(staging?.ownership)
+        let protectedDirectory = try #require(ownership.protectedDirectory)
+        try Data("neu".utf8).write(to: stagingURL)
+
+        let removed = try FFmpegWrapper.commitStagedOutput(
+            stagingURL,
+            to: final,
+            expectedDestination: expected,
+            expectedStagingOwnership: ownership,
+            unlinkDisplacedOutput: { _, _ in false }
+        )
+        #expect(!removed)
+        #expect(try String(contentsOf: final, encoding: .utf8) == "neu")
+        #expect(try String(contentsOf: stagingURL, encoding: .utf8) == "alt")
+        staging = nil
+
+        FFmpegWrapper.cleanupOutputQuarantines(in: directory)
+
+        #expect(!FileManager.default.fileExists(atPath: protectedDirectory.path))
+        #expect(try String(contentsOf: final, encoding: .utf8) == "neu")
+    }
+
+    @Test("Fehlgeschlagenes Staging-Cleanup bleibt bis zum erneuten Versuch registriert")
+    func residualProtectedStagingCleanupIsRetried() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        let protectedDirectory = try #require(
+            staging.ownership.protectedDirectory
+        )
+        try Data("unvollständig".utf8).write(to: staging.url)
+        let recovery = protectedDirectory.appendingPathComponent("recovery.txt")
+        try Data("behalten".utf8).write(to: recovery)
+        let context = ConversionContext()
+        context.registerStagedOutput(
+            staging.url,
+            ownership: staging.ownership
+        )
+
+        context.discardStagedOutput(staging.url)
+
+        #expect(FileManager.default.fileExists(atPath: staging.url.path))
+        #expect(FileManager.default.fileExists(atPath: recovery.path))
+        try FileManager.default.removeItem(at: recovery)
+        context.cleanupResidualStagedOutputs()
+
+        #expect(!FileManager.default.fileExists(atPath: protectedDirectory.path))
+    }
+
+    @Test("Fehlgeschlagener Container-Cleanup nach Commit wird erneut versucht")
+    func committedProtectedContainerCleanupIsRetried() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        let protectedDirectory = try #require(
+            staging.ownership.protectedDirectory
+        )
+        try Data("fertig".utf8).write(to: staging.url)
+        let recovery = protectedDirectory.appendingPathComponent("recovery.txt")
+        try Data("behalten".utf8).write(to: recovery)
+        let context = ConversionContext()
+        context.registerStagedOutput(
+            staging.url,
+            ownership: staging.ownership
+        )
+        _ = try FFmpegWrapper.commitStagedOutput(
+            staging.url,
+            to: final,
+            expectedDestination: .missing,
+            expectedStagingOwnership: staging.ownership
+        )
+
+        context.completeStagedOutput(staging.url)
+
+        #expect(FileManager.default.fileExists(atPath: protectedDirectory.path))
+        #expect(FileManager.default.fileExists(atPath: recovery.path))
+        try FileManager.default.removeItem(at: recovery)
+        context.cleanupResidualStagedOutputs()
+
+        #expect(!FileManager.default.fileExists(atPath: protectedDirectory.path))
+        #expect(try String(contentsOf: final, encoding: .utf8) == "fertig")
+    }
+
+    @Test("Altdatei-Cleanup liegt neben statt innerhalb des Staging-Ordners")
+    func displacedCleanupUsesOutputParent() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        let protectedDirectory = try #require(
+            staging.ownership.protectedDirectory
+        )
+        try Data("alte Ausgabe".utf8).write(to: staging.url)
+        let identity = try #require(
+            FFmpegWrapper.fileSystemIdentity(
+                at: staging.url,
+                followSymlink: false
+            )
+        )
+        var observedCleanupDirectory: URL?
+
+        _ = FFmpegWrapper.removeDisplacedOutput(
+            staging.url,
+            expectedIdentity: identity,
+            cleanupParent: directory,
+            afterQuarantine: { cleanupDirectory in
+                observedCleanupDirectory = cleanupDirectory
+                try? Data("Recovery".utf8).write(
+                    to: cleanupDirectory.appendingPathComponent("extra.txt")
+                )
+            }
+        )
+
+        #expect(
+            observedCleanupDirectory?.deletingLastPathComponent()
+                .standardizedFileURL.path == directory.standardizedFileURL.path
+        )
+        let nestedNames = try FileManager.default.contentsOfDirectory(
+            atPath: protectedDirectory.path
+        )
+        #expect(!nestedNames.contains { $0.hasPrefix(".HB_DisplacedCleanup_") })
+        #expect(!nestedNames.contains { $0.hasPrefix(".HB_Cleanup_") })
+    }
+
+    @Test("Austausch nach der Cleanup-Prüfung löscht den fremden Eintrag nicht")
+    func cleanupEntryReplacementAfterCheckIsPreserved() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = ProcessInfo.processInfo.processIdentifier
+        let cleanup = directory.appendingPathComponent(
+            ".HB_DisplacedCleanup_\(owner)-\(UUID().uuidString)"
+        )
+        try FFmpegWrapper.createOwnedTempDirectory(cleanup, ownerPID: owner)
+        let entry = cleanup.appendingPathComponent("entry")
+        try Data("erwartet".utf8).write(to: entry)
+        let entryIdentity = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: entry, followSymlink: false)
+        )
+        try FFmpegWrapper.writeCleanupEntryIdentity(entryIdentity, in: cleanup)
+        let directoryIdentity = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: cleanup, followSymlink: false)
+        )
+        let record = CleanupEntryRecord(
+            identity: entryIdentity,
+            filename: "entry",
+            stableIdentityOnly: false
+        )
+        var replacementWritten = false
+
+        FFmpegWrapper.removeOwnedTempDirectory(
+            cleanup,
+            expectedIdentity: directoryIdentity,
+            expectedOwnerPID: owner,
+            beforeRecordedEntryQuarantine: { descriptor in
+                guard "entry".withCString({
+                    Darwin.unlinkat(descriptor, $0, 0)
+                }) == 0 else { return }
+                let replacement = "entry".withCString {
+                    Darwin.openat(
+                        descriptor,
+                        $0,
+                        O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW,
+                        mode_t(0o600)
+                    )
+                }
+                guard replacement >= 0 else { return }
+                let payload = Data("fremd".utf8)
+                replacementWritten = payload.withUnsafeBytes {
+                    Darwin.write(replacement, $0.baseAddress, $0.count)
+                        == $0.count
+                }
+                _ = Darwin.close(replacement)
+            },
+            expectedCleanupEntry: record
+        )
+
+        #expect(replacementWritten)
+        let remains = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix(".HB_Cleanup_\(owner)-") }
+        let remaining = try #require(remains.first)
+        #expect(try String(
+            contentsOf: remaining.appendingPathComponent("entry"),
+            encoding: .utf8
+        ) == "fremd")
+    }
+
+    @Test("Absturz nach der Entry-Quarantäne bleibt bereinigbar")
+    func crashAfterEntryQuarantineIsSwept() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let deadOwner: pid_t = 987_654
+        let cleanup = directory.appendingPathComponent(
+            ".HB_DisplacedCleanup_\(deadOwner)-\(UUID().uuidString)"
+        )
+        try FFmpegWrapper.createOwnedTempDirectory(
+            cleanup,
+            ownerPID: deadOwner
+        )
+        let entry = cleanup.appendingPathComponent("entry")
+        try Data("Altdatei".utf8).write(to: entry)
+        let identity = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: entry, followSymlink: false)
+        )
+        try FFmpegWrapper.writeCleanupEntryIdentity(identity, in: cleanup)
+        try FileManager.default.moveItem(
+            at: entry,
+            to: cleanup.appendingPathComponent(".HB_EntryCleanup")
+        )
+
+        FFmpegWrapper.cleanupOutputQuarantines(in: directory)
+
+        #expect(!FileManager.default.fileExists(atPath: cleanup.path))
+    }
+
+    @Test("Verdrängte Altdatei und geschützter Ordner werden gemeinsam nachbereinigt")
+    func protectedDisplacedOutputRetainsContainerUntilRetry() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        try Data("alt".utf8).write(to: final)
+        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        try Data("neu".utf8).write(to: staging.url)
+        let context = ConversionContext()
+        context.registerStagedOutput(
+            staging.url,
+            ownership: staging.ownership
+        )
+
+        let removed = try FFmpegWrapper.commitStagedOutput(
+            staging.url,
+            to: final,
+            expectedDestination: expected,
+            expectedStagingOwnership: staging.ownership,
+            unlinkDisplacedOutput: { _, _ in false }
+        )
+        #expect(!removed)
+        guard case .existing(let oldIdentity) = expected else {
+            Issue.record("Bestehendes Ziel lieferte keinen Snapshot")
+            return
+        }
+        context.registerDisplacedOutput(
+            staging.url,
+            expectedIdentity: oldIdentity
+        )
+        let protectedDirectory = try #require(
+            staging.ownership.protectedDirectory
+        )
+        #expect(FileManager.default.fileExists(atPath: protectedDirectory.path))
+
+        context.cleanupResidualStagedOutputs()
+
+        #expect(!FileManager.default.fileExists(atPath: protectedDirectory.path))
+        #expect(try String(contentsOf: final, encoding: .utf8) == "neu")
+    }
+
+    @Test("Abbruch registriert fehlgeschlagenes Altdatei-Cleanup erneut")
+    func cancellationRetriesDisplacedOutputCleanup() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        try Data("alt".utf8).write(to: final)
+        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        guard case .existing(let oldIdentity) = expected else {
+            Issue.record("Bestehendes Ziel lieferte keinen Snapshot")
+            return
+        }
+        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        let protectedDirectory = try #require(
+            staging.ownership.protectedDirectory
+        )
+        try Data("neu".utf8).write(to: staging.url)
+        let context = ConversionContext { _, _ in
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: protectedDirectory.path
+            )
+        }
+        context.registerStagedOutput(
+            staging.url,
+            ownership: staging.ownership
+        )
+        _ = try FFmpegWrapper.commitStagedOutput(
+            staging.url,
+            to: final,
+            expectedDestination: expected,
+            expectedStagingOwnership: staging.ownership,
+            unlinkDisplacedOutput: { _, _ in false }
+        )
+        context.registerDisplacedOutput(
+            staging.url,
+            expectedIdentity: oldIdentity,
+            stagingOwnership: staging.ownership
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o000],
+            ofItemAtPath: protectedDirectory.path
+        )
+
+        #expect(context.cancel())
+        context.finishAfterCancellationCleanup { _ in }
+        context.cleanupResidualStagedOutputs()
+
+        #expect(!FileManager.default.fileExists(atPath: protectedDirectory.path))
+        #expect(try String(contentsOf: final, encoding: .utf8) == "neu")
+    }
+
+    @Test("Volumes ohne Extended Attributes nutzen den Inode-Laufzeitbesitz")
+    func unsupportedStagingMarkerFallsBackToRuntimeIdentity() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staged = FFmpegWrapper.stagingOutputURL(
+            for: directory.appendingPathComponent("Buch.m4b")
+        )
+        let ownership = try FFmpegWrapper.createOwnedStagingOutput(
+            staged,
+            setOwnershipMarker: { _, _ in
+                errno = ENOTSUP
+                return -1
+            }
+        )
+        try Data("unvollständig".utf8).write(to: staged)
+        let context = ConversionContext()
+        context.registerStagedOutput(staged, ownership: ownership)
+
+        #expect(!ownership.hasPersistentMarker)
+        #expect(context.cancel())
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+    }
+
+    @Test("Fehler beim Markieren löscht keinen Ersatz am Staging-Pfad")
+    func stagingMarkerFailurePreservesReplacement() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staged = FFmpegWrapper.stagingOutputURL(
+            for: directory.appendingPathComponent("Buch.m4b")
+        )
+        let movedCreation = directory.appendingPathComponent("eigener-inode.m4b")
+        var hookError: (any Error)?
+
+        #expect(throws: POSIXError.self) {
+            try FFmpegWrapper.createOwnedStagingOutput(
+                staged,
+                setOwnershipMarker: { _, _ in
+                    do {
+                        try FileManager.default.moveItem(
+                            at: staged,
+                            to: movedCreation
+                        )
+                        try Data("fremder Ersatz".utf8).write(to: staged)
+                    } catch {
+                        hookError = error
+                    }
+                    errno = EPERM
+                    return -1
+                }
+            )
+        }
+
+        #expect(hookError == nil)
+        #expect(try String(contentsOf: staged, encoding: .utf8) == "fremder Ersatz")
+        #expect(FileManager.default.fileExists(atPath: movedCreation.path))
+    }
+
+    @Test("Der Produktions-Catch löscht ein zurückgerolltes fremdes Staging nicht")
+    func stagingRaceCatchPreservesReplacement() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let staged = FFmpegWrapper.stagingOutputURL(for: final)
+        let replacement = directory.appendingPathComponent("fremd.m4b")
+        try Data("bestätigtes Ziel".utf8).write(to: final)
+        try FFmpegWrapper.createOwnedStagingOutput(staged)
+        try Data("eigene Ausgabe".utf8).write(to: staged)
+        try Data("fremder Ersatz".utf8).write(to: replacement)
+        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let context = ConversionContext()
+        context.registerStagedOutput(staged)
+
+        do {
+            _ = try FFmpegWrapper.commitStagedOutput(
+                staged,
+                to: final,
+                expectedDestination: expected,
+                beforeRename: {
+                    try? FileManager.default.removeItem(at: staged)
+                    try? FileManager.default.moveItem(at: replacement, to: staged)
+                }
+            )
+            Issue.record("Staging-Austausch blieb unentdeckt")
+        } catch {
+            context.handleCommitFailure(error, stagedURL: staged)
+        }
+
+        #expect(try String(contentsOf: final, encoding: .utf8) == "bestätigtes Ziel")
+        #expect(try String(contentsOf: staged, encoding: .utf8) == "fremder Ersatz")
+    }
+
+    @Test("Rollback-Fehler rettet die verdrängte Datei außerhalb der Altlastenbereinigung")
+    func failedRollbackUsesRecoveryName() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let staged = FFmpegWrapper.stagingOutputURL(for: final)
+        let replacement = directory.appendingPathComponent("fremd.m4b")
+        try Data("bestätigtes Ziel".utf8).write(to: final)
+        try Data("eigene Ausgabe".utf8).write(to: staged)
+        try Data("fremder Ersatz".utf8).write(to: replacement)
+        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        var renameCount = 0
+        var recoveryURL: URL?
+
+        do {
+            _ = try FFmpegWrapper.commitStagedOutput(
+                staged,
+                to: final,
+                expectedDestination: expected,
+                beforeRename: {
+                    try? FileManager.default.removeItem(at: staged)
+                    try? FileManager.default.moveItem(at: replacement, to: staged)
+                },
+                renameOperation: { source, destination, flags in
+                    renameCount += 1
+                    if renameCount == 2 {
+                        errno = EIO
+                        return -1
+                    }
+                    return FFmpegWrapper.renameEntry(
+                        from: source,
+                        to: destination,
+                        flags: flags
+                    )
+                }
+            )
+            Issue.record("Erzwungener Rollback-Fehler blieb aus")
+        } catch let error as ConversionOutputError {
+            guard case .restoreFailed(_, let recovered, _) = error else {
+                Issue.record("Unerwarteter Ausgabefehler: \(error)")
+                return
+            }
+            recoveryURL = recovered
+        }
+
+        let recovered = try #require(recoveryURL)
+        #expect(!recovered.lastPathComponent.contains(".partial-"))
+        #expect(try String(contentsOf: final, encoding: .utf8) == "fremder Ersatz")
+        #expect(try String(contentsOf: recovered, encoding: .utf8) == "bestätigtes Ziel")
+        FFmpegWrapper.removeOrphanedStagedOutputs(for: final)
+        #expect(FileManager.default.fileExists(atPath: recovered.path))
+    }
+
+    @Test("Auch ohne möglichen Recovery-Rename bleibt das alte Ziel geschützt")
+    func failedRecoveryRenameRemainsProtectedFromOrphanCleanup() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let staged = FFmpegWrapper.stagingOutputURL(for: final, ownerPID: 987_654)
+        let replacement = directory.appendingPathComponent("fremd.m4b")
+        try Data("bestätigtes Ziel".utf8).write(to: final)
+        try Data("eigene Ausgabe".utf8).write(to: staged)
+        try Data("fremder Ersatz".utf8).write(to: replacement)
+        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        var renameCount = 0
+        var reportedRecovery: URL?
+
+        do {
+            _ = try FFmpegWrapper.commitStagedOutput(
+                staged,
+                to: final,
+                expectedDestination: expected,
+                beforeRename: {
+                    try? FileManager.default.removeItem(at: staged)
+                    try? FileManager.default.moveItem(at: replacement, to: staged)
+                },
+                renameOperation: { source, destination, flags in
+                    renameCount += 1
+                    if renameCount >= 2 {
+                        errno = EIO
+                        return -1
+                    }
+                    return FFmpegWrapper.renameEntry(
+                        from: source,
+                        to: destination,
+                        flags: flags
+                    )
+                }
+            )
+        } catch let error as ConversionOutputError {
+            guard case .restoreFailed(_, let recovery, _) = error else {
+                Issue.record("Unerwarteter Fehler: \(error)")
+                return
+            }
+            reportedRecovery = recovery
+        }
+
+        #expect(reportedRecovery == staged)
+        FFmpegWrapper.removeOrphanedStagedOutputs(for: final)
+        #expect(try String(contentsOf: staged, encoding: .utf8) == "bestätigtes Ziel")
+    }
+
+    @Test("Fehlgeschlagener Altdatei-Unlink bleibt registriert und wird erneut versucht")
+    func displacedOutputCleanupIsRetried() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let staged = directory.appendingPathComponent(".staged.m4b")
+        try Data("alt".utf8).write(to: final)
+        try Data("neu".utf8).write(to: staged)
+        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let context = ConversionContext()
+        context.registerStagedOutput(staged)
+
+        let removed = try FFmpegWrapper.commitStagedOutput(
+            staged,
+            to: final,
+            expectedDestination: expected,
+            unlinkDisplacedOutput: { _, _ in false }
+        )
+
+        #expect(!removed)
+        #expect(try String(contentsOf: final, encoding: .utf8) == "neu")
+        #expect(try String(contentsOf: staged, encoding: .utf8) == "alt")
+        guard case .existing(let displacedIdentity) = expected else {
+            Issue.record("Bestehendes Ziel lieferte keinen Snapshot")
+            return
+        }
+        context.registerDisplacedOutput(
+            staged,
+            expectedIdentity: displacedIdentity
+        )
+        context.cleanupResidualStagedOutputs()
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+    }
+
+    @Test("Bereinigung einer verdrängten Ausgabe löscht keinen späten Ersatz")
+    func displacedOutputCleanupRechecksQuarantine() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let displaced = directory.appendingPathComponent(".partial.m4b")
+        let parked = directory.appendingPathComponent("alt-gesichert.m4b")
+        let replacement = directory.appendingPathComponent("fremd.m4b")
+        try Data("bestätigte Altdatei".utf8).write(to: displaced)
+        try Data("fremder Ersatz".utf8).write(to: replacement)
+        let identity = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: displaced, followSymlink: false)
+        )
+        var hookError: (any Error)?
+
+        let removed = FFmpegWrapper.removeDisplacedOutput(
+            displaced,
+            expectedIdentity: identity,
+            beforeQuarantine: {
+                do {
+                    try FileManager.default.moveItem(at: displaced, to: parked)
+                    try FileManager.default.moveItem(at: replacement, to: displaced)
+                } catch {
+                    hookError = error
+                }
+            }
+        )
+
+        #expect(hookError == nil)
+        #expect(!removed)
+        #expect(try String(contentsOf: displaced, encoding: .utf8) == "fremder Ersatz")
+        #expect(try String(contentsOf: parked, encoding: .utf8) == "bestätigte Altdatei")
+    }
+
+    @Test("Ein Ersatz am Cleanup-Pfad wird bei verdrängten Ausgaben nicht gelöscht")
+    func displacedCleanupIsBoundToOwnedDirectory() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let displaced = directory.appendingPathComponent("alt.m4b")
+        let parked = directory.appendingPathComponent("cleanup-gesichert")
+        try Data("bestätigte Altdatei".utf8).write(to: displaced)
+        let identity = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: displaced, followSymlink: false)
+        )
+        var replacementPayload: URL?
+        var hookError: (any Error)?
+
+        let removed = FFmpegWrapper.removeDisplacedOutput(
+            displaced,
+            expectedIdentity: identity,
+            afterQuarantine: { cleanupDirectory in
+                do {
+                    try FileManager.default.moveItem(
+                        at: cleanupDirectory,
+                        to: parked
+                    )
+                    try FileManager.default.createDirectory(
+                        at: cleanupDirectory,
+                        withIntermediateDirectories: false
+                    )
+                    let payload = cleanupDirectory.appendingPathComponent("wichtig.txt")
+                    try Data("nicht anfassen".utf8).write(to: payload)
+                    replacementPayload = payload
+                } catch {
+                    hookError = error
+                }
+            }
+        )
+
+        #expect(removed)
+        #expect(hookError == nil)
+        #expect(FileManager.default.fileExists(atPath: try #require(replacementPayload).path))
+        #expect(FileManager.default.fileExists(atPath: parked.appendingPathComponent("entry").path))
+    }
+
+    @Test("Ein Ersatz innerhalb des Cleanup-Ordners bleibt erhalten")
+    func cleanupRechecksEntryThroughBoundDirectory() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let displaced = directory.appendingPathComponent("alt.m4b")
+        let parked = directory.appendingPathComponent("bestätigt-gesichert.m4b")
+        try Data("bestätigte Altdatei".utf8).write(to: displaced)
+        let identity = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: displaced, followSymlink: false)
+        )
+        var insertedEntry: URL?
+        var hookError: (any Error)?
+
+        let removed = FFmpegWrapper.removeDisplacedOutput(
+            displaced,
+            expectedIdentity: identity,
+            afterQuarantine: { cleanupDirectory in
+                do {
+                    let entry = cleanupDirectory.appendingPathComponent("entry")
+                    try FileManager.default.moveItem(at: entry, to: parked)
+                    try Data("fremder Ersatz".utf8).write(to: entry)
+                    insertedEntry = entry
+                } catch {
+                    hookError = error
+                }
+            }
+        )
+
+        #expect(removed)
+        #expect(hookError == nil)
+        #expect(try String(contentsOf: parked, encoding: .utf8) == "bestätigte Altdatei")
+        let cleanupRests = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix(".HB_Cleanup_") }
+        #expect(cleanupRests.count == 1)
+        let preserved = try #require(cleanupRests.first)
+            .appendingPathComponent(try #require(insertedEntry).lastPathComponent)
+        #expect(try String(contentsOf: preserved, encoding: .utf8) == "fremder Ersatz")
+    }
+
+    @Test("Fehlgeschlagener Cleanup-Rollback rettet beide fremden Dateien")
+    func failedCleanupRestoreUsesRecoveryName() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("alt.m4b")
+        let expectedParked = directory.appendingPathComponent("erwartet-gesichert.m4b")
+        let firstReplacement = directory.appendingPathComponent("fremd-eins.m4b")
+        try Data("erwartete Datei".utf8).write(to: source)
+        let expected = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: source, followSymlink: false)
+        )
+        try Data("fremd eins".utf8).write(to: firstReplacement)
+        var hookError: (any Error)?
+
+        let removed = FFmpegWrapper.removeDisplacedOutput(
+            source,
+            expectedIdentity: expected,
+            beforeQuarantine: {
+                do {
+                    try FileManager.default.moveItem(at: source, to: expectedParked)
+                    try FileManager.default.moveItem(at: firstReplacement, to: source)
+                } catch {
+                    hookError = error
+                }
+            },
+            beforeRestore: {
+                do {
+                    try Data("fremd zwei".utf8).write(to: source)
+                } catch {
+                    hookError = error
+                }
+            }
+        )
+
+        #expect(!removed)
+        #expect(hookError == nil)
+        #expect(try String(contentsOf: source, encoding: .utf8) == "fremd zwei")
+        #expect(try String(contentsOf: expectedParked, encoding: .utf8) == "erwartete Datei")
+        let recoveryFiles = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.contains(".recovery-") }
+        #expect(recoveryFiles.count == 1)
+        #expect(try String(contentsOf: try #require(recoveryFiles.first), encoding: .utf8) == "fremd eins")
+    }
+
+    @Test("Ein Ersatz am Cleanup-Pfad wird bei Staging-Ausgaben nicht gelöscht")
+    func stagingCleanupIsBoundToOwnedDirectory() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staged = FFmpegWrapper.stagingOutputURL(
+            for: directory.appendingPathComponent("Buch.m4b")
+        )
+        let parked = directory.appendingPathComponent("cleanup-gesichert")
+        let ownership = try FFmpegWrapper.createOwnedStagingOutput(staged)
+        try Data("unvollständig".utf8).write(to: staged)
+        var replacementPayload: URL?
+        var hookError: (any Error)?
+
+        let removed = FFmpegWrapper.removeOwnedStagedOutput(
+            staged,
+            expectedOwnership: ownership,
+            afterQuarantine: { cleanupDirectory in
+                do {
+                    try FileManager.default.moveItem(
+                        at: cleanupDirectory,
+                        to: parked
+                    )
+                    try FileManager.default.createDirectory(
+                        at: cleanupDirectory,
+                        withIntermediateDirectories: false
+                    )
+                    let payload = cleanupDirectory.appendingPathComponent("wichtig.txt")
+                    try Data("nicht anfassen".utf8).write(to: payload)
+                    replacementPayload = payload
+                } catch {
+                    hookError = error
+                }
+            }
+        )
+
+        #expect(removed)
+        #expect(hookError == nil)
+        #expect(FileManager.default.fileExists(atPath: try #require(replacementPayload).path))
+        #expect(FileManager.default.fileExists(atPath: parked.appendingPathComponent("entry").path))
+    }
+
+    @Test("Verwaiste Ausgabe-Cleanup-Verzeichnisse werden nach einem Absturz entfernt")
+    func orphanedOutputCleanupDirectoriesAreSwept() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let deadOwner: pid_t = 987_654
+        let stagingCleanup = directory.appendingPathComponent(
+            ".HB_StagingCleanup_\(deadOwner)-\(UUID().uuidString)"
+        )
+        let displacedCleanup = directory.appendingPathComponent(
+            ".HB_DisplacedCleanup_\(deadOwner)-\(UUID().uuidString)"
+        )
+        let reboundCleanup = directory.appendingPathComponent(
+            ".HB_Cleanup_\(deadOwner)-\(UUID().uuidString)"
+        )
+        for cleanup in [stagingCleanup, displacedCleanup, reboundCleanup] {
+            try FFmpegWrapper.createOwnedTempDirectory(
+                cleanup,
+                ownerPID: deadOwner
+            )
+            let entry = cleanup.appendingPathComponent("entry")
+            try Data("Rest".utf8).write(to: entry)
+            let identity = try #require(
+                FFmpegWrapper.fileSystemIdentity(
+                    at: entry,
+                    followSymlink: false
+                )
+            )
+            try FFmpegWrapper.writeCleanupEntryIdentity(
+                identity,
+                in: cleanup
+            )
+        }
+
+        FFmpegWrapper.cleanupOutputQuarantines(in: directory)
+
+        #expect(!FileManager.default.fileExists(atPath: stagingCleanup.path))
+        #expect(!FileManager.default.fileExists(atPath: displacedCleanup.path))
+        #expect(!FileManager.default.fileExists(atPath: reboundCleanup.path))
+    }
+
+    @Test("Absturz-Sweep erhält einen fremden Eintrag in der Cleanup-Quarantäne")
+    func outputCleanupSweepRejectsMismatchedEntry() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let deadOwner: pid_t = 987_654
+        let cleanup = directory.appendingPathComponent(
+            ".HB_DisplacedCleanup_\(deadOwner)-\(UUID().uuidString)"
+        )
+        try FFmpegWrapper.createOwnedTempDirectory(cleanup, ownerPID: deadOwner)
+        let expectedSource = directory.appendingPathComponent("erwartet.m4b")
+        try Data("erwartet".utf8).write(to: expectedSource)
+        let expected = try #require(
+            FFmpegWrapper.fileSystemIdentity(
+                at: expectedSource,
+                followSymlink: false
+            )
+        )
+        try FFmpegWrapper.writeCleanupEntryIdentity(expected, in: cleanup)
+        let entry = cleanup.appendingPathComponent("entry")
+        try Data("fremder Eintrag".utf8).write(to: entry)
+
+        FFmpegWrapper.cleanupOutputQuarantines(in: directory)
+
+        #expect(FileManager.default.fileExists(atPath: cleanup.path))
+        #expect(try String(contentsOf: entry, encoding: .utf8) == "fremder Eintrag")
+    }
+
+    @Test("Nur ein Lauf kann dasselbe Ziel reservieren")
+    func outputLeaseIsExclusiveWithinProcess() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = directory.appendingPathComponent("Buch.m4b")
+        var first: OutputLeaseSet? = try FFmpegWrapper.acquireOutputLeases(for: [output])
+        _ = withExtendedLifetime(first) {
+            #expect(throws: ConversionOutputError.self) {
+                _ = try FFmpegWrapper.acquireOutputLeases(for: [output])
+            }
+        }
+        first = nil
+        _ = try FFmpegWrapper.acquireOutputLeases(for: [output])
+    }
+
+    @Test("Case-insensitive Zielschreibweisen teilen Lease und Lock-Datei")
+    func caseInsensitiveLeaseKeysMatch() {
+        let upper = URL(fileURLWithPath: "/tmp/Buch.m4b")
+        let lower = URL(fileURLWithPath: "/tmp/buch.m4b")
+        #expect(
+            FFmpegWrapper.outputLeaseKey(
+                for: upper,
+                caseSensitiveNames: false
+            ) == FFmpegWrapper.outputLeaseKey(
+                for: lower,
+                caseSensitiveNames: false
+            )
+        )
+        #expect(
+            FFmpegWrapper.outputLockURL(
+                for: upper,
+                caseSensitiveNames: false
+            ).lastPathComponent == FFmpegWrapper.outputLockURL(
+                for: lower,
+                caseSensitiveNames: false
+            ).lastPathComponent
+        )
+        #expect(
+            FFmpegWrapper.outputLeaseKey(
+                for: upper,
+                caseSensitiveNames: true
+            ) != FFmpegWrapper.outputLeaseKey(
+                for: lower,
+                caseSensitiveNames: true
+            )
+        )
+    }
+
+    @Test("Die Zielreservierung gilt auch gegenüber einem zweiten Prozess")
+    func outputLeaseIsExclusiveAcrossProcesses() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let output = directory.appendingPathComponent("Buch.m4b")
+        var lease: OutputLeaseSet? = try FFmpegWrapper.acquireOutputLeases(for: [output])
+        let lockPath = FFmpegWrapper.outputLockURL(for: output).path
+        let script = """
+        import fcntl, sys
+        handle = open(sys.argv[1], 'a')
+        try:
+            fcntl.lockf(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit(9)
+        """
+
+        let blocked = withExtendedLifetime(lease) {
+            FFmpegWrapper.runCapturedProcess(
+                executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
+                arguments: ["-c", script, lockPath],
+                timeout: 2
+            )
+        }
+        guard case .completed(let blockedStatus, _) = blocked else {
+            Issue.record("Zweiter Prozess lieferte keinen Exit-Status")
+            return
+        }
+        #expect(blockedStatus == 9)
+
+        lease = nil
+        let available = FFmpegWrapper.runCapturedProcess(
+            executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
+            arguments: ["-c", script, lockPath],
+            timeout: 2
+        )
+        guard case .completed(let availableStatus, _) = available else {
+            Issue.record("Zweiter Prozess lieferte nach Freigabe keinen Exit-Status")
+            return
+        }
+        #expect(availableStatus == 0)
+    }
+
+    @Test("Split-Ausgabe darf keine physische Eingabe ersetzen")
+    func splitOutputCannotAliasInput() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("Buch-01.m4b")
+        try Data("Original".utf8).write(to: source)
+        let files = [audio(source, duration: 3_600), audio(source, duration: 3_600)]
+        let plan = FFmpegWrapper.makeConversionPlan(
+            files: files,
+            outputURL: directory.appendingPathComponent("Buch.m4b"),
+            maxDurationHours: 1
+        )
+
+        #expect(throws: ConversionOutputError.self) {
+            try FFmpegWrapper.validateConversionPlan(plan)
+        }
+        #expect(try String(contentsOf: source, encoding: .utf8) == "Original")
+    }
+
+    @Test("Hardlink-Ausgabe auf eine Eingabe wird erkannt")
+    func hardLinkedOutputCannotAliasInput() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("Quelle.m4b")
+        let output = directory.appendingPathComponent("Ziel.m4b")
+        try Data("Original".utf8).write(to: source)
+        try FileManager.default.linkItem(at: source, to: output)
+        let plan = FFmpegWrapper.makeConversionPlan(
+            files: [audio(source)],
+            outputURL: output,
+            maxDurationHours: nil
+        )
+
+        #expect(throws: ConversionOutputError.self) {
+            try FFmpegWrapper.validateConversionPlan(plan)
+        }
+    }
+
+    @Test("Eine nach der Planung geänderte Quelle wird abgewiesen")
+    func changedInputIsRejected() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("Quelle.wav")
+        try Data("alt".utf8).write(to: source)
+        let plan = FFmpegWrapper.makeConversionPlan(
+            files: [audio(source)],
+            outputURL: directory.appendingPathComponent("Ziel.m4b"),
+            maxDurationHours: nil
+        )
+        try Data("anderer und längerer Inhalt".utf8).write(to: source)
+
+        #expect(throws: ConversionOutputError.self) {
+            try FFmpegWrapper.validateConversionPlan(plan)
+        }
+    }
+
+    @Test("Gebrochener Ziel-Symlink verlangt eine Überschreibbestätigung")
+    func brokenOutputSymlinkRequiresConfirmation() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("Quelle.wav")
+        let output = directory.appendingPathComponent("Buch.m4b")
+        try Data("audio".utf8).write(to: source)
+        try FileManager.default.createSymbolicLink(
+            at: output,
+            withDestinationURL: directory.appendingPathComponent("fehlt.m4b")
+        )
+        let plan = FFmpegWrapper.makeConversionPlan(
+            files: [audio(source)],
+            outputURL: output,
+            maxDurationHours: nil
+        )
+
+        #expect(plan.outputURLsRequiringOverwriteConfirmation == [output])
+    }
+
+    @Test("Coverdaten bleiben nach Austausch der Quelldatei unverändert")
+    func coverIsSnapshotted() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cover = directory.appendingPathComponent("cover.jpg")
+        let original = try onePixelPNGData()
+        try original.write(to: cover)
+        let snapshot = try #require(FFmpegWrapper.loadCoverSnapshot(at: cover))
+        try Data("nachher".utf8).write(to: cover)
+
+        #expect(snapshot == original)
+    }
+
+    @Test("Cover-Lader weist FIFO, Übergröße und ungültige Bilddaten ab")
+    func coverSnapshotRejectsUnsafeInputs() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fifo = directory.appendingPathComponent("cover-fifo.jpg")
+        let oversized = directory.appendingPathComponent("cover-gross.jpg")
+        let invalid = directory.appendingPathComponent("cover-ungueltig.jpg")
+
+        let fifoResult = fifo.withUnsafeFileSystemRepresentation { path in
+            path.map { Darwin.mkfifo($0, mode_t(0o600)) } ?? -1
+        }
+        #expect(fifoResult == 0)
+        let descriptor = oversized.withUnsafeFileSystemRepresentation { path in
+            path.map {
+                Darwin.open($0, O_CREAT | O_WRONLY | O_CLOEXEC, mode_t(0o600))
+            } ?? -1
+        }
+        #expect(descriptor >= 0)
+        if descriptor >= 0 {
+            #expect(Darwin.ftruncate(
+                descriptor,
+                off_t(FFmpegWrapper.maximumCoverByteCount + 1)
+            ) == 0)
+            _ = Darwin.close(descriptor)
+        }
+        try Data("kein Bild".utf8).write(to: invalid)
+
+        let start = Date()
+        #expect(FFmpegWrapper.loadCoverSnapshot(at: fifo) == nil)
+        #expect(Date().timeIntervalSince(start) < 1)
+        #expect(FFmpegWrapper.loadCoverSnapshot(at: oversized) == nil)
+        #expect(FFmpegWrapper.loadCoverSnapshot(at: invalid) == nil)
+    }
+
+    @Test("Cover-Snapshot verlangt den beim Klick erfassten Dateieintrag")
+    func coverSnapshotRejectsReplacementAfterPlanning() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cover = directory.appendingPathComponent("cover.png")
+        let data = try onePixelPNGData()
+        try data.write(to: cover)
+        let expected = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: cover, followSymlink: true)
+        )
+        try FileManager.default.removeItem(at: cover)
+        try data.write(to: cover)
+
+        #expect(FFmpegWrapper.loadCoverSnapshot(
+            at: cover,
+            expectedIdentity: expected
+        ) == nil)
+    }
+
+    @Test("Ohne geplante Cover-Identität wird eine später erschienene Datei nicht geladen")
+    func plannedCoverRequiresCapturedIdentity() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cover = directory.appendingPathComponent("cover.png")
+        let expected = FFmpegWrapper.fileSystemIdentity(
+            at: cover,
+            followSymlink: true
+        )
+        try onePixelPNGData().write(to: cover)
+
+        #expect(FFmpegWrapper.loadPlannedCoverSnapshot(
+            at: cover,
+            expectedIdentity: expected
+        ) == nil)
+    }
+
+    @Test("Ein bereits abgebrochener Cover-Snapshot berührt den Pfad nicht")
+    func coverSnapshotStopsBeforeIOWhenCancelled() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fifo = directory.appendingPathComponent("cover-fifo.jpg")
+        let fifoResult = fifo.withUnsafeFileSystemRepresentation { path in
+            path.map { Darwin.mkfifo($0, mode_t(0o600)) } ?? -1
+        }
+        #expect(fifoResult == 0)
+
+        let start = Date()
+        #expect(FFmpegWrapper.loadCoverSnapshot(
+            at: fifo,
+            isCancelled: { true }
+        ) == nil)
+        #expect(Date().timeIntervalSince(start) < 0.1)
+    }
+
+    @Test("Vorbestehendes Temp-Verzeichnis wird nicht beansprucht")
+    func tempCreationIsExclusive() throws {
+        let root = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("HB_Temp_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        let sentinel = directory.appendingPathComponent("wichtig.txt")
+        try Data("behalten".utf8).write(to: sentinel)
+
+        #expect(throws: (any Error).self) {
+            try FFmpegWrapper.createOwnedTempDirectory(directory)
+        }
+        #expect(FileManager.default.fileExists(atPath: sentinel.path))
+    }
+
+    @Test("Ausgetauschte Temp-Verzeichnisse bleiben bei Abschluss und Abbruch erhalten")
+    func replacedTempDirectoryIsNotRemoved() throws {
+        let root = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for cancel in [false, true] {
+            let directory = root.appendingPathComponent("HB_Temp_\(UUID().uuidString)")
+            let parked = root.appendingPathComponent("ursprünglich-\(UUID().uuidString)")
+            try FFmpegWrapper.createOwnedTempDirectory(directory)
+            let context = ConversionContext()
+            context.registerTempDirectory(directory)
+            try FileManager.default.moveItem(at: directory, to: parked)
+            try FFmpegWrapper.createOwnedTempDirectory(directory)
+            let sentinel = directory.appendingPathComponent("wichtig.txt")
+            try Data("behalten".utf8).write(to: sentinel)
+
+            if cancel {
+                context.cancel()
+            } else {
+                context.removeTempDirectory(directory)
+            }
+
+            #expect(FileManager.default.fileExists(atPath: sentinel.path))
+            #expect(FileManager.default.fileExists(atPath: parked.path))
+        }
+    }
+
+    @Test("Eigene Temp-Verzeichnisse werden trotz erzeugter Kinddateien entfernt")
+    func populatedTempDirectoriesAreRemoved() throws {
+        let root = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        for cancel in [false, true] {
+            let directory = root.appendingPathComponent("HB_Temp_\(UUID().uuidString)")
+            try FFmpegWrapper.createOwnedTempDirectory(directory)
+            let context = ConversionContext()
+            context.registerTempDirectory(directory)
+            try Data("Segment".utf8).write(
+                to: directory.appendingPathComponent("seg_0.wav")
+            )
+
+            if cancel {
+                context.cancel()
+            } else {
+                context.removeTempDirectory(directory)
+            }
+
+            #expect(!FileManager.default.fileExists(atPath: directory.path))
+        }
+    }
+
+    @Test("Temp-Cleanup rollt einen Austausch nach der Vorprüfung zurück")
+    func tempCleanupRechecksQuarantinedEntry() throws {
+        let root = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("HB_Temp_\(UUID().uuidString)")
+        let parked = root.appendingPathComponent("ursprünglich")
+        try FFmpegWrapper.createOwnedTempDirectory(directory)
+        let identity = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: directory, followSymlink: false)
+        )
+        var hookError: (any Error)?
+
+        FFmpegWrapper.removeOwnedTempDirectory(
+            directory,
+            expectedIdentity: identity,
+            beforeQuarantine: {
+                do {
+                    try FileManager.default.moveItem(at: directory, to: parked)
+                    try FFmpegWrapper.createOwnedTempDirectory(directory)
+                    try Data("behalten".utf8).write(
+                        to: directory.appendingPathComponent("wichtig.txt")
+                    )
+                } catch {
+                    hookError = error
+                }
+            }
+        )
+
+        #expect(hookError == nil)
+        #expect(FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent("wichtig.txt").path
+        ))
+        #expect(FileManager.default.fileExists(atPath: parked.path))
+    }
+
+    @Test("Temp-Cleanup bindet die rekursive Löschung an den geprüften Inode")
+    func tempCleanupReopensQuarantineByIdentity() throws {
+        let root = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("HB_Temp_\(UUID().uuidString)")
+        let parked = root.appendingPathComponent("ursprüngliche-quarantaene")
+        try FFmpegWrapper.createOwnedTempDirectory(directory)
+        try Data("eigen".utf8).write(
+            to: directory.appendingPathComponent("segment.m4a")
+        )
+        let identity = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: directory, followSymlink: false)
+        )
+        var replacementURL: URL?
+        var hookError: (any Error)?
+
+        FFmpegWrapper.removeOwnedTempDirectory(
+            directory,
+            expectedIdentity: identity,
+            beforeBoundRemoval: {
+                do {
+                    let quarantine = try #require(
+                        FileManager.default.contentsOfDirectory(
+                            at: root,
+                            includingPropertiesForKeys: nil
+                        ).first { $0.lastPathComponent.hasPrefix(".HB_Cleanup_") }
+                    )
+                    try FileManager.default.moveItem(at: quarantine, to: parked)
+                    try FileManager.default.createDirectory(
+                        at: quarantine,
+                        withIntermediateDirectories: false
+                    )
+                    try Data("behalten".utf8).write(
+                        to: quarantine.appendingPathComponent("wichtig.txt")
+                    )
+                    replacementURL = quarantine
+                } catch {
+                    hookError = error
+                }
+            }
+        )
+
+        let replacement = try #require(replacementURL)
+        #expect(hookError == nil)
+        #expect(FileManager.default.fileExists(
+            atPath: replacement.appendingPathComponent("wichtig.txt").path
+        ))
+        #expect(FileManager.default.fileExists(
+            atPath: parked.appendingPathComponent("segment.m4a").path
+        ))
+    }
+
+    @Test("Altlastenbereinigung verlangt exakten Namen und gültigen Besitzer")
+    func orphanCleanupRequiresOwnershipProof() throws {
+        let root = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let unowned = root.appendingPathComponent("HB_Temp_\(UUID().uuidString)")
+        let orphan = root.appendingPathComponent("HB_Temp_\(UUID().uuidString)")
+        let misleading = root.appendingPathComponent("HB_Temp_nicht-eine-uuid")
+        for directory in [unowned, misleading] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        }
+        try FFmpegWrapper.createOwnedTempDirectory(orphan)
+        try "987654".write(
+            to: orphan.appendingPathComponent(".owner-pid"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let old = Date(timeIntervalSince1970: 1)
+        for directory in [unowned, orphan, misleading] {
+            try FileManager.default.setAttributes(
+                [.creationDate: old],
+                ofItemAtPath: directory.path
+            )
+        }
+
+        FFmpegWrapper.cleanupOldTempDirectories(
+            in: root,
+            now: Date(timeIntervalSince1970: 200_000)
+        )
+
+        #expect(FileManager.default.fileExists(atPath: unowned.path))
+        #expect(FileManager.default.fileExists(atPath: misleading.path))
+        #expect(!FileManager.default.fileExists(atPath: orphan.path))
+    }
+
+    @Test("Altlastenbereinigung erfasst markierte Cleanup-Quarantänen")
+    func orphanCleanupRemovesOwnedCleanupQuarantine() throws {
+        let root = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cleanup = root.appendingPathComponent(
+            ".HB_Cleanup_987654-\(UUID().uuidString)"
+        )
+        let decoy = root.appendingPathComponent(
+            ".HB_Cleanup_987654-\(UUID().uuidString)"
+        )
+        try FileManager.default.createDirectory(at: cleanup, withIntermediateDirectories: false)
+        try "987654".write(
+            to: cleanup.appendingPathComponent(".owner-pid"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try Data("rest".utf8).write(to: cleanup.appendingPathComponent("segment.m4a"))
+        try FileManager.default.createDirectory(at: decoy, withIntermediateDirectories: false)
+        let old = Date(timeIntervalSince1970: 1)
+        for directory in [cleanup, decoy] {
+            try FileManager.default.setAttributes(
+                [.creationDate: old],
+                ofItemAtPath: directory.path
+            )
+        }
+
+        FFmpegWrapper.cleanupOldTempDirectories(
+            in: root,
+            now: Date(timeIntervalSince1970: 200_000)
+        )
+
+        #expect(!FileManager.default.fileExists(atPath: cleanup.path))
+        #expect(FileManager.default.fileExists(atPath: decoy.path))
+    }
 }
 
 // MARK: - I) sanitizeDuration — Schutz gegen NaN/Infinity aus korrupten Dateien

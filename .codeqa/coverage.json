@@ -6,7 +6,7 @@
     "token_budget": 3000000,
     "status": "active",
     "started_at": "2026-08-25T16:29:49+02:00",
-    "tokens_spent": 400048
+    "tokens_spent": 560361
   },
   "campaign_history": [
     {
@@ -59,15 +59,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260825T162949635422+0200",
-        "completed_at": "2026-08-25T17:06:45+02:00",
-        "observed_head": "b33303c1dd735e5f205b9b1cd84b05857dede80c",
-        "content_sha256": "de020c5068daf112c1aa12a46372a9f0d6be392d2d624877664b78674a0d01af",
+        "completed_at": "2026-08-25T17:27:25+02:00",
+        "observed_head": "87022e430e482de8c5977958e478493bd18ef18a",
+        "content_sha256": "dbec80fd4fbab840371b413192957f49bf798bb5eb6d6003d697466f731f2cc2",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Theme-Diff erneut an Session-Grenzen zu FFmpegWrapper und CLI geprüft: ein serieller, laufbezogener Ereignisstrom schützt Main-Actor-State; Abbruchbereinigung und Abschluss sind deterministisch geordnet.",
+        "summary": "Process-Abbruch-Diff erneut an Session-, Audioanalyse- und CLI-Grenzen geprüft: Vorbereitungstasks und direkte Tools eskalieren bounded; laufbezogene Konvertierungsbereinigung endet erst nach Prozessende.",
         "tests": [
-          "swift test: 119 Tests in 18 Suites passed",
+          "swift test: 121 Tests in 18 Suites passed",
           "xcodebuild Release CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED"
         ]
       }
@@ -81,7 +81,7 @@
       "risk": "critical",
       "priority": 2,
       "reason": "Datenintegrität, externe Prozesse, Parallelität, Abbruch und atomare Ausgabedateien",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260815T134633974092+0200",
         "completed_at": "2026-08-15T13:54:18+02:00",
@@ -96,6 +96,13 @@
           "swift build -Xswiftc -warnings-as-errors: passed",
           "swift test: 89 Tests in 17 Suites passed"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260825T162949635422+0200",
+        "started_at": "2026-08-25T17:27:34+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
@@ -400,14 +407,20 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift"
       ],
       "priority": 1,
-      "state": "in_progress",
+      "state": "completed",
       "noted_at": "2026-08-25T16:46:04+02:00",
       "campaign_id": "20260825T162949635422+0200",
       "started_at": "2026-08-25T17:07:03+02:00",
-      "active_run": {
+      "completed": {
         "campaign_id": "20260825T162949635422+0200",
-        "started_at": "2026-08-25T17:07:03+02:00",
-        "observed_head": "b33303c1dd735e5f205b9b1cd84b05857dede80c"
+        "completed_at": "2026-08-25T17:27:11+02:00",
+        "observed_head": "87022e430e482de8c5977958e478493bd18ef18a",
+        "summary": "Direkte Tool-Prozesse erhalten bei Abbruch gemeinsam SIGTERM und nach 0,5 Sekunden SIGKILL. ConversionContext startet Prozesse atomar gegen cancel, wartet vor Datei-Cleanup auf deren Ende und verhindert Starts nach gewonnenem Abbruch; Task-Cancellation beendet auch die öffentliche Kapitelextraktion.",
+        "tests": [
+          "swift test: 121 Tests in 18 Suites passed",
+          "SIGTERM-resistenter Race-Test mit parallelem Worker-Wait: 5 Wiederholungen bestanden",
+          "xcodebuild Release CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED"
+        ]
       }
     },
     {

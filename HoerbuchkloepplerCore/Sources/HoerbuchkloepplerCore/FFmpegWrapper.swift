@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import CoreMedia
+import ImageIO
 import Darwin
 
 /// Beendet eigene Tool-Prozesse zweistufig. `terminate()` sendet nur SIGTERM;
@@ -67,6 +68,225 @@ enum ProcessTerminator {
 public struct ConversionPlan: Sendable {
     public let groups: [[AudioFile]]
     public let outputURLs: [URL]
+    let outputSnapshots: [OutputDestinationSnapshot]
+    let inputSnapshots: [String: OutputDestinationSnapshot]
+
+    /// Ziele, deren Verzeichniseintrag bei der Planung bereits existierte.
+    /// Anders als `FileManager.fileExists` folgt diese Auskunft Symlinks nicht;
+    /// deshalb verlangt auch ein gebrochener Ziel-Symlink eine Bestätigung.
+    public var outputURLsRequiringOverwriteConfirmation: [URL] {
+        zip(outputURLs, outputSnapshots).compactMap { url, snapshot in
+            if case .missing = snapshot { return nil }
+            return url
+        }
+    }
+}
+
+/// Identifiziert genau einen Verzeichniseintrag. Neben Inode und Volume werden
+/// Größe sowie Änderungs-/Statuszeit festgehalten, damit auch eine in-place
+/// geänderte Zieldatei nicht mehr als die vom Nutzer bestätigte Datei gilt.
+struct FileSystemIdentity: Codable, Equatable, Sendable {
+    let device: dev_t
+    let inode: ino_t
+    let mode: mode_t
+    let size: off_t
+    let modificationSeconds: Int64
+    let modificationNanoseconds: Int64
+    let statusSeconds: Int64
+    let statusNanoseconds: Int64
+
+    init(stat information: stat) {
+        device = information.st_dev
+        inode = information.st_ino
+        mode = information.st_mode
+        size = information.st_size
+        modificationSeconds = Int64(information.st_mtimespec.tv_sec)
+        modificationNanoseconds = Int64(information.st_mtimespec.tv_nsec)
+        statusSeconds = Int64(information.st_ctimespec.tv_sec)
+        statusNanoseconds = Int64(information.st_ctimespec.tv_nsec)
+    }
+
+    /// Ein atomarer Rename aktualisiert auf manchen Volumes die Statuszeit des
+    /// verschobenen Eintrags. Für die Prüfung NACH `RENAME_SWAP` zählen deshalb
+    /// Inode, Volume, Typ, Größe und Inhalts-Änderungszeit; die strengere
+    /// Vorprüfung vergleicht weiterhin alle Felder über `Equatable`.
+    func matchesDisplacedEntry(_ other: FileSystemIdentity) -> Bool {
+        device == other.device
+            && inode == other.inode
+            && mode == other.mode
+            && size == other.size
+            && modificationSeconds == other.modificationSeconds
+            && modificationNanoseconds == other.modificationNanoseconds
+    }
+
+    /// Verzeichnisgröße und Zeitstempel ändern sich bei jedem Kind-Eintrag.
+    /// Für den Besitz eines Verzeichniseintrags sind deshalb nur Volume, Inode
+    /// und der unveränderte Dateityp stabil.
+    func matchesDirectoryEntry(_ other: FileSystemIdentity) -> Bool {
+        device == other.device
+            && inode == other.inode
+            && mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+            && other.mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+    }
+
+    /// Inhalt und Zeitstempel einer ffmpeg-Ausgabedatei ändern sich während
+    /// der Konvertierung. Volume, Inode und Dateityp müssen dagegen vom
+    /// exklusiven Anlegen bis zum Commit unverändert bleiben.
+    func matchesRegularFileEntry(_ other: FileSystemIdentity) -> Bool {
+        device == other.device
+            && inode == other.inode
+            && mode & mode_t(S_IFMT) == mode_t(S_IFREG)
+            && other.mode & mode_t(S_IFMT) == mode_t(S_IFREG)
+    }
+}
+
+/// Laufzeitnachweis für genau die exklusiv angelegte Staging-Datei. Auf
+/// Volumes ohne Extended Attributes bleibt der Inode-Nachweis nutzbar; nur eine
+/// spätere Altlastenbereinigung nach einem Prozessabsturz entfällt dort.
+struct StagingOwnership: Sendable {
+    let identity: FileSystemIdentity
+    let ownerPID: pid_t
+    let hasPersistentMarker: Bool
+    let protectedDirectory: URL?
+    let protectedDirectoryIdentity: FileSystemIdentity?
+
+    var cleanupEntryRecord: CleanupEntryRecord {
+        CleanupEntryRecord(
+            identity: identity,
+            filename: protectedDirectory == nil ? "entry" : "entry.m4b",
+            stableIdentityOnly: true
+        )
+    }
+}
+
+struct CleanupEntryRecord: Codable {
+    let identity: FileSystemIdentity
+    let filename: String
+    let stableIdentityOnly: Bool
+    let alternateIdentity: FileSystemIdentity?
+    let alternateStableIdentityOnly: Bool?
+
+    init(
+        identity: FileSystemIdentity,
+        filename: String,
+        stableIdentityOnly: Bool,
+        alternateIdentity: FileSystemIdentity? = nil,
+        alternateStableIdentityOnly: Bool? = nil
+    ) {
+        self.identity = identity
+        self.filename = filename
+        self.stableIdentityOnly = stableIdentityOnly
+        self.alternateIdentity = alternateIdentity
+        self.alternateStableIdentityOnly = alternateStableIdentityOnly
+    }
+
+    func matches(_ current: FileSystemIdentity) -> Bool {
+        let primaryMatches = stableIdentityOnly
+            ? identity.matchesRegularFileEntry(current)
+            : identity.matchesDisplacedEntry(current)
+        guard !primaryMatches, let alternateIdentity else {
+            return primaryMatches
+        }
+        return alternateStableIdentityOnly == true
+            ? alternateIdentity.matchesRegularFileEntry(current)
+            : alternateIdentity.matchesDisplacedEntry(current)
+    }
+}
+
+final class StagingOutputHandle: @unchecked Sendable {
+    let url: URL
+    let ownership: StagingOwnership
+    let descriptor: Int32
+
+    init(url: URL, ownership: StagingOwnership, descriptor: Int32) {
+        self.url = url
+        self.ownership = ownership
+        self.descriptor = descriptor
+    }
+
+    deinit {
+        _ = Darwin.close(descriptor)
+    }
+
+    func processInputHandle() -> FileHandle {
+        FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+    }
+}
+
+enum OutputDestinationSnapshot: Equatable, Sendable {
+    case missing
+    case existing(FileSystemIdentity)
+    case inaccessible(errno: Int32)
+}
+
+enum ConversionOutputError: LocalizedError {
+    case destinationChanged(URL)
+    case destinationInaccessible(URL, Int32)
+    case destinationIsDirectory(URL)
+    case destinationAliasesInput(URL, URL)
+    case destinationBusy(URL)
+    case lockFailed(URL, Int32)
+    case restoreFailed(URL, recoveryURL: URL?, errno: Int32)
+    case stagingChanged(URL)
+    case sourceChanged(URL)
+    case sourceInaccessible(URL, Int32)
+
+    var errorDescription: String? {
+        switch self {
+        case .destinationChanged(let url):
+            return "Die Zieldatei wurde seit der Bestätigung verändert: \(url.path)"
+        case .destinationInaccessible(let url, let number):
+            return "Die Zieldatei kann nicht sicher geprüft werden: \(url.path) (\(Self.reason(number)))"
+        case .destinationIsDirectory(let url):
+            return "Der Zielpfad ist ein Ordner und wird nicht ersetzt: \(url.path)"
+        case .destinationAliasesInput(let output, let input):
+            return "Die Ausgabe verweist auf eine Eingabedatei: \(output.path) → \(input.path)"
+        case .destinationBusy(let url):
+            return "Ein anderer Hörbuchklöppler-Lauf verwendet bereits dieses Ziel: \(url.path)"
+        case .lockFailed(let url, let number):
+            return "Das Ziel konnte nicht exklusiv reserviert werden: \(url.path) (\(Self.reason(number)))"
+        case .restoreFailed(let url, let recoveryURL, let number):
+            let recovery = recoveryURL.map {
+                " Der verdrängte Eintrag bleibt zur manuellen Wiederherstellung unter \($0.path) erhalten."
+            } ?? ""
+            return "Die zwischenzeitlich geänderte Zieldatei konnte nicht zurückgetauscht werden: \(url.path) (\(Self.reason(number))).\(recovery)"
+        case .stagingChanged(let url):
+            return "Die temporäre Ausgabedatei wurde während der Übernahme ausgetauscht und bleibt unangetastet: \(url.path)"
+        case .sourceChanged(let url):
+            return "Eine Eingabedatei wurde seit der Planung verändert: \(url.path)"
+        case .sourceInaccessible(let url, let number):
+            return "Eine Eingabedatei kann nicht sicher gelesen werden: \(url.path) (\(Self.reason(number)))"
+        }
+    }
+
+    private static func reason(_ number: Int32) -> String {
+        String(cString: strerror(number))
+    }
+}
+
+/// Hält pro Ziel eine prozessübergreifende `fcntl`-Sperre. Die kleine versteckte
+/// Lock-Datei bleibt absichtlich liegen: Würde ein Prozess sie beim Freigeben
+/// löschen, könnte ein zweiter Prozess schon einen neuen Inode sperren, während
+/// ein dritter noch den alten hält.
+final class OutputLeaseSet: @unchecked Sendable {
+    private var descriptors: [Int32]
+    private let canonicalPaths: [String]
+
+    init(descriptors: [Int32], canonicalPaths: [String]) {
+        self.descriptors = descriptors
+        self.canonicalPaths = canonicalPaths
+    }
+
+    deinit {
+        for descriptor in descriptors {
+            var fileLock = flock()
+            fileLock.l_type = Int16(F_UNLCK)
+            fileLock.l_whence = Int16(SEEK_SET)
+            _ = Darwin.fcntl(descriptor, F_SETLK, &fileLock)
+            _ = Darwin.close(descriptor)
+        }
+        FFmpegWrapper.releaseInProcessOutputPaths(canonicalPaths)
+    }
 }
 
 public enum ConversionCancellationOutcome: Sendable {
@@ -80,6 +300,11 @@ public enum ConversionCancellationOutcome: Sendable {
 /// unangetastet. Die Sperre schließt außerdem das Rennen zwischen Start und
 /// Abbruch eines Prozesses.
 final class ConversionContext: @unchecked Sendable {
+    private struct DisplacedOutputResource {
+        let identity: FileSystemIdentity
+        let stagingOwnership: StagingOwnership?
+    }
+
     let id = UUID()
 
     private let lock = NSCondition()
@@ -88,8 +313,10 @@ final class ConversionContext: @unchecked Sendable {
     private var finished = false
     private var cancellationCleanupInProgress = false
     private var processes = Set<Process>()
-    private var tempDirectories = Set<URL>()
-    private var stagedOutputs = Set<URL>()
+    private var tempDirectories: [URL: FileSystemIdentity] = [:]
+    private var stagedOutputs: [URL: StagingOwnership] = [:]
+    private var residualStagedOutputs: [URL: StagingOwnership] = [:]
+    private var displacedOutputs: [URL: DisplacedOutputResource] = [:]
 
     init(log: @escaping @Sendable (UUID, String) -> Void = { _, _ in }) {
         self.log = log
@@ -128,69 +355,209 @@ final class ConversionContext: @unchecked Sendable {
     }
 
     func registerTempDirectory(_ url: URL) {
+        guard let identity = FFmpegWrapper.fileSystemIdentity(at: url, followSymlink: false),
+              identity.mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else { return }
         lock.lock()
-        tempDirectories.insert(url)
+        tempDirectories[url] = identity
         let shouldRemove = cancelled
         lock.unlock()
-        if shouldRemove { try? FileManager.default.removeItem(at: url) }
+        if shouldRemove {
+            FFmpegWrapper.removeOwnedTempDirectory(url, expectedIdentity: identity)
+        }
     }
 
     func removeTempDirectory(_ url: URL) {
         lock.lock()
-        tempDirectories.remove(url)
+        let identity = tempDirectories.removeValue(forKey: url)
         lock.unlock()
-        try? FileManager.default.removeItem(at: url)
+        if let identity {
+            FFmpegWrapper.removeOwnedTempDirectory(url, expectedIdentity: identity)
+        }
     }
 
-    /// Entfernt genau diesen Verzeichniseintrag — nie rekursiv.
-    ///
-    /// Staging-Ausgaben sind immer einzelne Dateien. Wird der Eintrag zwischen
-    /// Registrierung und Bereinigung durch einen Ordner ersetzt, würde
-    /// `removeItem` diesen samt Inhalt löschen; `unlink` verweigert einen Ordner
-    /// atomar. Für die selbst angelegten Temp-Verzeichnisse bleibt das
-    /// rekursive `removeItem` richtig (Review-Fund 2026-08-17).
     @discardableResult
     static func unlinkStagedOutput(
         _ url: URL,
+        expectedOwnership: StagingOwnership? = nil,
         log: @Sendable (String) -> Void = { _ in }
     ) -> Bool {
-        let result = url.withUnsafeFileSystemRepresentation { path -> Int32 in
-            guard let path else {
-                errno = EINVAL
-                return -1
-            }
-            return Darwin.unlink(path)
+        if let expectedOwnership,
+           expectedOwnership.protectedDirectory != nil {
+            return FFmpegWrapper.removeProtectedStagingOutput(
+                url,
+                ownership: expectedOwnership,
+                log: log
+            )
         }
-        guard result != 0 else { return true }
-        let errorNumber = errno
-        if errorNumber == ENOENT { return true }
-        let reason = String(cString: strerror(errorNumber))
-        log("⚠️ Staging-Datei konnte nicht entfernt werden: \(url.path) (\(reason))")
-        return false
+        return FFmpegWrapper.removeOwnedStagedOutput(
+            url,
+            expectedOwnership: expectedOwnership,
+            log: log
+        )
     }
 
-    func registerStagedOutput(_ url: URL) {
+    func registerStagedOutput(
+        _ url: URL,
+        ownership suppliedOwnership: StagingOwnership? = nil
+    ) {
+        guard let ownership = suppliedOwnership
+            ?? FFmpegWrapper.currentStagingOwnership(at: url) else { return }
         lock.lock()
-        stagedOutputs.insert(url)
+        stagedOutputs[url] = ownership
         let shouldRemove = cancelled
         lock.unlock()
         if shouldRemove {
-            ConversionContext.unlinkStagedOutput(url) { [id, log] message in
+            let removed = ConversionContext.unlinkStagedOutput(
+                url,
+                expectedOwnership: ownership
+            ) { [id, log] message in
                 log(id, message)
             }
+            lock.lock()
+            stagedOutputs.removeValue(forKey: url)
+            if !removed { residualStagedOutputs[url] = ownership }
+            lock.unlock()
         }
     }
 
     func unregisterStagedOutput(_ url: URL) {
         lock.lock()
-        stagedOutputs.remove(url)
+        stagedOutputs.removeValue(forKey: url)
+        residualStagedOutputs.removeValue(forKey: url)
+        lock.unlock()
+    }
+
+    func completeStagedOutput(_ url: URL) {
+        lock.lock()
+        let ownership = stagedOutputs.removeValue(forKey: url)
+            ?? residualStagedOutputs.removeValue(forKey: url)
+        lock.unlock()
+        if let ownership {
+            cleanupProtectedStagingContainer(url, ownership: ownership)
+        }
+    }
+
+    private func cleanupProtectedStagingContainer(
+        _ url: URL,
+        ownership: StagingOwnership
+    ) {
+        guard !FFmpegWrapper.removeEmptyProtectedStagingDirectory(
+            ownership: ownership
+        ) else { return }
+        lock.lock()
+        residualStagedOutputs[url] = ownership
         lock.unlock()
     }
 
     func discardStagedOutput(_ url: URL) {
-        unregisterStagedOutput(url)
-        ConversionContext.unlinkStagedOutput(url) { [id, log] message in
+        lock.lock()
+        let ownership = stagedOutputs.removeValue(forKey: url)
+        lock.unlock()
+        let removed = ConversionContext.unlinkStagedOutput(
+            url,
+            expectedOwnership: ownership
+        ) { [id, log] message in
             log(id, message)
+        }
+        if !removed, let ownership {
+            lock.lock()
+            residualStagedOutputs[url] = ownership
+            lock.unlock()
+        }
+    }
+
+    /// Fehler nach einem atomaren Rollback können bedeuten, dass unter der
+    /// Staging-URL inzwischen ein fremder Eintrag liegt. Nur eindeutig eigene
+    /// Fehlerpfade dürfen die markierte Partial-Datei entfernen.
+    func handleCommitFailure(_ error: Error, stagedURL: URL) {
+        if case ConversionOutputError.restoreFailed = error {
+            unregisterStagedOutput(stagedURL)
+        } else if case ConversionOutputError.stagingChanged = error {
+            unregisterStagedOutput(stagedURL)
+        } else {
+            discardStagedOutput(stagedURL)
+        }
+    }
+
+    func registerDisplacedOutput(
+        _ url: URL,
+        expectedIdentity: FileSystemIdentity,
+        stagingOwnership suppliedOwnership: StagingOwnership? = nil
+    ) {
+        lock.lock()
+        let registeredOwnership = stagedOutputs.removeValue(forKey: url)
+        let stagingOwnership = suppliedOwnership ?? registeredOwnership
+        displacedOutputs[url] = DisplacedOutputResource(
+            identity: expectedIdentity,
+            stagingOwnership: stagingOwnership
+        )
+        let shouldRemove = cancelled
+        lock.unlock()
+        if shouldRemove {
+            let removed = FFmpegWrapper.removeDisplacedOutput(
+                url,
+                expectedIdentity: expectedIdentity,
+                cleanupParent: stagingOwnership?.protectedDirectory?
+                    .deletingLastPathComponent()
+            ) { [id, log] message in
+                log(id, message)
+            }
+            if removed {
+                if let stagingOwnership {
+                    cleanupProtectedStagingContainer(
+                        url,
+                        ownership: stagingOwnership
+                    )
+                }
+                lock.lock()
+                displacedOutputs.removeValue(forKey: url)
+                lock.unlock()
+            }
+        }
+    }
+
+    /// Wiederholt am normalen Laufende die Bereinigung einer verdrängten
+    /// Altdatei, deren erster `unlink` fehlgeschlagen ist. Der Eintrag bleibt bis
+    /// zum bestätigten Erfolg registriert und wird auch bei einem Abbruch erneut
+    /// versucht; ein verbleibender Fehler steht damit sichtbar im Log.
+    func cleanupResidualStagedOutputs() {
+        lock.lock()
+        let stagedResiduals = residualStagedOutputs
+        let residuals = displacedOutputs
+        lock.unlock()
+        for (url, ownership) in stagedResiduals {
+            let removed = ConversionContext.unlinkStagedOutput(
+                url,
+                expectedOwnership: ownership
+            ) { [id, log] message in
+                log(id, message)
+            }
+            if removed {
+                lock.lock()
+                residualStagedOutputs.removeValue(forKey: url)
+                lock.unlock()
+            }
+        }
+        for (url, resource) in residuals {
+            let removed = FFmpegWrapper.removeDisplacedOutput(
+                url,
+                expectedIdentity: resource.identity,
+                cleanupParent: resource.stagingOwnership?.protectedDirectory?
+                    .deletingLastPathComponent()
+            ) { [id, log] message in
+                log(id, message)
+            }
+            if removed {
+                if let ownership = resource.stagingOwnership {
+                    cleanupProtectedStagingContainer(
+                        url,
+                        ownership: ownership
+                    )
+                }
+                lock.lock()
+                displacedOutputs.removeValue(forKey: url)
+                lock.unlock()
+            }
         }
     }
 
@@ -224,19 +591,58 @@ final class ConversionContext: @unchecked Sendable {
         onAccepted()
         let ownedProcesses = processes
         let ownedDirectories = tempDirectories
-        let ownedStagedOutputs = stagedOutputs
+        let ownedStagedOutputs = stagedOutputs.merging(
+            residualStagedOutputs,
+            uniquingKeysWith: { current, _ in current }
+        )
+        let ownedDisplacedOutputs = displacedOutputs
         processes.removeAll()
         tempDirectories.removeAll()
         stagedOutputs.removeAll()
+        residualStagedOutputs.removeAll()
+        displacedOutputs.removeAll()
         lock.unlock()
 
         let finishCleanup: @Sendable () -> Void = { [self] in
-            for directory in ownedDirectories {
-                try? FileManager.default.removeItem(at: directory)
+            for (directory, identity) in ownedDirectories {
+                FFmpegWrapper.removeOwnedTempDirectory(
+                    directory,
+                    expectedIdentity: identity
+                )
             }
-            for output in ownedStagedOutputs {
-                ConversionContext.unlinkStagedOutput(output) { [id, log] message in
+            for (output, ownership) in ownedStagedOutputs {
+                let removed = ConversionContext.unlinkStagedOutput(
+                    output,
+                    expectedOwnership: ownership
+                ) { [id, log] message in
                     log(id, message)
+                }
+                if !removed {
+                    lock.lock()
+                    residualStagedOutputs[output] = ownership
+                    lock.unlock()
+                }
+            }
+            for (output, resource) in ownedDisplacedOutputs {
+                let removed = FFmpegWrapper.removeDisplacedOutput(
+                    output,
+                    expectedIdentity: resource.identity,
+                    cleanupParent: resource.stagingOwnership?
+                        .protectedDirectory?.deletingLastPathComponent()
+                ) { [id, log] message in
+                    log(id, message)
+                }
+                if removed {
+                    if let ownership = resource.stagingOwnership {
+                        cleanupProtectedStagingContainer(
+                            output,
+                            ownership: ownership
+                        )
+                    }
+                } else {
+                    lock.lock()
+                    displacedOutputs[output] = resource
+                    lock.unlock()
                 }
             }
 
@@ -267,8 +673,9 @@ final class ConversionContext: @unchecked Sendable {
             lock.wait()
         }
         finished = true
-        action(cancelled)
+        let wasCancelled = cancelled
         lock.unlock()
+        action(wasCancelled)
     }
 }
 
@@ -276,31 +683,137 @@ final class ConversionContext: @unchecked Sendable {
 /// dadurch nie nebenläufig aus dem Main-Actor-Modell `ConversionSession`.
 private struct ConversionJob: Sendable {
     let plan: ConversionPlan
+    // Der Worker muss die Sperren bis zum letzten Commit beziehungsweise bis
+    // zum vollständigen Abbruch halten. Die Eigenschaft wird nur zur Lebensdauer
+    // genutzt; die Deskriptoren selbst bleiben im `OutputLeaseSet` gekapselt.
+    let outputLeases: OutputLeaseSet
     let settings: AudioSettings
     let title: String
     let author: String
     let genre: String
-    let coverPath: String?
-    let embeddedCoverData: Data?
+    let coverURL: URL?
+    let coverIdentity: FileSystemIdentity?
+    let coverData: Data?
+
+    func replacingCoverData(_ data: Data?) -> ConversionJob {
+        ConversionJob(
+            plan: plan,
+            outputLeases: outputLeases,
+            settings: settings,
+            title: title,
+            author: author,
+            genre: genre,
+            coverURL: nil,
+            coverIdentity: nil,
+            coverData: data
+        )
+    }
 }
 
-/// Sendable-Puffer für einen `FileHandle.readabilityHandler`. Foundation ruft
-/// den Handler nebenläufig auf; `NSMutableData` allein wäre dort nicht sicher.
-private final class LockedDataBuffer: @unchecked Sendable {
-    private let lock = NSLock()
-    private var data = Data()
+/// Liest eine Prozess-Pipe auf genau einer seriellen Queue bis EOF. `waitUntilEOF`
+/// ist der Join: Danach läuft garantiert kein Callback mehr und der vollständige
+/// Fehlertext steht fest. Das verhindert verspätete Fortschrittsereignisse aus
+/// einer bereits abgeschlossenen Kodierphase.
+final class ProcessPipeReader: @unchecked Sendable {
+    private let handle: FileHandle
+    private let queue = DispatchQueue(label: "com.hoerbuchkloeppler.pipe-reader")
+    private let completion = DispatchGroup()
+    private let stateLock = NSLock()
+    private var started = false
+    private var stopRequested = false
+    private var output = Data()
 
-    func append(_ chunk: Data) {
-        lock.lock()
-        data.append(chunk)
-        lock.unlock()
+    init(handle: FileHandle) {
+        self.handle = handle
     }
 
-    func snapshot() -> Data {
-        lock.lock()
-        defer { lock.unlock() }
-        return data
+    func start(onChunk: @escaping @Sendable (Data) -> Void = { _ in }) {
+        stateLock.lock()
+        precondition(!started, "ProcessPipeReader darf nur einmal gestartet werden")
+        started = true
+        completion.enter()
+        stateLock.unlock()
+        queue.async { [self] in
+            let descriptor = handle.fileDescriptor
+            var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+            while true {
+                stateLock.lock()
+                let shouldStop = stopRequested
+                stateLock.unlock()
+                if shouldStop { break }
+
+                var candidate = pollfd(
+                    fd: descriptor,
+                    events: Int16(POLLIN | POLLHUP | POLLERR),
+                    revents: 0
+                )
+                let pollResult = Darwin.poll(&candidate, 1, 50)
+                if pollResult == 0 { continue }
+                if pollResult < 0 {
+                    if errno == EINTR { continue }
+                    break
+                }
+                let count = buffer.withUnsafeMutableBytes { storage in
+                    Darwin.read(descriptor, storage.baseAddress, storage.count)
+                }
+                if count == 0 { break }
+                if count < 0 {
+                    if errno == EINTR || errno == EAGAIN { continue }
+                    break
+                }
+                let chunk = Data(buffer.prefix(count))
+                output.append(chunk)
+                onChunk(chunk)
+            }
+            completion.leave()
+        }
     }
+
+    /// Wartet normalerweise bis EOF. Bei einem begrenzten Join beendet die
+    /// Leser-Queue ihre `poll`-Schleife selbst; dadurch kann ein fremdes Kind,
+    /// das den Pipe-Schreibdeskriptor geerbt hat, den Aufrufer nicht festhalten.
+    func waitUntilEOF(timeout: TimeInterval? = nil) -> Data {
+        stateLock.lock()
+        let hasStarted = started
+        stateLock.unlock()
+        precondition(hasStarted, "ProcessPipeReader muss vor dem Warten gestartet werden")
+        if let timeout {
+            let bounded = timeout.isFinite ? max(0, timeout) : 1
+            if completion.wait(timeout: .now() + bounded) == .timedOut {
+                stateLock.lock()
+                stopRequested = true
+                stateLock.unlock()
+                completion.wait()
+            }
+        } else {
+            completion.wait()
+        }
+        return queue.sync { output }
+    }
+}
+
+/// Behält genug Byte-Kontext, um einen ffmpeg-Zeitwert auch dann zu erkennen,
+/// wenn die Pipe ihn zwischen zwei Chunks trennt. Bei mehreren Statuszeilen
+/// gewinnt der neueste statt des ersten Werts.
+final class FFmpegProgressParser: @unchecked Sendable {
+    private var tail = Data()
+
+    func consume(_ chunk: Data) -> TimeInterval? {
+        var combined = tail
+        combined.append(chunk)
+        let text = String(decoding: combined, as: UTF8.self)
+        let result = FFmpegWrapper.extractTimesFromFFmpeg(text).last
+            .flatMap(FFmpegWrapper.timeToSeconds)
+        tail = Data(combined.suffix(64))
+        return result
+    }
+}
+
+enum CapturedProcessResult: Sendable {
+    case completed(status: Int32, output: Data)
+    case timedOut(output: Data)
+    case cancelled(output: Data)
+    case failed(String)
 }
 
 private final class ParallelProgressTracker: @unchecked Sendable {
@@ -341,6 +854,182 @@ private final class ParallelResults: @unchecked Sendable {
 
 public struct FFmpegWrapper {
     private static let tempOwnerFilename = ".owner-pid"
+    private static let cleanupEntryIdentityFilename = ".entry-identity.json"
+    private static let stagingOwnerAttribute = "com.hoerbuchkloeppler.staging-owner"
+    static let maximumCoverByteCount = 32 * 1024 * 1024
+    private static let outputLeaseRegistryLock = NSLock()
+    private static nonisolated(unsafe) var leasedOutputPaths = Set<String>()
+
+    static func fileSystemIdentity(
+        at url: URL,
+        followSymlink: Bool
+    ) -> FileSystemIdentity? {
+        var information = stat()
+        let result = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else {
+                errno = EINVAL
+                return -1
+            }
+            return Darwin.fstatat(
+                AT_FDCWD,
+                path,
+                &information,
+                followSymlink ? 0 : AT_SYMLINK_NOFOLLOW
+            )
+        }
+        guard result == 0 else { return nil }
+        return FileSystemIdentity(stat: information)
+    }
+
+    static func captureSnapshot(
+        of url: URL,
+        followSymlink: Bool = false
+    ) -> OutputDestinationSnapshot {
+        if let identity = fileSystemIdentity(at: url, followSymlink: followSymlink) {
+            return .existing(identity)
+        }
+        let errorNumber = errno
+        return errorNumber == ENOENT || errorNumber == ENOTDIR
+            ? .missing
+            : .inaccessible(errno: errorNumber)
+    }
+
+    @discardableResult
+    static func renameEntry(
+        from sourceURL: URL,
+        to destinationURL: URL,
+        flags: UInt32
+    ) -> Int32 {
+        sourceURL.path.withCString { source in
+            destinationURL.path.withCString { destination in
+                Darwin.renameatx_np(
+                    AT_FDCWD,
+                    source,
+                    AT_FDCWD,
+                    destination,
+                    flags
+                )
+            }
+        }
+    }
+
+    private static func canonicalPath(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    /// Auf case-insensitiven Volumes müssen Schreibvarianten denselben
+    /// Registry- und Lock-Schlüssel erhalten. Die explizite Variante hält die
+    /// Normalisierung ohne besonderes Test-Volume prüfbar.
+    static func outputLeaseKey(
+        for output: URL,
+        caseSensitiveNames: Bool? = nil
+    ) -> String {
+        let path = canonicalPath(output).precomposedStringWithCanonicalMapping
+        let parent = output.deletingLastPathComponent()
+        let caseSensitive = caseSensitiveNames
+            ?? (try? parent.resourceValues(
+                forKeys: [.volumeSupportsCaseSensitiveNamesKey]
+            ))?.volumeSupportsCaseSensitiveNames
+            ?? false
+        guard !caseSensitive else { return path }
+        return path.folding(
+            options: [.caseInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")
+        )
+    }
+
+    /// Stabiler Hash für kurze Lock-Dateinamen. Die Sperrdatei liegt im selben
+    /// Zielordner; dadurch gelten Zugriffsrechte und Volume-Semantik des Ziels.
+    static func outputLockURL(
+        for output: URL,
+        caseSensitiveNames: Bool? = nil
+    ) -> URL {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in outputLeaseKey(
+            for: output,
+            caseSensitiveNames: caseSensitiveNames
+        ).utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        let name = String(format: ".hoerbuchkloeppler-%016llx.lock", hash)
+        return output.deletingLastPathComponent().appendingPathComponent(name)
+    }
+
+    static func acquireOutputLeases(for outputs: [URL]) throws -> OutputLeaseSet {
+        let uniqueOutputs = Dictionary(
+            outputs.map { (outputLeaseKey(for: $0), $0) },
+            uniquingKeysWith: { first, _ in first }
+        ).values.sorted { outputLeaseKey(for: $0) < outputLeaseKey(for: $1) }
+        let canonicalPaths = uniqueOutputs.map { outputLeaseKey(for: $0) }
+        outputLeaseRegistryLock.lock()
+        if let busyPath = canonicalPaths.first(where: { leasedOutputPaths.contains($0) }) {
+            outputLeaseRegistryLock.unlock()
+            let output = uniqueOutputs.first {
+                outputLeaseKey(for: $0) == busyPath
+            } ?? uniqueOutputs[0]
+            throw ConversionOutputError.destinationBusy(output)
+        }
+        leasedOutputPaths.formUnion(canonicalPaths)
+        outputLeaseRegistryLock.unlock()
+
+        var descriptors: [Int32] = []
+
+        func releaseAcquiredDescriptors() {
+            for descriptor in descriptors {
+                var fileLock = flock()
+                fileLock.l_type = Int16(F_UNLCK)
+                fileLock.l_whence = Int16(SEEK_SET)
+                _ = Darwin.fcntl(descriptor, F_SETLK, &fileLock)
+                _ = Darwin.close(descriptor)
+            }
+            descriptors.removeAll()
+            releaseInProcessOutputPaths(canonicalPaths)
+        }
+
+        for output in uniqueOutputs {
+            let lockURL = outputLockURL(for: output)
+            let descriptor = lockURL.withUnsafeFileSystemRepresentation { path -> Int32 in
+                guard let path else {
+                    errno = EINVAL
+                    return -1
+                }
+                return Darwin.open(
+                    path,
+                    O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW,
+                    mode_t(0o600)
+                )
+            }
+            guard descriptor >= 0 else {
+                let errorNumber = errno
+                releaseAcquiredDescriptors()
+                throw ConversionOutputError.lockFailed(output, errorNumber)
+            }
+            var fileLock = flock()
+            fileLock.l_type = Int16(F_WRLCK)
+            fileLock.l_whence = Int16(SEEK_SET)
+            guard Darwin.fcntl(descriptor, F_SETLK, &fileLock) == 0 else {
+                let errorNumber = errno
+                _ = Darwin.close(descriptor)
+                releaseAcquiredDescriptors()
+                if errorNumber == EWOULDBLOCK || errorNumber == EAGAIN {
+                    throw ConversionOutputError.destinationBusy(output)
+                }
+                throw ConversionOutputError.lockFailed(output, errorNumber)
+            }
+            descriptors.append(descriptor)
+        }
+        return OutputLeaseSet(
+            descriptors: descriptors,
+            canonicalPaths: canonicalPaths
+        )
+    }
+
+    static func releaseInProcessOutputPaths(_ paths: [String]) {
+        outputLeaseRegistryLock.lock()
+        leasedOutputPaths.subtract(paths)
+        outputLeaseRegistryLock.unlock()
+    }
 
     /// Nur reguläre, ausführbare Dateien sind startfähige Tool-Kandidaten.
     /// Ein gebündeltes Binary ohne x-Bit darf den funktionierenden PATH-Fallback
@@ -367,7 +1056,12 @@ public struct FFmpegWrapper {
             }
         }
         candidates += fallbackPaths.map { URL(fileURLWithPath: $0) }
-        return candidates.first(where: isUsableExecutable)
+        for candidate in candidates where isUsableExecutable(candidate) {
+            // Nicht den später veränderbaren Symlink starten, sondern genau das
+            // reguläre Binary, das `isUsableExecutable` geprüft hat.
+            return candidate.resolvingSymlinksInPath()
+        }
+        return nil
     }
 
     public static func getBinaryURL(name: String) -> URL? {
@@ -390,48 +1084,76 @@ public struct FFmpegWrapper {
 
     static func toolVersion(at url: URL, name: String) -> String? {
         guard isUsableExecutable(url) else { return nil }
+        let result = runCapturedProcess(
+            executableURL: url,
+            arguments: name == "mediainfo" ? ["--Version"] : ["-version"],
+            timeout: 5
+        )
+        guard case .completed(let status, let data) = result,
+              status == 0,
+              let output = String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !output.isEmpty else { return nil }
+        let parts = output.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+        if let index = parts.firstIndex(where: { $0.lowercased() == "version" }),
+           index + 1 < parts.count {
+            return parts[index + 1].replacingOccurrences(of: ",", with: "")
+        }
+        if name == "mediainfo",
+           let version = parts.first(where: { $0.hasPrefix("v") && $0.contains(".") }) {
+            return version
+        }
+        return parts.first
+    }
+
+    static func runCapturedProcess(
+        executableURL: URL,
+        arguments: [String],
+        context: ConversionContext? = nil,
+        timeout: TimeInterval
+    ) -> CapturedProcessResult {
         let process = Process()
-        process.executableURL = url
-        process.arguments = name == "mediainfo" ? ["--Version"] : ["-version"]
+        process.executableURL = executableURL
+        process.arguments = arguments
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
-        let reader = pipe.fileHandleForReading
-        let outputBuffer = LockedDataBuffer()
-        reader.readabilityHandler = { handle in
-            let chunk = handle.availableData
-            if !chunk.isEmpty { outputBuffer.append(chunk) }
-        }
+        let reader = ProcessPipeReader(handle: pipe.fileHandleForReading)
         do {
-            defer { reader.readabilityHandler = nil }
-            try process.run()
-            let deadline = Date().addingTimeInterval(5)
-            while process.isRunning, Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.02)
+            let started: Bool
+            if let context {
+                started = try context.run(process)
+            } else {
+                try process.run()
+                started = true
+            }
+            guard started else { return .cancelled(output: Data()) }
+            defer { context?.unregister(process) }
+            try? pipe.fileHandleForWriting.close()
+            reader.start()
+
+            let boundedTimeout = timeout.isFinite ? max(0, timeout) : 5
+            let nanoseconds = UInt64(min(boundedTimeout, 86_400) * 1_000_000_000)
+            let deadline = DispatchTime.now().uptimeNanoseconds + nanoseconds
+            while process.isRunning,
+                  DispatchTime.now().uptimeNanoseconds < deadline {
+                Thread.sleep(forTimeInterval: 0.01)
             }
             let timedOut = process.isRunning
             if timedOut {
                 ProcessTerminator.terminateAndWait([process])
             }
             process.waitUntilExit()
-            reader.readabilityHandler = nil
-            guard !timedOut else { return nil }
-            let rest = reader.availableData
-            if !rest.isEmpty { outputBuffer.append(rest) }
-            let data = outputBuffer.snapshot()
-            guard process.terminationStatus == 0,
-                  let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !output.isEmpty else { return nil }
-            let parts = output.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }
-            if let index = parts.firstIndex(where: { $0.lowercased() == "version" }), index + 1 < parts.count {
-                return parts[index + 1].replacingOccurrences(of: ",", with: "")
-            }
-            if name == "mediainfo", let version = parts.first(where: { $0.hasPrefix("v") && $0.contains(".") }) {
-                return version
-            }
-            return parts.first
+            // Ein bereits beendeter direkter Prozess kann einen Nachkommen mit
+            // geerbtem stdout hinterlassen. Dessen offener Schreibdeskriptor darf
+            // den informativen Versions-/MediaInfo-Aufruf nicht endlos blockieren.
+            let output = reader.waitUntilEOF(timeout: 0.25)
+            if context?.isCancelled == true { return .cancelled(output: output) }
+            if timedOut { return .timedOut(output: output) }
+            return .completed(status: process.terminationStatus, output: output)
         } catch {
-            return nil
+            return .failed(error.localizedDescription)
         }
     }
 
@@ -440,7 +1162,186 @@ public struct FFmpegWrapper {
         let outputs = groups.indices.map {
             resolveOutputURL(outputURL, groupIndex: $0, splitGroupsCount: groups.count)
         }
-        return ConversionPlan(groups: groups, outputURLs: outputs)
+        let inputSnapshots = Dictionary(
+            files.map {
+                let key = canonicalPath($0.url)
+                return (key, captureSnapshot(of: $0.url, followSymlink: true))
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return ConversionPlan(
+            groups: groups,
+            outputURLs: outputs,
+            outputSnapshots: outputs.map { captureSnapshot(of: $0) },
+            inputSnapshots: inputSnapshots
+        )
+    }
+
+    static func validateInputSnapshots(
+        for files: [AudioFile],
+        expected: [String: OutputDestinationSnapshot]
+    ) throws {
+        var checked = Set<String>()
+        for file in files {
+            let key = canonicalPath(file.url)
+            guard checked.insert(key).inserted else { continue }
+            let current = captureSnapshot(of: file.url, followSymlink: true)
+            guard let planned = expected[key] else {
+                throw ConversionOutputError.sourceChanged(file.sourceURL)
+            }
+            switch (planned, current) {
+            case (.existing(let old), .existing(let new)) where old == new:
+                continue
+            case (_, .inaccessible(let number)):
+                throw ConversionOutputError.sourceInaccessible(file.sourceURL, number)
+            default:
+                throw ConversionOutputError.sourceChanged(file.sourceURL)
+            }
+        }
+    }
+
+    static func validateConversionPlan(_ plan: ConversionPlan) throws {
+        guard plan.groups.count == plan.outputURLs.count,
+              plan.outputURLs.count == plan.outputSnapshots.count,
+              !plan.groups.isEmpty,
+              plan.groups.allSatisfy({ !$0.isEmpty }) else {
+            throw ConversionOutputError.destinationChanged(
+                plan.outputURLs.first ?? URL(fileURLWithPath: "/")
+            )
+        }
+        let files = plan.groups.flatMap { $0 }
+        try validateInputSnapshots(for: files, expected: plan.inputSnapshots)
+
+        let inputByPath = Dictionary(
+            files.map { (canonicalPath($0.url), $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let inputIdentities: [(AudioFile, FileSystemIdentity)] = files.compactMap { file in
+            guard case .existing(let identity) = plan.inputSnapshots[canonicalPath(file.url)] else {
+                return nil
+            }
+            return (file, identity)
+        }
+        var seenOutputs = Set<String>()
+
+        for (index, output) in plan.outputURLs.enumerated() {
+            let outputPath = canonicalPath(output)
+            guard seenOutputs.insert(outputPath).inserted else {
+                throw ConversionOutputError.destinationChanged(output)
+            }
+            let planned = plan.outputSnapshots[index]
+            let current = captureSnapshot(of: output)
+            guard planned == current else {
+                if case .inaccessible(let number) = current {
+                    throw ConversionOutputError.destinationInaccessible(output, number)
+                }
+                throw ConversionOutputError.destinationChanged(output)
+            }
+            if case .inaccessible(let number) = planned {
+                throw ConversionOutputError.destinationInaccessible(output, number)
+            }
+            if case .existing(let identity) = planned,
+               identity.mode & mode_t(S_IFMT) == mode_t(S_IFDIR) {
+                throw ConversionOutputError.destinationIsDirectory(output)
+            }
+            if let input = inputByPath[outputPath] {
+                throw ConversionOutputError.destinationAliasesInput(output, input.sourceURL)
+            }
+            if let outputIdentity = fileSystemIdentity(at: output, followSymlink: true),
+               let match = inputIdentities.first(where: {
+                   $0.1.device == outputIdentity.device && $0.1.inode == outputIdentity.inode
+               }) {
+                throw ConversionOutputError.destinationAliasesInput(output, match.0.sourceURL)
+            }
+        }
+    }
+
+    /// Liest nur einen bereits geöffneten regulären Eintrag, begrenzt die
+    /// Eingabegröße und prüft danach einen kleinen ImageIO-Decode. `O_NONBLOCK`
+    /// verhindert, dass eine nach der Auswahl eingesetzte FIFO den Start hält.
+    static func loadCoverSnapshot(
+        at url: URL,
+        expectedIdentity: FileSystemIdentity? = nil,
+        isCancelled: () -> Bool = { false }
+    ) -> Data? {
+        guard !isCancelled() else { return nil }
+        let resolved = url.resolvingSymlinksInPath()
+        guard !isCancelled() else { return nil }
+        let descriptor = resolved.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return Darwin.open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        }
+        guard descriptor >= 0 else { return nil }
+        defer { _ = Darwin.close(descriptor) }
+
+        var before = stat()
+        guard Darwin.fstat(descriptor, &before) == 0,
+              before.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              before.st_size > 0,
+              before.st_size <= off_t(maximumCoverByteCount) else { return nil }
+        let openedIdentity = FileSystemIdentity(stat: before)
+        if let expectedIdentity, expectedIdentity != openedIdentity { return nil }
+
+        var data = Data()
+        data.reserveCapacity(Int(before.st_size))
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while data.count <= maximumCoverByteCount {
+            guard !isCancelled() else { return nil }
+            let remaining = maximumCoverByteCount + 1 - data.count
+            let count = buffer.withUnsafeMutableBytes { storage in
+                Darwin.read(
+                    descriptor,
+                    storage.baseAddress,
+                    min(storage.count, remaining)
+                )
+            }
+            if count == 0 { break }
+            if count < 0 {
+                if errno == EINTR { continue }
+                return nil
+            }
+            data.append(contentsOf: buffer.prefix(count))
+        }
+
+        var after = stat()
+        guard data.count <= maximumCoverByteCount,
+              data.count == Int(before.st_size),
+              Darwin.fstat(descriptor, &after) == 0,
+              before.st_dev == after.st_dev,
+              before.st_ino == after.st_ino,
+              before.st_size == after.st_size,
+              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
+              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec,
+              !isCancelled(),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) > 0 else { return nil }
+        let options = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 32,
+            kCGImageSourceShouldCacheImmediately: true
+        ] as CFDictionary
+        guard !isCancelled() else { return nil }
+        guard CGImageSourceCreateThumbnailAtIndex(source, 0, options) != nil else {
+            return nil
+        }
+        return data
+    }
+
+    /// Produktionspfad für ein manuell gewähltes Cover: Ohne beim Klick
+    /// erfasste Identität wird keine später am Pfad erschienene Datei geladen.
+    static func loadPlannedCoverSnapshot(
+        at url: URL,
+        expectedIdentity: FileSystemIdentity?,
+        isCancelled: () -> Bool = { false }
+    ) -> Data? {
+        guard let expectedIdentity else { return nil }
+        return loadCoverSnapshot(
+            at: url,
+            expectedIdentity: expectedIdentity,
+            isCancelled: isCancelled
+        )
     }
 
     @MainActor
@@ -470,19 +1371,35 @@ public struct FFmpegWrapper {
             )
             return
         }
+        let outputLeases: OutputLeaseSet
+        do {
+            try validateConversionPlan(plan)
+            outputLeases = try acquireOutputLeases(for: plan.outputURLs)
+        } catch {
+            session.isConverting = false
+            session.lastConversionSucceeded = false
+            session.conversionStatus = "Ausgabe nicht sicher verfügbar"
+            session.addLog("❌ \(error.localizedDescription)", type: .highlight)
+            return
+        }
+        let plannedFiles = plan.groups.flatMap { $0 }
+        let coverURL = session.coverPath.map { URL(fileURLWithPath: $0) }
+        let coverIdentity = coverURL.flatMap {
+            fileSystemIdentity(at: $0, followSymlink: true)
+        }
         let context = session.beginConversionRun()
         let job = ConversionJob(
             plan: plan,
+            outputLeases: outputLeases,
             settings: session.settings,
             title: session.title,
             author: session.author,
             genre: session.genre,
-            coverPath: session.coverPath,
-            embeddedCoverData: session.embeddedCoverData
+            coverURL: coverURL,
+            coverIdentity: coverIdentity,
+            coverData: coverURL == nil ? session.embeddedCoverData : nil
         )
-        let plannedTotalDuration = plan.groups
-            .flatMap { $0 }
-            .reduce(0) { $0 + $1.duration }
+        let plannedTotalDuration = plannedFiles.reduce(0) { $0 + $1.duration }
         guard session.isCurrentConversion(context.id) else { return }
         session.showOverlay = true
         session.isConverting = true
@@ -493,12 +1410,12 @@ public struct FFmpegWrapper {
         session.eventLogs = []
         session.logString = ""
         session.segmentProgress = [:]
-        let totalHours = Int(session.totalDuration / 3600)
-        let totalMinutes = Int((session.totalDuration.truncatingRemainder(dividingBy: 3600)) / 60)
+        let totalHours = Int(plannedTotalDuration / 3600)
+        let totalMinutes = Int((plannedTotalDuration.truncatingRemainder(dividingBy: 3600)) / 60)
         let durationStr = String(format: "%02d:%02dh", totalHours, totalMinutes)
         let channels = job.settings.isMono ? "Mono" : "Stereo"
 
-        let physicalInputURLs = Set(session.audioFiles.map { $0.url.standardizedFileURL })
+        let physicalInputURLs = Set(plannedFiles.map { $0.url.standardizedFileURL })
         var totalSize: Int64 = 0
         for url in physicalInputURLs {
             if let attr = try? FileManager.default.attributesOfItem(atPath: url.path),
@@ -507,7 +1424,7 @@ public struct FFmpegWrapper {
             }
         }
         let sizeStr = formatFileSize(totalSize)
-        let fileCount = Set(session.audioFiles.map { $0.sourceURL.standardizedFileURL }).count
+        let fileCount = Set(plannedFiles.map { $0.sourceURL.standardizedFileURL }).count
 
         let titleStr = job.title.isEmpty ? "Unbekannt" : job.title
         let authorStr = job.author.isEmpty ? "Unbekannt" : job.author
@@ -520,6 +1437,24 @@ public struct FFmpegWrapper {
         session.addLog("Technik: \(modeName) via \(codecInfo)", type: .info)
 
         DispatchQueue.global(qos: .userInitiated).async {
+            let coverData = job.coverURL.flatMap {
+                loadPlannedCoverSnapshot(
+                    at: $0,
+                    expectedIdentity: job.coverIdentity,
+                    isCancelled: { context.isCancelled }
+                )
+            }
+                ?? (job.coverURL == nil ? job.coverData : nil)
+            if job.coverURL != nil, coverData == nil, !context.isCancelled {
+                session.enqueueLog(
+                    "⚠️ Gewähltes Cover ist keine unveränderte, reguläre Bilddatei bis 32 MiB; Ausgabe ohne Cover.",
+                    type: .info,
+                    runID: context.id
+                )
+            }
+            let job = job.replacingCoverData(coverData)
+            let heldOutputLeases = job.outputLeases
+            defer { withExtendedLifetime(heldOutputLeases) {} }
             // Verfolgt, ob ALLE Gruppen erfolgreich waren -- nur dann ist der Lauf
             // wirklich erfolgreich (für CLI-Exit-Code + ehrliche Statusmeldung).
             var overallSuccess = true
@@ -531,6 +1466,20 @@ public struct FFmpegWrapper {
 
             for (groupIndex, fileGroup) in job.plan.groups.enumerated() {
                 if context.isCancelled {
+                    overallSuccess = false
+                    break
+                }
+                do {
+                    try validateInputSnapshots(
+                        for: fileGroup,
+                        expected: job.plan.inputSnapshots
+                    )
+                } catch {
+                    session.enqueueLog(
+                        "❌ \(error.localizedDescription)",
+                        type: .highlight,
+                        runID: context.id
+                    )
                     overallSuccess = false
                     break
                 }
@@ -555,8 +1504,25 @@ public struct FFmpegWrapper {
                 removeOrphanedStagedOutputs(for: finalURL, log: { message in
                     session.enqueueLog(message, type: .highlight, runID: context.id)
                 })
-                let stagedURL = stagingOutputURL(for: finalURL)
-                context.registerStagedOutput(stagedURL)
+                let stagingHandle: StagingOutputHandle
+                do {
+                    stagingHandle = try createProtectedStagingOutput(for: finalURL)
+                } catch {
+                    session.enqueueLog(
+                        "❌ Temporäre Ausgabedatei konnte nicht exklusiv angelegt werden: \(error.localizedDescription)",
+                        type: .highlight,
+                        runID: context.id
+                    )
+                    context.removeTempDirectory(tempDir)
+                    overallSuccess = false
+                    break
+                }
+                let stagedURL = stagingHandle.url
+                let stagingOwnership = stagingHandle.ownership
+                context.registerStagedOutput(
+                    stagedURL,
+                    ownership: stagingOwnership
+                )
                 var success = false
                 let groupDuration = fileGroup.reduce(0) { $0 + $1.duration }
                 let progressBase = plannedTotalDuration > 0
@@ -574,6 +1540,8 @@ public struct FFmpegWrapper {
                         group: fileGroup,
                         tempDir: tempDir,
                         finalURL: stagedURL,
+                        stagingOwnership: stagingOwnership,
+                        stagingHandle: stagingHandle,
                         progressBase: progressBase,
                         progressScale: progressScale
                     )
@@ -585,6 +1553,8 @@ public struct FFmpegWrapper {
                         group: fileGroup,
                         tempDir: tempDir,
                         finalURL: stagedURL,
+                        stagingOwnership: stagingOwnership,
+                        stagingHandle: stagingHandle,
                         progressBase: progressBase,
                         progressScale: progressScale
                     )
@@ -607,21 +1577,17 @@ public struct FFmpegWrapper {
                 // Die rein informative Analyse läuft auf der Staging-Datei. Der
                 // atomare Rename bleibt damit der letzte relevante Dateischritt.
                 if let miPath = getBinaryURL(name: "mediainfo"), !context.isCancelled {
-                    let process = Process()
-                    process.executableURL = miPath
-                    process.arguments = [stagedURL.path]
-                    let pipe = Pipe()
-                    process.standardOutput = pipe
-                    do {
-                        guard try context.run(process) else { throw CancellationError() }
-                        defer { context.unregister(process) }
-                        // Erst die Pipe leeren, DANN auf Exit warten — sonst
-                        // Deadlock, wenn die mediainfo-Ausgabe den Pipe-Puffer füllt.
-                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                        process.waitUntilExit()
-                        if !context.isCancelled,
-                           let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                           !output.isEmpty {
+                    let result = runCapturedProcess(
+                        executableURL: miPath,
+                        arguments: [stagedURL.path],
+                        context: context,
+                        timeout: 10
+                    )
+                    switch result {
+                    case .completed(let status, let data) where status == 0:
+                        if let output = String(data: data, encoding: .utf8)?
+                            .trimmingCharacters(in: .whitespacesAndNewlines),
+                           !output.isEmpty, !context.isCancelled {
                             session.enqueueLog(
                                 "--- MediaInfo Eigenschaften ---\n" + output,
                                 type: .dim,
@@ -636,21 +1602,37 @@ public struct FFmpegWrapper {
                                 runID: context.id
                             )
                         }
-                    } catch {
-                        // Die Nachanalyse ist rein informativ und darf einen sonst
-                        // gültigen Output nicht verhindern.
+                    case .cancelled:
+                        break
+                    case .timedOut:
                         session.enqueueVerboseLog(
-                            "MediaInfo-Nachanalyse übersprungen: \(error.localizedDescription)",
+                            "MediaInfo-Nachanalyse nach 10 Sekunden beendet; die fertige Ausgabe wird trotzdem übernommen.",
+                            runID: context.id
+                        )
+                    case .completed(let status, _):
+                        session.enqueueVerboseLog(
+                            "MediaInfo-Nachanalyse mit Exit-Code \(status) übersprungen; die fertige Ausgabe wird trotzdem übernommen.",
+                            runID: context.id
+                        )
+                    case .failed(let reason):
+                        session.enqueueVerboseLog(
+                            "MediaInfo-Nachanalyse übersprungen: \(reason)",
                             runID: context.id
                         )
                     }
                 }
 
                 do {
+                    var displacedOutputRemoved = true
                     let committed = try context.performCommit(
                         isLastOutput: groupIndex == job.plan.groups.count - 1
                     ) {
-                        try commitStagedOutput(stagedURL, to: finalURL)
+                        displacedOutputRemoved = try commitStagedOutput(
+                            stagedURL,
+                            to: finalURL,
+                            expectedDestination: job.plan.outputSnapshots[groupIndex],
+                            expectedStagingOwnership: stagingOwnership
+                        )
                     }
                     guard committed else {
                         context.discardStagedOutput(stagedURL)
@@ -658,12 +1640,29 @@ public struct FFmpegWrapper {
                         overallSuccess = false
                         break
                     }
-                    // rename() hat die Staging-Datei verschoben; nur noch aus
-                    // dem Context austragen, nicht den neuen Zielpfad löschen.
-                    context.unregisterStagedOutput(stagedURL)
+                    if displacedOutputRemoved {
+                        // Der Staging-Eintrag ist verschoben oder die verdrängte
+                        // Altdatei wurde bestätigt gelöscht.
+                        context.completeStagedOutput(stagedURL)
+                    } else {
+                        if case .existing(let displacedIdentity) =
+                            job.plan.outputSnapshots[groupIndex] {
+                            context.registerDisplacedOutput(
+                                stagedURL,
+                                expectedIdentity: displacedIdentity,
+                                stagingOwnership: stagingOwnership
+                            )
+                        }
+                        session.enqueueLog(
+                            "⚠️ Die frühere Ausgabe bleibt vorläufig als versteckte Sicherungsdatei liegen: \(stagedURL.path)",
+                            type: .highlight,
+                            runID: context.id
+                        )
+                    }
+                    clearStagingOwnershipMarker(finalURL)
                     committedOutputs.append(finalURL)
                 } catch {
-                    context.discardStagedOutput(stagedURL)
+                    context.handleCommitFailure(error, stagedURL: stagedURL)
                     session.enqueueLog(
                         "❌ Ausgabe konnte nicht atomar übernommen werden: \(error.localizedDescription)",
                         type: .highlight,
@@ -685,6 +1684,9 @@ public struct FFmpegWrapper {
             let succeeded = overallSuccess
             let outputs = committedOutputs
             context.finishAfterCancellationCleanup { cancelled in
+                // Erst nach einer parallel laufenden Abbruchbereinigung erneut
+                // versuchen: Diese kann gerade erst einen Rest registriert haben.
+                context.cleanupResidualStagedOutputs()
                 session.enqueueConversionFinished(
                     success: succeeded,
                     cancelled: cancelled,
@@ -698,6 +1700,7 @@ public struct FFmpegWrapper {
     private static func runParallelTasks(group: [AudioFile], tempDir: URL, session: ConversionSession, context: ConversionContext,
                                          progressBase: Double, progressWeight: Double,
                                          extensionStr: String, showIndividualPacmans: Bool,
+                                         inputSnapshots: [String: OutputDestinationSnapshot],
                                          argsProvider: @escaping @Sendable (Int, AudioFile, URL) -> [String]) -> [String]? {
         // ffmpeg einmal vorab auflösen. Fehlt es, die Ursache klar benennen und
         // abbrechen — der frühere /usr/bin/false-Fallback pro Segment erzeugte
@@ -737,6 +1740,16 @@ public struct FFmpegWrapper {
                 if context.isCancelled {
                     return
                 }
+                do {
+                    try validateInputSnapshots(for: [file], expected: inputSnapshots)
+                } catch {
+                    session.enqueueLog(
+                        "❌ \(error.localizedDescription)",
+                        type: .highlight,
+                        runID: context.id
+                    )
+                    return
+                }
                 
                 let segmentURL = tempDir.appendingPathComponent("seg_\(idx).\(extensionStr)")
                 let finalArgs = argsProvider(idx, file, segmentURL)
@@ -762,23 +1775,14 @@ public struct FFmpegWrapper {
                 
                 let errorPipe = Pipe()
                 process.standardError = errorPipe
-                let reader = errorPipe.fileHandleForReading
+                let outputReader = ProcessPipeReader(
+                    handle: errorPipe.fileHandleForReading
+                )
+                let progressParser = FFmpegProgressParser()
 
-                // stderr fortlaufend mitschneiden: der readabilityHandler liest die
-                // Daten zur Fortschrittsanzeige; ein erneutes readDataToEndOfFile()
-                // im Fehlerfall käme zu spät (Daten schon konsumiert) und lieferte
-                // eine leere Fehlermeldung. Deshalb hier puffern.
-                let stderrBuffer = LockedDataBuffer()
-
-                reader.readabilityHandler = { fileHandle in
-                    let data = fileHandle.availableData
-                    if data.isEmpty { return }
-                    stderrBuffer.append(data)
-                    if let output = String(data: data, encoding: .utf8) {
-                        if output.contains("time=") {
-                            if let timeString = extractTimeFromFFmpeg(output),
-                               let currentSeconds = timeToSeconds(timeString),
-                               file.duration > 0 {
+                let consumeProgress: @Sendable (Data) -> Void = { data in
+                    if let currentSeconds = progressParser.consume(data),
+                       file.duration > 0 {
                                 let p = min(1, max(0, currentSeconds / file.duration))
                                 let totalP = tracker.update(
                                     index: idx,
@@ -795,20 +1799,34 @@ public struct FFmpegWrapper {
                                     segmentProgress: showIndividualPacmans ? p : totalP,
                                     runID: context.id
                                 )
-                            }
-                        }
                     }
                 }
 
                 do {
                     guard try context.run(process) else { return }
+                    try? errorPipe.fileHandleForWriting.close()
+                    outputReader.start(onChunk: consumeProgress)
                     process.waitUntilExit()
-                    reader.readabilityHandler = nil
-                    // Letzten, evtl. noch im Puffer liegenden stderr-Rest nachlesen,
-                    // damit die Fehlermeldung vollständig ist.
-                    let rest = reader.availableData
-                    if !rest.isEmpty { stderrBuffer.append(rest) }
+                    // Join des Lesers vor Status/Phasenwechsel: Kein Callback aus
+                    // diesem Segment darf danach noch Fortschritt einreihen.
+                    let stderrData = outputReader.waitUntilEOF()
                     if context.isCancelled { return }
+                    do {
+                        // ffmpeg öffnet die URL selbst. Eine während des Lesens
+                        // ersetzte oder in-place geänderte Quelle darf deshalb
+                        // auch bei Exit 0 kein gültiges Segment liefern.
+                        try validateInputSnapshots(
+                            for: [file],
+                            expected: inputSnapshots
+                        )
+                    } catch {
+                        session.enqueueLog(
+                            "❌ \(error.localizedDescription)",
+                            type: .highlight,
+                            runID: context.id
+                        )
+                        return
+                    }
                     if process.terminationStatus == 0 {
                         var fileIsValid = false
                         if let attr = try? FileManager.default.attributesOfItem(atPath: segmentURL.path),
@@ -845,8 +1863,7 @@ public struct FFmpegWrapper {
                             )
                         }
                     } else {
-                        let errorData = stderrBuffer.snapshot()
-                        let errorString = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let errorString = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
                         let errorMessage = (errorString?.isEmpty == false) ? errorString! : "Unbekannter FFmpeg Fehler"
                         session.enqueueLog(
                             "❌ Segment \(idx+1) fehlgeschlagen (Exit-Code \(process.terminationStatus)):\n\(errorMessage)",
@@ -855,10 +1872,6 @@ public struct FFmpegWrapper {
                         )
                     }
                 } catch {
-                    // Auch im Fehlerfall (process.run() wirft) den Handler lösen —
-                    // sonst hält der readabilityHandler das Pipe-Ende dauerhaft fest
-                    // (Handler-/Dateideskriptor-Leck über viele Segmente hinweg).
-                    reader.readabilityHandler = nil
                     if !context.isCancelled {
                         session.enqueueLog(
                             "❌ Prozess-Fehler bei Segment \(idx+1): \(error.localizedDescription)",
@@ -926,7 +1939,8 @@ public struct FFmpegWrapper {
         coverInput: String?,
         audioCodecArguments: [String],
         job: ConversionJob,
-        finalURL: URL
+        finalURL: URL,
+        outputPath: String? = nil
     ) -> [String] {
         var arguments = [
             "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", listFile.path,
@@ -944,7 +1958,13 @@ public struct FFmpegWrapper {
         if coverInput != nil {
             arguments += ["-map", "2:0", "-c:v", "copy", "-disposition:v", "attached_pic"]
         }
-        arguments.append(finalURL.path)
+        if let outputPath {
+            // Der MP4-Muxer leitet das Format aus einem normalen Pfad ab. Beim
+            // deskriptorgebundenen Produktionspfad braucht er es ausdrücklich.
+            arguments += ["-f", "ipod", outputPath]
+        } else {
+            arguments.append(finalURL.path)
+        }
         return arguments
     }
 
@@ -960,6 +1980,8 @@ public struct FFmpegWrapper {
         group: [AudioFile],
         tempDir: URL,
         finalURL: URL,
+        stagingOwnership: StagingOwnership,
+        stagingHandle: StagingOutputHandle,
         progressBase: Double,
         progressScale: Double,
         segmentProgressFraction: Double,
@@ -989,7 +2011,8 @@ public struct FFmpegWrapper {
             coverInput: coverInput,
             audioCodecArguments: audioCodecArguments,
             job: job,
-            finalURL: finalURL
+            finalURL: finalURL,
+            outputPath: "/dev/fd/0"
         )
         return runFinalProcess(
             args: args,
@@ -999,7 +2022,10 @@ public struct FFmpegWrapper {
             progressWeight: progressScale * (1 - segmentProgressFraction),
             phaseDuration: group.reduce(0) { $0 + $1.duration },
             logMessage: logMessage,
-            pacmanTitle: pacmanTitle
+            pacmanTitle: pacmanTitle,
+            stagingURL: finalURL,
+            expectedStagingOwnership: stagingOwnership,
+            stagingHandle: stagingHandle
         )
     }
 
@@ -1010,10 +2036,12 @@ public struct FFmpegWrapper {
         group: [AudioFile],
         tempDir: URL,
         finalURL: URL,
+        stagingOwnership: StagingOwnership,
+        stagingHandle: StagingOutputHandle,
         progressBase: Double,
         progressScale: Double
     ) -> Bool {
-        let wavPaths = runParallelTasks(group: group, tempDir: tempDir, session: session, context: context, progressBase: progressBase, progressWeight: progressScale * 0.2, extensionStr: "wav", showIndividualPacmans: false) { _, file, url in
+        let wavPaths = runParallelTasks(group: group, tempDir: tempDir, session: session, context: context, progressBase: progressBase, progressWeight: progressScale * 0.2, extensionStr: "wav", showIndividualPacmans: false, inputSnapshots: job.plan.inputSnapshots) { _, file, url in
             FFmpegWrapper.getArgsForStandardSlicing(
                 file: file,
                 url: url,
@@ -1029,6 +2057,8 @@ public struct FFmpegWrapper {
             group: group,
             tempDir: tempDir,
             finalURL: finalURL,
+            stagingOwnership: stagingOwnership,
+            stagingHandle: stagingHandle,
             progressBase: progressBase,
             progressScale: progressScale,
             segmentProgressFraction: 0.2,
@@ -1050,10 +2080,12 @@ public struct FFmpegWrapper {
         group: [AudioFile],
         tempDir: URL,
         finalURL: URL,
+        stagingOwnership: StagingOwnership,
+        stagingHandle: StagingOutputHandle,
         progressBase: Double,
         progressScale: Double
     ) -> Bool {
-        let aacPaths = runParallelTasks(group: group, tempDir: tempDir, session: session, context: context, progressBase: progressBase, progressWeight: progressScale * 0.9, extensionStr: "m4a", showIndividualPacmans: true) { _, file, url in
+        let aacPaths = runParallelTasks(group: group, tempDir: tempDir, session: session, context: context, progressBase: progressBase, progressWeight: progressScale * 0.9, extensionStr: "m4a", showIndividualPacmans: true, inputSnapshots: job.plan.inputSnapshots) { _, file, url in
             FFmpegWrapper.getArgsForParallelEncoding(
                 file: file,
                 url: url,
@@ -1069,6 +2101,8 @@ public struct FFmpegWrapper {
             group: group,
             tempDir: tempDir,
             finalURL: finalURL,
+            stagingOwnership: stagingOwnership,
+            stagingHandle: stagingHandle,
             progressBase: progressBase,
             progressScale: progressScale,
             segmentProgressFraction: 0.9,
@@ -1086,7 +2120,11 @@ public struct FFmpegWrapper {
         progressWeight: Double,
         phaseDuration: TimeInterval,
         logMessage: String,
-        pacmanTitle: String
+        pacmanTitle: String,
+        stagingURL: URL? = nil,
+        expectedStagingOwnership: StagingOwnership? = nil,
+        stagingHandle: StagingOutputHandle? = nil,
+        beforeProcessStart: (() -> Void)? = nil
     ) -> Bool {
         session.enqueueSegmentReset(title: pacmanTitle, runID: context.id)
         if context.isCancelled { return false }
@@ -1105,6 +2143,12 @@ public struct FFmpegWrapper {
         let process = Process()
         process.executableURL = ffmpegURL
         process.arguments = args
+        if let stagingHandle {
+            // Foundation erhält den offenen Staging-Deskriptor als stdin und
+            // hält ihn beim Spawn als Dateideskriptor 0 offen. ffmpeg schreibt
+            // nach /dev/fd/0 und folgt dadurch keinem austauschbaren Pfad.
+            process.standardInput = stagingHandle.processInputHandle()
+        }
         let pipe = Pipe()
         process.standardError = pipe
         session.enqueueVerboseLog(
@@ -1115,18 +2159,40 @@ public struct FFmpegWrapper {
         defer { context.unregister(process) }
         
         do {
+            if let stagingURL, let expectedStagingOwnership {
+                guard case .existing(let current) = captureSnapshot(of: stagingURL),
+                      stagingOwnershipMatches(
+                        expectedStagingOwnership,
+                        identity: current,
+                        at: stagingURL
+                      ),
+                      let protectedDirectory = expectedStagingOwnership
+                        .protectedDirectory,
+                      let protectedIdentity = expectedStagingOwnership
+                        .protectedDirectoryIdentity,
+                      let currentDirectory = fileSystemIdentity(
+                        at: protectedDirectory,
+                        followSymlink: false
+                      ),
+                      protectedIdentity.matchesDirectoryEntry(currentDirectory),
+                      temporaryDirectoryOwnerPID(protectedDirectory)
+                        == expectedStagingOwnership.ownerPID else {
+                    session.enqueueLog(
+                        "❌ Geschützte temporäre Ausgabe wurde vor dem ffmpeg-Start ausgetauscht.",
+                        type: .highlight,
+                        runID: context.id
+                    )
+                    return false
+                }
+            }
+            beforeProcessStart?()
             guard try context.run(process) else { return false }
-            let reader = pipe.fileHandleForReading
-            let stderrBuffer = LockedDataBuffer()
-            
-            reader.readabilityHandler = { fileHandle in
-                let data = fileHandle.availableData
-                if data.isEmpty { return }
-                stderrBuffer.append(data)
-                if let output = String(data: data, encoding: .utf8) {
-                    if let timeString = extractTimeFromFFmpeg(output),
-                       let currentSeconds = timeToSeconds(timeString) {
-                        if phaseDuration > 0 {
+            let outputReader = ProcessPipeReader(handle: pipe.fileHandleForReading)
+            let progressParser = FFmpegProgressParser()
+            try? pipe.fileHandleForWriting.close()
+            outputReader.start { data in
+                if let currentSeconds = progressParser.consume(data),
+                   phaseDuration > 0 {
                             let p = min(1, max(0, currentSeconds / phaseDuration))
                             session.enqueueProgress(
                                 mappedProgress(
@@ -1138,15 +2204,11 @@ public struct FFmpegWrapper {
                                 segmentProgress: p,
                                 runID: context.id
                             )
-                        }
-                    }
                 }
             }
             
             process.waitUntilExit()
-            reader.readabilityHandler = nil
-            let rest = reader.availableData
-            if !rest.isEmpty { stderrBuffer.append(rest) }
+            let stderrData = outputReader.waitUntilEOF()
             if context.isCancelled { return false }
             if process.terminationStatus == 0 {
                 session.enqueueProgress(
@@ -1161,7 +2223,7 @@ public struct FFmpegWrapper {
                 )
                 return true
             }
-            let details = String(data: stderrBuffer.snapshot(), encoding: .utf8)?
+            let details = String(data: stderrData, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let suffix = details.map { $0.isEmpty ? "" : "\n\($0)" } ?? ""
             session.enqueueLog(
@@ -1207,28 +2269,16 @@ public struct FFmpegWrapper {
         return out
     }
 
-    /// Liefert den Dateipfad des Covers für ffmpeg. Bevorzugt eine vom Nutzer
-    /// gewählte Bilddatei (`coverPath`). Liegt nur eingebettetes Artwork vor
-    /// (`embeddedCoverData`), wird dieses in `tempDir` geschrieben und sein Pfad
-    /// zurückgegeben — sonst würde ein nur eingebettetes Cover im Output fehlen.
+    /// Schreibt den vor Workerstart aufgenommenen Cover-Snapshot in `tempDir`
+    /// und liefert seinen Pfad für ffmpeg. Damit liest der Mux weder eine später
+    /// ausgetauschte manuelle Bilddatei noch veränderlichen Session-Zustand.
     private static func resolveCoverInputPath(
         job: ConversionJob,
         session: ConversionSession,
         tempDir: URL,
         runID: UUID
     ) -> String? {
-        if let path = job.coverPath {
-            // Existiert die gewählte Cover-Datei nicht mehr (verschoben/gelöscht),
-            // nicht die ganze Konvertierung an ffmpeg scheitern lassen, sondern
-            // ohne Cover fortfahren (ggf. fällt embeddedCoverData ein).
-            if FileManager.default.fileExists(atPath: path) { return path }
-            session.enqueueLog(
-                "⚠️ Cover-Datei nicht mehr vorhanden, fahre ohne dieses Cover fort: \(path)",
-                type: .info,
-                runID: runID
-            )
-        }
-        if let data = job.embeddedCoverData {
+        if let data = job.coverData {
             let coverURL = tempDir.appendingPathComponent("cover.img")
             do {
                 try data.write(to: coverURL)
@@ -1266,6 +2316,426 @@ public struct FFmpegWrapper {
         let ext = finalURL.pathExtension.isEmpty ? "m4b" : finalURL.pathExtension
         let basename = stagingBasename(for: finalURL)
         return parent.appendingPathComponent(".\(basename).partial-\(ownerPID)-\(id.uuidString)").appendingPathExtension(ext)
+    }
+
+    /// Legt den späteren ffmpeg-Output exklusiv an und markiert genau diesen
+    /// Inode per Extended Attribute. ffmpeg öffnet ihn mit `-y`/`O_TRUNC`; der
+    /// Marker bleibt dabei erhalten. Ein untergeschobener Ersatz trägt ihn nicht
+    /// und wird weder beim Abbruch noch durch die Altlastenbereinigung gelöscht.
+    @discardableResult
+    static func createOwnedStagingOutput(
+        _ url: URL,
+        ownerPID: pid_t = ProcessInfo.processInfo.processIdentifier,
+        setOwnershipMarker: (Int32, String) -> Int32 = setStagingOwnershipMarker
+    ) throws -> StagingOwnership {
+        let creation = try createOwnedStagingOutputAndDescriptor(
+            url,
+            ownerPID: ownerPID,
+            setOwnershipMarker: setOwnershipMarker
+        )
+        _ = Darwin.close(creation.descriptor)
+        return creation.ownership
+    }
+
+    private static func setStagingOwnershipMarker(
+        _ descriptor: Int32,
+        _ owner: String
+    ) -> Int32 {
+        owner.withCString { value in
+            stagingOwnerAttribute.withCString { name in
+                Darwin.fsetxattr(
+                    descriptor,
+                    name,
+                    value,
+                    strlen(value),
+                    0,
+                    XATTR_CREATE
+                )
+            }
+        }
+    }
+
+    private static func createOwnedStagingOutputAndDescriptor(
+        _ url: URL,
+        ownerPID: pid_t,
+        setOwnershipMarker: (Int32, String) -> Int32
+    ) throws -> (ownership: StagingOwnership, descriptor: Int32) {
+        let descriptor = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else {
+                errno = EINVAL
+                return -1
+            }
+            return Darwin.open(
+                path,
+                O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW,
+                mode_t(0o644)
+            )
+        }
+        guard descriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        var createdInformation = stat()
+        guard Darwin.fstat(descriptor, &createdInformation) == 0 else {
+            let number = errno
+            _ = Darwin.close(descriptor)
+            throw POSIXError(POSIXErrorCode(rawValue: number) ?? .EIO)
+        }
+        let createdIdentity = FileSystemIdentity(stat: createdInformation)
+        guard Darwin.fchmod(descriptor, mode_t(0o644)) == 0 else {
+            let number = errno
+            _ = Darwin.close(descriptor)
+            _ = quarantineAndRemoveRegularFile(
+                url,
+                expectedIdentity: createdIdentity,
+                cleanupPrefix: ".HB_StagingCleanup_",
+                ownerPID: ownerPID,
+                log: { _ in },
+                stableIdentityOnly: true
+            )
+            throw POSIXError(POSIXErrorCode(rawValue: number) ?? .EIO)
+        }
+        let markerResult = setOwnershipMarker(descriptor, String(ownerPID))
+        let markerError = errno
+        var information = stat()
+        let identityResult = Darwin.fstat(descriptor, &information)
+        let identityError = errno
+        let markerUnsupported = markerResult != 0
+            && (markerError == ENOTSUP || markerError == EOPNOTSUPP)
+        guard markerResult == 0 || markerUnsupported,
+              identityResult == 0 else {
+            _ = Darwin.close(descriptor)
+            _ = quarantineAndRemoveRegularFile(
+                url,
+                expectedIdentity: createdIdentity,
+                cleanupPrefix: ".HB_StagingCleanup_",
+                ownerPID: ownerPID,
+                log: { _ in },
+                stableIdentityOnly: true
+            )
+            let number = identityResult == 0 ? markerError : identityError
+            throw POSIXError(POSIXErrorCode(rawValue: number) ?? .EIO)
+        }
+        return (
+            StagingOwnership(
+                identity: FileSystemIdentity(stat: information),
+                ownerPID: ownerPID,
+                hasPersistentMarker: markerResult == 0,
+                protectedDirectory: nil,
+                protectedDirectoryIdentity: nil
+            ),
+            descriptor
+        )
+    }
+
+    static func currentStagingOwnership(at url: URL) -> StagingOwnership? {
+        guard let identity = fileSystemIdentity(at: url, followSymlink: false)
+        else { return nil }
+        let owner = stagedOutputOwnerPID(url)
+            ?? ProcessInfo.processInfo.processIdentifier
+        return StagingOwnership(
+            identity: identity,
+            ownerPID: owner,
+            hasPersistentMarker: stagedOutputHasOwnershipMarker(
+                url,
+                expectedOwnerPID: owner
+            ),
+            protectedDirectory: nil,
+            protectedDirectoryIdentity: nil
+        )
+    }
+
+    /// Produktions-Staging liegt in einem exklusiv angelegten 0700-Ordner
+    /// neben dem Ziel. ffmpeg erhält nur den Pfad innerhalb dieses Ordners;
+    /// ein anderer Lauf oder ein Dateisynchronisierer kann den Ausgabepfad
+    /// dadurch nicht am frei zugänglichen Zielordner austauschen.
+    static func createProtectedStagingOutput(
+        for finalURL: URL,
+        ownerPID: pid_t = ProcessInfo.processInfo.processIdentifier
+    ) throws -> StagingOutputHandle {
+        let directory = finalURL.deletingLastPathComponent().appendingPathComponent(
+            ".HB_StagingWork_\(ownerPID)-\(UUID().uuidString)"
+        )
+        try createOwnedTempDirectory(directory, ownerPID: ownerPID)
+        guard let directoryIdentity = fileSystemIdentity(
+            at: directory,
+            followSymlink: false
+        ) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let url = directory.appendingPathComponent("entry.m4b")
+        var expectedEntry: CleanupEntryRecord?
+        var retainedDescriptor: Int32?
+        do {
+            let created = try createOwnedStagingOutputAndDescriptor(
+                url,
+                ownerPID: ownerPID,
+                setOwnershipMarker: setStagingOwnershipMarker
+            )
+            retainedDescriptor = created.descriptor
+            let ownership = StagingOwnership(
+                identity: created.ownership.identity,
+                ownerPID: ownerPID,
+                hasPersistentMarker: created.ownership.hasPersistentMarker,
+                protectedDirectory: directory,
+                protectedDirectoryIdentity: directoryIdentity
+            )
+            expectedEntry = ownership.cleanupEntryRecord
+            try writeCleanupEntryIdentity(
+                ownership.identity,
+                in: directory,
+                filename: url.lastPathComponent,
+                stableIdentityOnly: true
+            )
+            return StagingOutputHandle(
+                url: url,
+                ownership: ownership,
+                descriptor: created.descriptor
+            )
+        } catch {
+            if let retainedDescriptor {
+                _ = Darwin.close(retainedDescriptor)
+            }
+            removeOwnedTempDirectory(
+                directory,
+                expectedIdentity: directoryIdentity,
+                expectedOwnerPID: ownerPID,
+                expectedCleanupEntry: expectedEntry
+            )
+            throw error
+        }
+    }
+
+    static func stagedOutputHasOwnershipMarker(
+        _ url: URL,
+        expectedOwnerPID: pid_t
+    ) -> Bool {
+        var bytes = [CChar](repeating: 0, count: 32)
+        let count = url.withUnsafeFileSystemRepresentation { path -> Int in
+            guard let path else { return -1 }
+            return stagingOwnerAttribute.withCString { name in
+                Darwin.getxattr(
+                    path,
+                    name,
+                    &bytes,
+                    bytes.count - 1,
+                    0,
+                    XATTR_NOFOLLOW
+                )
+            }
+        }
+        guard count > 0, count < bytes.count else { return false }
+        return String(decoding: bytes.prefix(count).map(UInt8.init), as: UTF8.self)
+            == String(expectedOwnerPID)
+    }
+
+    static func clearStagingOwnershipMarker(_ url: URL) {
+        _ = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return stagingOwnerAttribute.withCString { name in
+                Darwin.removexattr(path, name, XATTR_NOFOLLOW)
+            }
+        }
+    }
+
+    private static func stagingOwnershipMatches(
+        _ ownership: StagingOwnership?,
+        identity: FileSystemIdentity,
+        at url: URL
+    ) -> Bool {
+        guard let ownership else { return true }
+        return ownership.identity.matchesRegularFileEntry(identity)
+            && (!ownership.hasPersistentMarker
+                || stagedOutputHasOwnershipMarker(
+                    url,
+                    expectedOwnerPID: ownership.ownerPID
+                ))
+    }
+
+    /// Entfernt eine eigene Partial-Datei über einen zufälligen
+    /// Quarantänenamen. Nach dem atomaren Rename wird der am Inode haftende
+    /// Besitzer-Marker erneut geprüft; ein ausgetauschter Eintrag wird
+    /// zurückgestellt und bleibt unangetastet.
+    @discardableResult
+    static func removeOwnedStagedOutput(
+        _ url: URL,
+        expectedOwnership: StagingOwnership? = nil,
+        log: @Sendable (String) -> Void = { _ in },
+        afterQuarantine: ((URL) -> Void)? = nil,
+        beforeRestore: (() -> Void)? = nil
+    ) -> Bool {
+        if captureSnapshot(of: url) == .missing { return true }
+        let owner: pid_t
+        let persistentMarker: Bool
+        let createdIdentity: FileSystemIdentity?
+        if let expectedOwnership {
+            owner = expectedOwnership.ownerPID
+            persistentMarker = expectedOwnership.hasPersistentMarker
+            createdIdentity = expectedOwnership.identity
+        } else if let parsedOwner = stagedOutputOwnerPID(url) {
+            owner = parsedOwner
+            persistentMarker = true
+            createdIdentity = nil
+        } else {
+            log("⚠️ Staging-Eintrag hat keine gültige Besitzer-Markierung und bleibt liegen: \(url.path)")
+            return false
+        }
+        guard case .existing(let current) = captureSnapshot(of: url),
+              current.mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              createdIdentity?.matchesRegularFileEntry(current) ?? true,
+              !persistentMarker || stagedOutputHasOwnershipMarker(
+                url,
+                expectedOwnerPID: owner
+              ) else {
+            log("⚠️ Staging-Eintrag hat keine gültige Besitzer-Markierung oder gehört nicht mehr zu diesem Lauf und bleibt liegen: \(url.path)")
+            return false
+        }
+        return quarantineAndRemoveRegularFile(
+            url,
+            expectedIdentity: current,
+            cleanupPrefix: ".HB_StagingCleanup_",
+            ownerPID: owner,
+            log: log,
+            afterQuarantine: afterQuarantine,
+            beforeRestore: beforeRestore
+        )
+    }
+
+    @discardableResult
+    static func removeProtectedStagingOutput(
+        _ url: URL,
+        ownership: StagingOwnership,
+        log: @Sendable (String) -> Void = { _ in }
+    ) -> Bool {
+        guard let directory = ownership.protectedDirectory,
+              let directoryIdentity = ownership.protectedDirectoryIdentity else {
+            return removeOwnedStagedOutput(
+                url,
+                expectedOwnership: ownership,
+                log: log
+            )
+        }
+        if captureSnapshot(of: directory) == .missing { return true }
+        if captureSnapshot(of: url) == .missing {
+            return removeProtectedStagingDirectoryBound(
+                directory,
+                identity: directoryIdentity,
+                ownership: ownership
+            )
+        }
+        guard let current = fileSystemIdentity(at: url, followSymlink: false),
+              ownership.identity.matchesRegularFileEntry(current),
+              !ownership.hasPersistentMarker || stagedOutputHasOwnershipMarker(
+                url,
+                expectedOwnerPID: ownership.ownerPID
+              ) else {
+            log("⚠️ Geschütztes Staging wurde ausgetauscht und bleibt als Recovery-Rest liegen: \(directory.path)")
+            return false
+        }
+        return removeProtectedStagingDirectoryBound(
+            directory,
+            identity: directoryIdentity,
+            ownership: ownership
+        )
+    }
+
+    @discardableResult
+    static func removeEmptyProtectedStagingDirectory(
+        ownership: StagingOwnership
+    ) -> Bool {
+        guard let directory = ownership.protectedDirectory,
+              let directoryIdentity = ownership.protectedDirectoryIdentity else {
+            return true
+        }
+        return removeProtectedStagingDirectoryBound(
+            directory,
+            identity: directoryIdentity,
+            ownership: ownership
+        )
+    }
+
+    /// Der aktive Lauf löscht seinen geschützten Arbeitsordner direkt über
+    /// einen geöffneten Verzeichnis-Deskriptor. Bei einem vorübergehenden
+    /// Fehler bleibt derselbe Pfad registriert und kann am Laufende erneut
+    /// versucht werden; eine zusätzliche Recovery-Datei bleibt unangetastet.
+    @discardableResult
+    private static func removeProtectedStagingDirectoryBound(
+        _ directory: URL,
+        identity: FileSystemIdentity,
+        ownership: StagingOwnership
+    ) -> Bool {
+        if captureSnapshot(of: directory) == .missing { return true }
+        guard let current = fileSystemIdentity(
+            at: directory,
+            followSymlink: false
+        ),
+        identity.matchesDirectoryEntry(current),
+        temporaryDirectoryOwnerPID(directory) == ownership.ownerPID else {
+            return false
+        }
+        let descriptor = directory.withUnsafeFileSystemRepresentation {
+            path -> Int32 in
+            guard let path else { return -1 }
+            return Darwin.open(
+                path,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+            )
+        }
+        guard descriptor >= 0 else { return false }
+        var boundInformation = stat()
+        let boundMatches = Darwin.fstat(descriptor, &boundInformation) == 0
+            && identity.matchesDirectoryEntry(
+                FileSystemIdentity(stat: boundInformation)
+            )
+            && temporaryDirectoryOwnerPID(descriptor: descriptor)
+                == ownership.ownerPID
+        guard boundMatches else {
+            _ = Darwin.close(descriptor)
+            return false
+        }
+        let emptied = removeRecordedCleanupContentsBound(
+            descriptor: descriptor,
+            record: ownership.cleanupEntryRecord
+        )
+        _ = Darwin.close(descriptor)
+        guard emptied,
+              let stillVisible = fileSystemIdentity(
+                at: directory,
+                followSymlink: false
+              ),
+              identity.matchesDirectoryEntry(stillVisible) else {
+            return false
+        }
+        let removed = directory.withUnsafeFileSystemRepresentation { path in
+            path.map(Darwin.rmdir) ?? -1
+        }
+        return removed == 0 || errno == ENOENT
+    }
+
+    /// Recovery-Namen liegen bewusst außerhalb des `.partial-<PID>-`-Schemas:
+    /// Die Altlastenbereinigung darf einen nach Rollback-Fehler geretteten
+    /// fremden Eintrag auch nach einem Neustart niemals automatisch entfernen.
+    static func recoveryOutputURL(for finalURL: URL, id: UUID = UUID()) -> URL {
+        let parent = finalURL.deletingLastPathComponent()
+        let ext = finalURL.pathExtension.isEmpty ? "m4b" : finalURL.pathExtension
+        let basename = stagingBasename(for: finalURL)
+        return parent.appendingPathComponent(
+            ".\(basename).recovery-\(id.uuidString)"
+        ).appendingPathExtension(ext)
+    }
+
+    private static func preserveRecoveryEntry(
+        from sourceURL: URL,
+        for finalURL: URL,
+        renameOperation: (URL, URL, UInt32) -> Int32
+    ) -> URL? {
+        for _ in 0..<4 {
+            let recoveryURL = recoveryOutputURL(for: finalURL)
+            if renameOperation(sourceURL, recoveryURL, UInt32(RENAME_EXCL)) == 0 {
+                return recoveryURL
+            }
+            if errno != EEXIST { return nil }
+        }
+        return nil
     }
 
     /// Reserviert im Dateinamen Platz für Punkt, Marker, maximale PID, UUID und
@@ -1323,6 +2793,7 @@ public struct FFmpegWrapper {
     ) {
         let fileManager = FileManager.default
         let parent = finalURL.deletingLastPathComponent()
+        cleanupOutputQuarantines(in: parent, log: log)
         let basename = stagingBasename(for: finalURL)
         let prefix = ".\(basename).partial-"
         let expectedExtension = finalURL.pathExtension.isEmpty
@@ -1359,6 +2830,16 @@ public struct FFmpegWrapper {
             // Gleiche Lebend-Prüfung wie bei den Temp-Verzeichnissen: EPERM
             // heißt "existiert, gehört jemand anderem" — also nicht anfassen.
             if Darwin.kill(owner, 0) == 0 || errno == EPERM { continue }
+            // Nur ein vom Erzeuger exklusiv angelegter und am Inode markierter
+            // Eintrag ist unsere Altlast. Ein fremder Ersatz oder eine nach
+            // fehlgeschlagenem Rollback verdrängte Zieldatei bleibt erhalten.
+            guard stagedOutputHasOwnershipMarker(
+                url,
+                expectedOwnerPID: owner
+            ) else {
+                log("⚠️ Unmarkierter Staging-Eintrag bleibt liegen: \(url.path)")
+                continue
+            }
             // `contentsOfDirectory` liefert auch Ordner. Nie rekursiv löschen;
             // den liegengebliebenen Eintrag aber sichtbar melden.
             guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?
@@ -1373,6 +2854,304 @@ public struct FFmpegWrapper {
             beforeUnlink?(url)
             ConversionContext.unlinkStagedOutput(url, log: log)
         }
+    }
+
+    /// Entfernt nach einem Prozessabsturz zurückgebliebene, exklusiv
+    /// angelegte Cleanup-Verzeichnisse neben einem Ausgabeziel. Der exakte Name,
+    /// die Besitzerdatei und ESRCH müssen gemeinsam einen toten Lauf belegen.
+    static func cleanupOutputQuarantines(
+        in parent: URL,
+        log: @Sendable (String) -> Void = { _ in }
+    ) {
+        let prefixes = [
+            ".HB_StagingWork_",
+            ".HB_StagingCleanup_",
+            ".HB_DisplacedCleanup_",
+            ".HB_Cleanup_"
+        ]
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: parent,
+            includingPropertiesForKeys: nil
+        ) else { return }
+        for url in contents {
+            guard let prefix = prefixes.first(where: {
+                url.lastPathComponent.hasPrefix($0)
+            }) else { continue }
+            let suffix = url.lastPathComponent.dropFirst(prefix.count)
+            let parts = suffix.split(separator: "-", maxSplits: 1)
+            guard parts.count == 2,
+                  let owner = pid_t(parts[0]),
+                  owner > 0,
+                  UUID(uuidString: String(parts[1])) != nil,
+                  let identity = fileSystemIdentity(at: url, followSymlink: false),
+                  identity.mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+                  temporaryDirectoryOwnerPID(url) == owner else { continue }
+            guard Darwin.kill(owner, 0) != 0, errno == ESRCH else { continue }
+            guard let entryRecord = cleanupEntryRecord(in: url),
+                  cleanupEntryMatchesRecordedIdentity(
+                    entryRecord,
+                    in: url
+                  ) else {
+                log("⚠️ Cleanup-Rest enthält keinen eindeutig eigenen Eintrag und bleibt liegen: \(url.path)")
+                continue
+            }
+            removeOwnedTempDirectory(
+                url,
+                expectedIdentity: identity,
+                expectedOwnerPID: owner,
+                expectedCleanupEntry: entryRecord
+            )
+            if captureSnapshot(of: url) != .missing {
+                log("⚠️ Verwaister Cleanup-Rest konnte nicht entfernt werden: \(url.path)")
+            }
+        }
+    }
+
+    static func writeCleanupEntryIdentity(
+        _ identity: FileSystemIdentity,
+        in cleanupDirectory: URL,
+        filename: String = "entry",
+        stableIdentityOnly: Bool = false,
+        alternateIdentity: FileSystemIdentity? = nil,
+        alternateStableIdentityOnly: Bool? = nil
+    ) throws {
+        let data = try JSONEncoder().encode(CleanupEntryRecord(
+            identity: identity,
+            filename: filename,
+            stableIdentityOnly: stableIdentityOnly,
+            alternateIdentity: alternateIdentity,
+            alternateStableIdentityOnly: alternateStableIdentityOnly
+        ))
+        try data.write(
+            to: cleanupDirectory.appendingPathComponent(
+                cleanupEntryIdentityFilename
+            ),
+            options: .atomic
+        )
+    }
+
+    private static func cleanupEntryRecord(
+        in cleanupDirectory: URL
+    ) -> CleanupEntryRecord? {
+        let marker = cleanupDirectory.appendingPathComponent(
+            cleanupEntryIdentityFilename
+        )
+        guard let data = try? Data(contentsOf: marker),
+              let record = try? JSONDecoder().decode(
+                CleanupEntryRecord.self,
+                from: data
+              ) else { return nil }
+        return record
+    }
+
+    private static func cleanupEntryMatchesRecordedIdentity(
+        _ record: CleanupEntryRecord,
+        in cleanupDirectory: URL
+    ) -> Bool {
+        let entry = cleanupDirectory.appendingPathComponent(record.filename)
+        switch captureSnapshot(of: entry) {
+        case .missing:
+            return true
+        case .existing(let current):
+            return record.matches(current)
+        case .inaccessible:
+            return false
+        }
+    }
+
+    /// Quarantänisiert eine beim Swap verdrängte, vollständig identifizierte
+    /// Altdatei. Ein Austausch vor dem Rename bleibt am Ursprung; ein Austausch
+    /// danach fällt bei der erneuten Identitätsprüfung auf und wird zurückgestellt.
+    @discardableResult
+    static func removeDisplacedOutput(
+        _ url: URL,
+        expectedIdentity: FileSystemIdentity,
+        cleanupParent: URL? = nil,
+        log: @Sendable (String) -> Void = { _ in },
+        beforeQuarantine: (() -> Void)? = nil,
+        afterQuarantine: ((URL) -> Void)? = nil,
+        beforeRestore: (() -> Void)? = nil
+    ) -> Bool {
+        guard case .existing(let current) = captureSnapshot(of: url),
+              expectedIdentity.matchesDisplacedEntry(current) else {
+            if captureSnapshot(of: url) == .missing { return true }
+            log("⚠️ Verdrängte Ausgabe wurde ausgetauscht und bleibt liegen: \(url.path)")
+            return false
+        }
+        return quarantineAndRemoveRegularFile(
+            url,
+            expectedIdentity: expectedIdentity,
+            cleanupPrefix: ".HB_DisplacedCleanup_",
+            ownerPID: ProcessInfo.processInfo.processIdentifier,
+            cleanupParent: cleanupParent,
+            log: log,
+            beforeQuarantine: beforeQuarantine,
+            afterQuarantine: afterQuarantine,
+            beforeRestore: beforeRestore
+        )
+    }
+
+    /// Verschiebt eine geprüfte Einzeldatei in ein exklusiv angelegtes
+    /// 0700-Cleanup-Verzeichnis. Die anschließende rekursive Entfernung ist an
+    /// dessen offenen Deskriptor gebunden; ein Austausch des sichtbaren
+    /// Quarantänepfads kann daher keine fremde Datei außerhalb dieses eigens
+    /// angelegten Bereichs treffen.
+    @discardableResult
+    private static func quarantineAndRemoveRegularFile(
+        _ url: URL,
+        expectedIdentity: FileSystemIdentity,
+        cleanupPrefix: String,
+        ownerPID: pid_t,
+        cleanupParent: URL? = nil,
+        log: @Sendable (String) -> Void,
+        beforeQuarantine: (() -> Void)? = nil,
+        afterQuarantine: ((URL) -> Void)? = nil,
+        beforeRestore: (() -> Void)? = nil,
+        stableIdentityOnly: Bool = false
+    ) -> Bool {
+        let sourceParent = url.deletingLastPathComponent()
+        let cleanupDirectory = (cleanupParent ?? sourceParent).appendingPathComponent(
+            "\(cleanupPrefix)\(ownerPID)-\(UUID().uuidString)"
+        )
+        do {
+            try createOwnedTempDirectory(cleanupDirectory, ownerPID: ownerPID)
+        } catch {
+            log("⚠️ Cleanup-Verzeichnis konnte nicht angelegt werden: \(cleanupDirectory.path) (\(error.localizedDescription))")
+            return false
+        }
+        guard let cleanupIdentity = fileSystemIdentity(
+            at: cleanupDirectory,
+            followSymlink: false
+        ) else { return false }
+        let entryRecord = CleanupEntryRecord(
+            identity: expectedIdentity,
+            filename: "entry",
+            stableIdentityOnly: stableIdentityOnly
+        )
+        do {
+            try writeCleanupEntryIdentity(
+                expectedIdentity,
+                in: cleanupDirectory,
+                stableIdentityOnly: stableIdentityOnly
+            )
+        } catch {
+            removeOwnedTempDirectory(
+                cleanupDirectory,
+                expectedIdentity: cleanupIdentity,
+                expectedOwnerPID: ownerPID,
+                expectedCleanupEntry: entryRecord
+            )
+            log("⚠️ Cleanup-Identität konnte nicht gesichert werden: \(cleanupDirectory.path) (\(error.localizedDescription))")
+            return false
+        }
+        let quarantined = cleanupDirectory.appendingPathComponent("entry")
+        beforeQuarantine?()
+        guard renameEntry(
+            from: url,
+            to: quarantined,
+            flags: UInt32(RENAME_EXCL)
+        ) == 0 else {
+            let number = errno
+            removeOwnedTempDirectory(
+                cleanupDirectory,
+                expectedIdentity: cleanupIdentity,
+                expectedOwnerPID: ownerPID
+            )
+            if number == ENOENT { return true }
+            log("⚠️ Datei konnte nicht quarantänisiert werden: \(url.path) (\(String(cString: strerror(number))))")
+            return false
+        }
+        let movedMatches: Bool
+        if case .existing(let moved) = captureSnapshot(of: quarantined) {
+            movedMatches = stableIdentityOnly
+                ? expectedIdentity.matchesRegularFileEntry(moved)
+                : expectedIdentity.matchesDisplacedEntry(moved)
+        } else {
+            movedMatches = false
+        }
+        guard movedMatches else {
+            beforeRestore?()
+            let restored = renameEntry(
+                from: quarantined,
+                to: url,
+                flags: UInt32(RENAME_EXCL)
+            ) == 0
+            if restored {
+                removeOwnedTempDirectory(
+                    cleanupDirectory,
+                    expectedIdentity: cleanupIdentity,
+                    expectedOwnerPID: ownerPID,
+                    expectedCleanupEntry: entryRecord
+                )
+                log("⚠️ Ausgetauschte Datei bleibt liegen: \(url.path)")
+                return false
+            }
+            if let recoveryURL = preserveRecoveryEntry(
+                from: quarantined,
+                for: url,
+                renameOperation: {
+                    renameEntry(from: $0, to: $1, flags: $2)
+                }
+            ) {
+                removeOwnedTempDirectory(
+                    cleanupDirectory,
+                    expectedIdentity: cleanupIdentity,
+                    expectedOwnerPID: ownerPID,
+                    expectedCleanupEntry: entryRecord
+                )
+                log("⚠️ Ausgetauschte Datei wurde unter einem Recovery-Namen gesichert: \(recoveryURL.path)")
+                return false
+            }
+            let recoveryDirectory = sourceParent.appendingPathComponent(
+                ".HB_RecoveryCleanup_\(UUID().uuidString)"
+            )
+            let recoveryDirectoryCreated = renameEntry(
+                from: cleanupDirectory,
+                to: recoveryDirectory,
+                flags: UInt32(RENAME_EXCL)
+            ) == 0
+            if !recoveryDirectoryCreated {
+                // Ohne gültige Besitzerdatei nimmt kein automatischer Sweep
+                // diesen nicht eindeutig eigenen Eintrag mehr auf.
+                let descriptor = cleanupDirectory
+                    .withUnsafeFileSystemRepresentation { path -> Int32 in
+                        guard let path else { return -1 }
+                        return Darwin.open(
+                            path,
+                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+                        )
+                    }
+                if descriptor >= 0 {
+                    var information = stat()
+                    if Darwin.fstat(descriptor, &information) == 0,
+                       cleanupIdentity.matchesDirectoryEntry(
+                        FileSystemIdentity(stat: information)
+                       ) {
+                        _ = tempOwnerFilename.withCString {
+                            Darwin.unlinkat(descriptor, $0, 0)
+                        }
+                    }
+                    _ = Darwin.close(descriptor)
+                }
+            }
+            let remainingPath = recoveryDirectoryCreated
+                ? recoveryDirectory.path : cleanupDirectory.path
+            log("⚠️ Ausgetauschte Datei bleibt in einem Recovery-Cleanup-Verzeichnis erhalten: \(remainingPath)")
+            return false
+        }
+        afterQuarantine?(cleanupDirectory)
+        removeOwnedTempDirectory(
+            cleanupDirectory,
+            expectedIdentity: cleanupIdentity,
+            expectedOwnerPID: ownerPID,
+            expectedCleanupEntry: entryRecord
+        )
+        if captureSnapshot(of: cleanupDirectory) != .missing {
+            log("⚠️ Cleanup-Rest bleibt bis zum nächsten Lauf liegen: \(cleanupDirectory.path)")
+        }
+        // Der geprüfte Eintrag liegt nicht mehr unter seinem produktiven
+        // Namen. Ein seltener Cleanup-Rest ist deshalb kein Commit-Fehler.
+        return true
     }
 
     static func regularFileSize(_ url: URL) -> Int64? {
@@ -1390,16 +3169,150 @@ public struct FFmpegWrapper {
         regularFileSize(url) != nil
     }
 
-    /// POSIX rename ersetzt eine bestehende reguläre Datei auf demselben
-    /// Dateisystem atomar. Bis zu diesem Punkt bleibt das bestätigte Original
-    /// unangetastet; bei Fehlern wird nur die eindeutige Partial-Datei entfernt.
-    static func commitStagedOutput(_ stagedURL: URL, to finalURL: URL) throws {
-        guard isNonEmptyRegularFile(stagedURL) else { throw CocoaError(.fileReadCorruptFile) }
-        let result = stagedURL.path.withCString { source in
-            finalURL.path.withCString { destination in Darwin.rename(source, destination) }
+    /// Setzt ein zuvor fehlendes Ziel mit `RENAME_EXCL` ein. Ein bestätigtes
+    /// vorhandenes Ziel wird atomar mit der Staging-Datei getauscht; erst die
+    /// danach tatsächlich verdrängte Datei wird gegen den Bestätigungs-Snapshot
+    /// geprüft. Bei Abweichung tauscht die Funktion sofort zurück.
+    @discardableResult
+    static func commitStagedOutput(
+        _ stagedURL: URL,
+        to finalURL: URL,
+        expectedDestination: OutputDestinationSnapshot,
+        expectedStagingOwnership: StagingOwnership? = nil,
+        beforeRename: (() -> Void)? = nil,
+        renameOperation: (URL, URL, UInt32) -> Int32 = {
+            renameEntry(from: $0, to: $1, flags: $2)
+        },
+        unlinkDisplacedOutput: ((URL, FileSystemIdentity) -> Bool)? = nil
+    ) throws -> Bool {
+        guard case .existing(let expectedStagedIdentity) = captureSnapshot(of: stagedURL),
+              expectedStagedIdentity.mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              expectedStagedIdentity.size > 0 else {
+            throw CocoaError(.fileReadCorruptFile)
         }
-        guard result == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        if let ownership = expectedStagingOwnership {
+            guard stagingOwnershipMatches(
+                ownership,
+                identity: expectedStagedIdentity,
+                at: stagedURL
+            ) else {
+                throw ConversionOutputError.stagingChanged(stagedURL)
+            }
+        }
+        beforeRename?()
+
+        switch expectedDestination {
+        case .missing:
+            guard renameOperation(stagedURL, finalURL, UInt32(RENAME_EXCL)) == 0 else {
+                let number = errno
+                if number == EEXIST { throw ConversionOutputError.destinationChanged(finalURL) }
+                throw POSIXError(POSIXErrorCode(rawValue: number) ?? .EIO)
+            }
+            guard case .existing(let movedIdentity) = captureSnapshot(of: finalURL),
+                  expectedStagedIdentity.matchesDisplacedEntry(movedIdentity),
+                  stagingOwnershipMatches(
+                    expectedStagingOwnership,
+                    identity: movedIdentity,
+                    at: finalURL
+                  ) else {
+                guard renameOperation(finalURL, stagedURL, UInt32(RENAME_EXCL)) == 0 else {
+                    let rollbackError = errno
+                    let recoveryURL = preserveRecoveryEntry(
+                        from: finalURL,
+                        for: finalURL,
+                        renameOperation: renameOperation
+                    ) ?? finalURL
+                    throw ConversionOutputError.restoreFailed(
+                        finalURL,
+                        recoveryURL: recoveryURL,
+                        errno: rollbackError
+                    )
+                }
+                throw ConversionOutputError.stagingChanged(stagedURL)
+            }
+            return true
+        case .inaccessible(let number):
+            throw ConversionOutputError.destinationInaccessible(finalURL, number)
+        case .existing(let expectedIdentity):
+            guard captureSnapshot(of: finalURL) == .existing(expectedIdentity) else {
+                throw ConversionOutputError.destinationChanged(finalURL)
+            }
+            guard expectedIdentity.mode & mode_t(S_IFMT) != mode_t(S_IFDIR) else {
+                throw ConversionOutputError.destinationIsDirectory(finalURL)
+            }
+            if let ownership = expectedStagingOwnership,
+               let protectedDirectory = ownership.protectedDirectory,
+               let protectedIdentity = ownership.protectedDirectoryIdentity {
+                guard let currentDirectory = fileSystemIdentity(
+                    at: protectedDirectory,
+                    followSymlink: false
+                ),
+                protectedIdentity.matchesDirectoryEntry(currentDirectory),
+                temporaryDirectoryOwnerPID(protectedDirectory)
+                    == ownership.ownerPID else {
+                    throw ConversionOutputError.stagingChanged(stagedURL)
+                }
+                // Direkt nach RENAME_SWAP enthält entry.m4b das alte Ziel.
+                // Ein Absturz in diesem Fenster darf den Staging-Ordner beim
+                // nächsten Lauf trotzdem eindeutig als aufräumbar erkennen.
+                try writeCleanupEntryIdentity(
+                    ownership.identity,
+                    in: protectedDirectory,
+                    filename: stagedURL.lastPathComponent,
+                    stableIdentityOnly: true,
+                    alternateIdentity: expectedIdentity,
+                    alternateStableIdentityOnly: false
+                )
+            }
+            guard renameOperation(stagedURL, finalURL, UInt32(RENAME_SWAP)) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            let movedStagingMatches: Bool
+            if case .existing(let movedIdentity) = captureSnapshot(of: finalURL) {
+                movedStagingMatches = expectedStagedIdentity
+                    .matchesDisplacedEntry(movedIdentity)
+                    && stagingOwnershipMatches(
+                        expectedStagingOwnership,
+                        identity: movedIdentity,
+                        at: finalURL
+                    )
+            } else {
+                movedStagingMatches = false
+            }
+            let displacedDestinationMatches: Bool
+            if case .existing(let displacedIdentity) = captureSnapshot(of: stagedURL) {
+                displacedDestinationMatches = expectedIdentity
+                    .matchesDisplacedEntry(displacedIdentity)
+            } else {
+                displacedDestinationMatches = false
+            }
+            guard movedStagingMatches, displacedDestinationMatches else {
+                guard renameOperation(stagedURL, finalURL, UInt32(RENAME_SWAP)) == 0 else {
+                    let rollbackError = errno
+                    let recoveryURL = preserveRecoveryEntry(
+                        from: stagedURL,
+                        for: finalURL,
+                        renameOperation: renameOperation
+                    ) ?? stagedURL
+                    throw ConversionOutputError.restoreFailed(
+                        finalURL,
+                        recoveryURL: recoveryURL,
+                        errno: rollbackError
+                    )
+                }
+                if !movedStagingMatches {
+                    throw ConversionOutputError.stagingChanged(stagedURL)
+                }
+                throw ConversionOutputError.destinationChanged(finalURL)
+            }
+            // Das bestätigte alte Ziel liegt jetzt unter dem eindeutigen
+            // Staging-Namen. `unlink` entfernt nur diesen Eintrag, nie rekursiv.
+            return unlinkDisplacedOutput?(stagedURL, expectedIdentity)
+                ?? removeDisplacedOutput(
+                    stagedURL,
+                    expectedIdentity: expectedIdentity,
+                    cleanupParent: finalURL.deletingLastPathComponent()
+                )
         }
     }
 
@@ -1434,41 +3347,392 @@ public struct FFmpegWrapper {
         return .cancelled
     }
 
-    static func createOwnedTempDirectory(_ url: URL) throws {
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        let owner = String(ProcessInfo.processInfo.processIdentifier)
-        try owner.write(
-            to: url.appendingPathComponent(tempOwnerFilename),
-            atomically: true,
-            encoding: .utf8
-        )
+    static func createOwnedTempDirectory(
+        _ url: URL,
+        ownerPID: pid_t = ProcessInfo.processInfo.processIdentifier
+    ) throws {
+        let created = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else {
+                errno = EINVAL
+                return -1
+            }
+            return Darwin.mkdir(path, mode_t(0o700))
+        }
+        guard created == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let owner = String(ownerPID)
+        do {
+            try owner.write(
+                to: url.appendingPathComponent(tempOwnerFilename),
+                atomically: true,
+                encoding: .utf8
+            )
+        } catch {
+            // Das exklusiv erzeugte Blatt ist bei fehlgeschlagenem Marker noch
+            // leer. `rmdir` kann deshalb keine untergeschobenen Inhalte löschen.
+            _ = url.withUnsafeFileSystemRepresentation { path in
+                path.map(Darwin.rmdir) ?? -1
+            }
+            throw error
+        }
     }
 
-    static func temporaryDirectoryHasLiveOwner(_ url: URL) -> Bool {
+    static func temporaryDirectoryOwnerPID(_ url: URL) -> pid_t? {
         let marker = url.appendingPathComponent(tempOwnerFilename)
         guard let text = try? String(contentsOf: marker, encoding: .utf8),
               let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
-              pid > 0 else { return false }
+              pid > 0 else { return nil }
+        return pid_t(pid)
+    }
+
+    private static func temporaryDirectoryOwnerPID(
+        descriptor: Int32
+    ) -> pid_t? {
+        let markerDescriptor = tempOwnerFilename.withCString {
+            Darwin.openat(
+                descriptor,
+                $0,
+                O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+            )
+        }
+        guard markerDescriptor >= 0 else { return nil }
+        defer { _ = Darwin.close(markerDescriptor) }
+        var information = stat()
+        guard Darwin.fstat(markerDescriptor, &information) == 0,
+              information.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              information.st_size > 0,
+              information.st_size <= 32 else { return nil }
+        var bytes = [UInt8](repeating: 0, count: Int(information.st_size))
+        let count = bytes.withUnsafeMutableBytes {
+            Darwin.read(markerDescriptor, $0.baseAddress, $0.count)
+        }
+        guard count == bytes.count,
+              let text = String(bytes: bytes, encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              pid > 0 else { return nil }
+        return pid_t(pid)
+    }
+
+    static func temporaryDirectoryHasLiveOwner(_ url: URL) -> Bool {
+        guard let pid = temporaryDirectoryOwnerPID(url) else { return false }
         return Darwin.kill(pid_t(pid), 0) == 0 || errno == EPERM
     }
 
+    /// Entfernt Inhalte ausschließlich relativ zu einem geöffneten
+    /// Verzeichnis-Deskriptor. Weder Symlinks noch ein später am sichtbaren Pfad
+    /// eingesetztes Ersatzverzeichnis werden dabei rekursiv verfolgt.
+    private static func removeDirectoryContentsBound(to descriptor: Int32) -> Bool {
+        let duplicate = Darwin.dup(descriptor)
+        guard duplicate >= 0, let stream = Darwin.fdopendir(duplicate) else {
+            if duplicate >= 0 { _ = Darwin.close(duplicate) }
+            return false
+        }
+        defer { Darwin.closedir(stream) }
+        let directoryDescriptor = Darwin.dirfd(stream)
+
+        while true {
+            errno = 0
+            guard let entry = Darwin.readdir(stream) else { return errno == 0 }
+            let name = withUnsafePointer(to: entry.pointee.d_name) { pointer in
+                pointer.withMemoryRebound(
+                    to: CChar.self,
+                    capacity: Int(MAXNAMLEN) + 1
+                ) { String(cString: $0) }
+            }
+            if name == "." || name == ".." { continue }
+
+            var information = stat()
+            let inspected = name.withCString {
+                Darwin.fstatat(
+                    directoryDescriptor,
+                    $0,
+                    &information,
+                    AT_SYMLINK_NOFOLLOW
+                )
+            }
+            guard inspected == 0 else { return false }
+            if information.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) {
+                let child = name.withCString {
+                    Darwin.openat(
+                        directoryDescriptor,
+                        $0,
+                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+                    )
+                }
+                guard child >= 0 else { return false }
+                let emptied = removeDirectoryContentsBound(to: child)
+                _ = Darwin.close(child)
+                guard emptied,
+                      name.withCString({
+                          Darwin.unlinkat(directoryDescriptor, $0, AT_REMOVEDIR)
+                      }) == 0 else { return false }
+            } else {
+                guard name.withCString({
+                    Darwin.unlinkat(directoryDescriptor, $0, 0)
+                }) == 0 else { return false }
+            }
+        }
+    }
+
+    private static func cleanupEntryMatchesRecordedIdentity(
+        _ record: CleanupEntryRecord,
+        directoryDescriptor: Int32
+    ) -> Bool {
+        var information = stat()
+        let result = record.filename.withCString {
+            Darwin.fstatat(
+                directoryDescriptor,
+                $0,
+                &information,
+                AT_SYMLINK_NOFOLLOW
+            )
+        }
+        if result != 0 { return errno == ENOENT }
+        let current = FileSystemIdentity(stat: information)
+        return record.matches(current)
+    }
+
+    private static func directoryEntryNames(
+        descriptor: Int32
+    ) -> [String]? {
+        let duplicate = Darwin.dup(descriptor)
+        guard duplicate >= 0, let stream = Darwin.fdopendir(duplicate) else {
+            if duplicate >= 0 { _ = Darwin.close(duplicate) }
+            return nil
+        }
+        defer { Darwin.closedir(stream) }
+        var names: [String] = []
+        while true {
+            errno = 0
+            guard let entry = Darwin.readdir(stream) else {
+                return errno == 0 ? names : nil
+            }
+            let name = withUnsafePointer(to: entry.pointee.d_name) {
+                $0.withMemoryRebound(
+                    to: CChar.self,
+                    capacity: Int(MAXNAMLEN) + 1
+                ) { String(cString: $0) }
+            }
+            if name != "." && name != ".." { names.append(name) }
+        }
+    }
+
+    /// Entfernt aus einem Ausgabe-Cleanup-Ordner ausschließlich die drei
+    /// aufgezeichneten Einträge. Zusätzliche Dateien sind Recovery-Daten und
+    /// verhindern jede automatische Löschung des Ordners.
+    private static func removeRecordedCleanupContentsBound(
+        descriptor: Int32,
+        record: CleanupEntryRecord,
+        beforeEntryQuarantine: ((Int32) -> Void)? = nil
+    ) -> Bool {
+        guard let names = directoryEntryNames(descriptor: descriptor) else {
+            return false
+        }
+        // Der feste Zwischenname ist Teil des Crash-Protokolls: Stirbt der
+        // Prozess nach dem Rename, erkennt der nächste Sweep genau diesen
+        // Zustand und prüft dessen Inode erneut gegen denselben Datensatz.
+        let quarantineName = ".HB_EntryCleanup"
+        let allowed = Set([
+            tempOwnerFilename,
+            cleanupEntryIdentityFilename,
+            record.filename,
+            quarantineName
+        ])
+        let hasEntry = names.contains(record.filename)
+        let hasQuarantine = names.contains(quarantineName)
+        guard Set(names).isSubset(of: allowed),
+              !(hasEntry && hasQuarantine) else { return false }
+
+        var movedDuringThisCall = false
+        if hasEntry {
+            guard cleanupEntryMatchesRecordedIdentity(
+                record,
+                directoryDescriptor: descriptor
+            ) else { return false }
+            beforeEntryQuarantine?(descriptor)
+            let quarantined = record.filename.withCString { source in
+                quarantineName.withCString { destination in
+                    Darwin.renameatx_np(
+                        descriptor,
+                        source,
+                        descriptor,
+                        destination,
+                        UInt32(RENAME_EXCL)
+                    )
+                }
+            }
+            guard quarantined == 0 else { return false }
+            movedDuringThisCall = true
+        }
+        if hasEntry || hasQuarantine {
+            var movedInformation = stat()
+            let inspected = quarantineName.withCString {
+                Darwin.fstatat(
+                    descriptor,
+                    $0,
+                    &movedInformation,
+                    AT_SYMLINK_NOFOLLOW
+                )
+            }
+            guard inspected == 0,
+                  record.matches(FileSystemIdentity(stat: movedInformation)) else {
+                // Der Name wurde nach der Vorprüfung ausgetauscht. Der atomar
+                // quarantänisierte fremde Eintrag wird zurückgestellt; falls
+                // dort inzwischen wieder etwas liegt, bleibt er unter dem
+                // aufgezeichneten Recovery-Zwischennamen erhalten.
+                if movedDuringThisCall {
+                    _ = quarantineName.withCString { source in
+                        record.filename.withCString { destination in
+                            Darwin.renameatx_np(
+                                descriptor,
+                                source,
+                                descriptor,
+                                destination,
+                                UInt32(RENAME_EXCL)
+                            )
+                        }
+                    }
+                }
+                return false
+            }
+            guard quarantineName.withCString({
+                Darwin.unlinkat(descriptor, $0, 0)
+            }) == 0 else { return false }
+        }
+        for marker in [cleanupEntryIdentityFilename, tempOwnerFilename]
+        where names.contains(marker) {
+            guard marker.withCString({
+                Darwin.unlinkat(descriptor, $0, 0)
+            }) == 0 else { return false }
+        }
+        return directoryEntryNames(descriptor: descriptor)?.isEmpty == true
+    }
+
+    static func removeOwnedTempDirectory(
+        _ url: URL,
+        expectedIdentity: FileSystemIdentity,
+        expectedOwnerPID: pid_t = ProcessInfo.processInfo.processIdentifier,
+        beforeQuarantine: (() -> Void)? = nil,
+        beforeBoundRemoval: (() -> Void)? = nil,
+        beforeRecordedEntryQuarantine: ((Int32) -> Void)? = nil,
+        expectedCleanupEntry: CleanupEntryRecord? = nil
+    ) {
+        guard let currentIdentity = fileSystemIdentity(at: url, followSymlink: false),
+              expectedIdentity.matchesDirectoryEntry(currentIdentity),
+              temporaryDirectoryOwnerPID(url) == expectedOwnerPID else { return }
+        beforeQuarantine?()
+
+        let quarantine = url.deletingLastPathComponent().appendingPathComponent(
+            ".HB_Cleanup_\(expectedOwnerPID)-\(UUID().uuidString)"
+        )
+        guard renameEntry(
+            from: url,
+            to: quarantine,
+            flags: UInt32(RENAME_EXCL)
+        ) == 0 else { return }
+
+        guard let movedIdentity = fileSystemIdentity(
+            at: quarantine,
+            followSymlink: false
+        ),
+        expectedIdentity.matchesDirectoryEntry(movedIdentity),
+        temporaryDirectoryOwnerPID(quarantine) == expectedOwnerPID else {
+            // Der Pfad wurde nach der Vorprüfung ausgetauscht. Den fremden
+            // Eintrag atomar an seinen ursprünglichen Namen zurückstellen; bei
+            // einem weiteren Rennen bleibt er sicher unter dem Quarantänenamen.
+            _ = renameEntry(
+                from: quarantine,
+                to: url,
+                flags: UInt32(RENAME_EXCL)
+            )
+            return
+        }
+        beforeBoundRemoval?()
+        let descriptor = quarantine.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return Darwin.open(
+                path,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+            )
+        }
+        guard descriptor >= 0 else { return }
+        var boundInformation = stat()
+        let boundMatches = Darwin.fstat(descriptor, &boundInformation) == 0
+            && expectedIdentity.device == boundInformation.st_dev
+            && expectedIdentity.inode == boundInformation.st_ino
+            && boundInformation.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR)
+        guard boundMatches else {
+            _ = Darwin.close(descriptor)
+            return
+        }
+        if let expectedCleanupEntry {
+            let emptied = removeRecordedCleanupContentsBound(
+                descriptor: descriptor,
+                record: expectedCleanupEntry,
+                beforeEntryQuarantine: beforeRecordedEntryQuarantine
+            )
+            guard emptied else {
+                // Der gebundene Ordner enthält zusätzliche oder ausgetauschte
+                // Recovery-Daten. Die Besitzerdatei bleibt erhalten, damit ein
+                // späterer Lauf den eigenen Rest erneut prüfen kann.
+                _ = Darwin.close(descriptor)
+                return
+            }
+            _ = Darwin.close(descriptor)
+            _ = quarantine.withUnsafeFileSystemRepresentation { path in
+                path.map(Darwin.rmdir) ?? -1
+            }
+            return
+        }
+        let emptied = removeDirectoryContentsBound(to: descriptor)
+        _ = Darwin.close(descriptor)
+        guard emptied else { return }
+        // `rmdir` ist absichtlich nicht rekursiv: Wurde der sichtbare Pfad nach
+        // dem gebundenen Leeren ausgetauscht, bleibt ein Ersatz mit Inhalt stehen.
+        _ = quarantine.withUnsafeFileSystemRepresentation { path in
+            path.map(Darwin.rmdir) ?? -1
+        }
+    }
+
     public static func cleanupOldTempDirectories() {
+        cleanupOldTempDirectories(
+            in: URL(fileURLWithPath: NSTemporaryDirectory()),
+            now: Date()
+        )
+    }
+
+    static func cleanupOldTempDirectories(in tempDir: URL, now: Date) {
         let fileManager = FileManager.default
-        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
         guard let contents = try? fileManager.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: [.creationDateKey], options: []) else { return }
-        
-        let now = Date()
         let oneDayAgo = now.addingTimeInterval(-24 * 3600)
         
         for url in contents {
-            if url.lastPathComponent.hasPrefix("HB_Temp_") {
-                if let resourceValues = try? url.resourceValues(forKeys: [.creationDateKey]),
-                   let creationDate = resourceValues.creationDate {
-                    if creationDate < oneDayAgo, !temporaryDirectoryHasLiveOwner(url) {
-                        try? fileManager.removeItem(at: url)
-                    }
-                }
-            }
+            let name = url.lastPathComponent
+            let isTempName = name.hasPrefix("HB_Temp_")
+                && UUID(uuidString: String(name.dropFirst("HB_Temp_".count))) != nil
+            let cleanupSuffix = name.hasPrefix(".HB_Cleanup_")
+                ? String(name.dropFirst(".HB_Cleanup_".count)) : ""
+            let cleanupParts = cleanupSuffix.split(separator: "-", maxSplits: 1)
+            let cleanupOwner = cleanupParts.first.flatMap { pid_t($0) }
+            let isCleanupName = cleanupParts.count == 2
+                && cleanupOwner != nil
+                && UUID(uuidString: String(cleanupParts[1])) != nil
+            guard (isTempName || isCleanupName),
+                  let resourceValues = try? url.resourceValues(forKeys: [.creationDateKey]),
+                  let creationDate = resourceValues.creationDate,
+                  creationDate < oneDayAgo,
+                  let identity = fileSystemIdentity(at: url, followSymlink: false),
+                  identity.mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+                  let owner = temporaryDirectoryOwnerPID(url),
+                  !isCleanupName || cleanupOwner == owner else { continue }
+            // Nur ESRCH beweist, dass der markierte Besitzer nicht mehr lebt.
+            guard Darwin.kill(owner, 0) != 0, errno == ESRCH else { continue }
+            removeOwnedTempDirectory(
+                url,
+                expectedIdentity: identity,
+                expectedOwnerPID: owner
+            )
         }
     }
 
@@ -1481,14 +3745,18 @@ public struct FFmpegWrapper {
     }
 
     static func extractTimeFromFFmpeg(_ output: String) -> String? {
-        let pattern = "time=(\\d{2}:\\d{2}:\\d{2}.\\d{2})"
-        if let regex = try? NSRegularExpression(pattern: pattern),
-           let match = regex.firstMatch(in: output, range: NSRange(output.startIndex..., in: output)) {
-            if let range = Range(match.range(at: 1), in: output) {
-                return String(output[range])
-            }
+        extractTimesFromFFmpeg(output).last
+    }
+
+    static func extractTimesFromFFmpeg(_ output: String) -> [String] {
+        let pattern = "time=(\\d{2}:\\d{2}:\\d{2}\\.\\d{2})"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        return regex.matches(
+            in: output,
+            range: NSRange(output.startIndex..., in: output)
+        ).compactMap { match in
+            Range(match.range(at: 1), in: output).map { String(output[$0]) }
         }
-        return nil
     }
 
     private static func formatFileSize(_ bytes: Int64) -> String {

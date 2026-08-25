@@ -415,7 +415,7 @@ struct KloepplerCLI: AsyncParsableCommand {
         print(conversionPlan.outputURLs.count == 1 ? "Zieldatei:" : "Zieldateien:")
         conversionPlan.outputURLs.forEach { print("  \($0.path)") }
 
-        let existingOutputs = conversionPlan.outputURLs.filter { FileManager.default.fileExists(atPath: $0.path) }
+        let existingOutputs = conversionPlan.outputURLsRequiringOverwriteConfirmation
         if !existingOutputs.isEmpty {
             let names = existingOutputs.map(\.lastPathComponent).joined(separator: ", ")
             if force {

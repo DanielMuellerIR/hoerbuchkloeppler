@@ -101,7 +101,7 @@ struct ContentView: View {
                     outputURL: finalURL,
                     maxDurationHours: session.settings.maxDurationHours
                 )
-                let collisions = plan.outputURLs.filter { FileManager.default.fileExists(atPath: $0.path) }
+                let collisions = plan.outputURLsRequiringOverwriteConfirmation
                 if !collisions.isEmpty {
                     self.pendingPlan = plan
                     self.collidingOutputNames = collisions.map(\.lastPathComponent)
