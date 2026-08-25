@@ -225,6 +225,17 @@ struct BuildChapterMetadataTests {
 @Suite("AudioFile – parseFFMetadataChapters")
 struct ParseFFMetadataChaptersTests {
 
+    @Test("Eingebettetes Artwork braucht ein dekodierbares Bild innerhalb der Größenobergrenze")
+    func validatesEmbeddedArtwork() throws {
+        let png = try onePixelPNGData()
+
+        #expect(AudioFile.validatedEmbeddedArtworkData(png) == png)
+        #expect(AudioFile.validatedEmbeddedArtworkData(Data("kein Bild".utf8)) == nil)
+        #expect(AudioFile.validatedEmbeddedArtworkData(
+            Data(count: FFmpegWrapper.maximumCoverByteCount + 1)
+        ) == nil)
+    }
+
     @Test("Einfache Kapitel werden gelesen")
     func parsesSimpleChapters() {
         let text = """
@@ -326,6 +337,90 @@ struct ParseFFMetadataChaptersTests {
     @Test("Text ohne [CHAPTER] ergibt keine Kapitel")
     func noChapterBlocks() {
         #expect(AudioFile.parseFFMetadataChapters(";FFMETADATA1\ntitle=Buch\n").isEmpty)
+    }
+
+    @Test("Kaputte Pflichtwerte werden nicht als plausible Nullwerte übernommen")
+    func malformedRequiredValuesStayInvalid() {
+        let malformedStart = AudioFile.parseFFMetadataChapters("""
+        [CHAPTER]
+        TIMEBASE=1/1000
+        START=keine-zahl
+        END=10000
+        title=Kaputt
+        """)
+        let malformedEnd = AudioFile.parseFFMetadataChapters("""
+        [CHAPTER]
+        TIMEBASE=1/1000
+        START=0
+        END=keine-zahl
+        title=Kaputt
+        """)
+        let malformedTimebase = AudioFile.parseFFMetadataChapters("""
+        [CHAPTER]
+        TIMEBASE=1/0
+        START=0
+        END=10000
+        title=Kaputt
+        """)
+
+        #expect(!AudioFile.chaptersAreValid(malformedStart, totalDuration: 10))
+        #expect(!AudioFile.chaptersAreValid(malformedEnd, totalDuration: 10))
+        #expect(!AudioFile.chaptersAreValid(malformedTimebase, totalDuration: 10))
+    }
+
+    @Test("Der ffmetadata-Leser behält nie Daten oberhalb seiner Grenze")
+    func boundedMetadataReader() {
+        let pipe = Pipe()
+        pipe.fileHandleForWriting.write(Data(repeating: 0x41, count: 9))
+        pipe.fileHandleForWriting.closeFile()
+        var limitCallbackCount = 0
+
+        let output = AudioFile.readFFMetadata(
+            from: pipe.fileHandleForReading,
+            maximumByteCount: 8,
+            onAbort: { limitCallbackCount += 1 }
+        )
+
+        #expect(output.exceededLimit)
+        #expect(!output.timedOut)
+        #expect(!output.readFailed)
+        #expect(output.data.isEmpty)
+        #expect(limitCallbackCount == 1)
+    }
+
+    @Test("Der ffmetadata-Leser beendet eine offene Pipe nach seiner Frist")
+    func metadataReaderTimesOut() {
+        let pipe = Pipe()
+        var abortCallbackCount = 0
+
+        let output = AudioFile.readFFMetadata(
+            from: pipe.fileHandleForReading,
+            maximumByteCount: 8,
+            timeout: 0.01,
+            onAbort: { abortCallbackCount += 1 }
+        )
+        pipe.fileHandleForWriting.closeFile()
+
+        #expect(output.timedOut)
+        #expect(!output.exceededLimit)
+        #expect(!output.readFailed)
+        #expect(output.data.isEmpty)
+        #expect(abortCallbackCount == 1)
+    }
+
+    @Test("EOF ersetzt die Frist für den Prozessabschluss nicht")
+    func processExitHasDeadline() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["5"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+
+        #expect(!AudioFile.waitForProcessExit(process, timeout: 0.01))
+        ProcessTerminator.terminateAndWait([process], graceInterval: 0.01)
+        process.waitUntilExit()
+        #expect(!process.isRunning)
     }
 }
 

@@ -1,7 +1,15 @@
 import Foundation
 import AVFoundation
+import ImageIO
+import Darwin
 
 extension AudioFile {
+    /// Selbst eine beschädigte Datei darf die Kapitelanalyse nicht mit einer
+    /// beliebig großen ffmetadata-Ausgabe im Speicher wachsen lassen. Acht MiB
+    /// reichen auch bei sehr vielen Kapiteln um Größenordnungen aus.
+    static let maximumFFMetadataByteCount = 8 * 1024 * 1024
+    static let chapterExtractionTimeout: TimeInterval = 30
+
     /// Extrahiert das eingebettete Cover aus einer Audiodatei.
     /// Nutzt sowohl Common-Keys als auch Raw-Keys für maximale Kompatibilität (MP3, M4A, etc.)
     public static func extractEmbeddedArtwork(from url: URL) async -> Data? {
@@ -16,17 +24,39 @@ extension AudioFile {
             if let commonKey = item.commonKey?.rawValue, (commonKey == "artwork" || commonKey == "cover") {
                 let data = try? await item.load(.dataValue)
                 guard !taskCancellationRequested() else { return nil }
-                if let data { return data }
+                if let data = validatedEmbeddedArtworkData(data) { return data }
             }
             
             // 2. Prüfung über den rohen Key (oft nötig für ID3/MP3)
-            if let key = item.key as? String, (key.contains("artwork") || key.contains("cover")) {
+            if let key = item.key {
+                let keyString = String(describing: key).lowercased()
+                guard keyString.contains("artwork") || keyString.contains("cover") else { continue }
                 let data = try? await item.load(.dataValue)
                 guard !taskCancellationRequested() else { return nil }
-                if let data { return data }
+                if let data = validatedEmbeddedArtworkData(data) { return data }
             }
         }
         return nil
+    }
+
+    /// Übernimmt für eingebettete Cover dieselbe Größen- und Decode-Grenze wie
+    /// der Dateipfad für ein manuell gewähltes Cover. Ein kaputter erster
+    /// Artwork-Tag darf die Suche nach einem späteren gültigen Tag nicht beenden.
+    static func validatedEmbeddedArtworkData(_ data: Data?) -> Data? {
+        guard let data,
+              !data.isEmpty,
+              data.count <= FFmpegWrapper.maximumCoverByteCount,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) > 0 else { return nil }
+        let options = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 32,
+            kCGImageSourceShouldCacheImmediately: true
+        ] as CFDictionary
+        guard CGImageSourceCreateThumbnailAtIndex(source, 0, options) != nil else {
+            return nil
+        }
+        return data
     }
 
     /// Analysiert m4b/mp4 Dateien mit dem **gebündelten** `ffmpeg` und extrahiert
@@ -64,8 +94,9 @@ extension AudioFile {
 
         let pipe = Pipe()
         process.standardOutput = pipe
-        // stderr getrennt verwerfen, damit es die Metadaten-Ausgabe nicht stört.
-        process.standardError = Pipe()
+        // stderr getrennt verwerfen, damit es weder die Metadaten-Ausgabe stört
+        // noch in einer ungelesenen Pipe den Kindprozess blockieren kann.
+        process.standardError = FileHandle.nullDevice
         guard registerProcess(process) else { return [] }
         defer { unregisterProcess(process) }
 
@@ -73,6 +104,7 @@ extension AudioFile {
             do {
                 guard !shouldCancel(), !taskCancellationRequested() else { return [] }
                 try process.run()
+                try? pipe.fileHandleForWriting.close()
                 // Cancel kann genau zwischen dem letzten Check und `run()` liegen.
                 // Der Context hat den damals noch nicht laufenden Process dann nicht
                 // beendet; nach dem Start deshalb nochmals prüfen.
@@ -80,12 +112,49 @@ extension AudioFile {
                     ProcessTerminator.requestTermination(process)
                 }
                 // Erst die Pipe leeren, DANN auf Exit warten — sonst Deadlock, wenn
-                // die Kapitelliste den Pipe-Puffer (~64 KB) füllt.
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                // die Kapitelliste den Pipe-Puffer (~64 KB) füllt. Die Datenmenge
+                // bleibt begrenzt; bei Überschreitung beendet der Leser ffmpeg und
+                // kehrt ohne weitere Datenübernahme zurück.
+                let extractionStart = DispatchTime.now().uptimeNanoseconds
+                let output = readFFMetadata(
+                    from: pipe.fileHandleForReading,
+                    timeout: chapterExtractionTimeout
+                ) {
+                    // Synchron beenden: Danach darf `waitUntilExit()` nicht an
+                    // einem hängenden direkten Kindprozess festbleiben.
+                    ProcessTerminator.terminateAndWait([process])
+                }
+                let extractionElapsed = TimeInterval(
+                    DispatchTime.now().uptimeNanoseconds - extractionStart
+                ) / 1_000_000_000
+                let processExited = waitForProcessExit(
+                    process,
+                    timeout: max(0, chapterExtractionTimeout - extractionElapsed)
+                )
+                if !processExited {
+                    ProcessTerminator.terminateAndWait([process])
+                }
                 process.waitUntilExit()
+                try? pipe.fileHandleForReading.close()
                 guard !shouldCancel(), !taskCancellationRequested() else { return [] }
+                guard !output.timedOut, processExited else {
+                    log("⚠️ Kapitelanalyse für \(visibleURL.lastPathComponent) nach \(Int(chapterExtractionTimeout)) Sekunden abgebrochen. Datei wird übersprungen.")
+                    return []
+                }
+                guard !output.readFailed else {
+                    log("⚠️ Kapitelmetadaten aus \(visibleURL.lastPathComponent) konnten nicht vollständig gelesen werden. Nutze die Datei als ein Kapitel.")
+                    return [await AudioFile(foundFile: file)]
+                }
+                guard !output.exceededLimit else {
+                    log("⚠️ Kapitelmetadaten in \(visibleURL.lastPathComponent) überschreiten 8 MiB. Nutze die Datei als ein Kapitel.")
+                    return [await AudioFile(foundFile: file)]
+                }
+                guard process.terminationStatus == 0 else {
+                    log("⚠️ ffmpeg konnte Kapitel aus \(visibleURL.lastPathComponent) nicht vollständig lesen. Nutze die Datei als ein Kapitel.")
+                    return [await AudioFile(foundFile: file)]
+                }
 
-                guard let text = String(data: data, encoding: .utf8) else {
+                guard let text = String(data: output.data, encoding: .utf8) else {
                     log("⚠️ FFMETADATA von \(visibleURL.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
                     return [await AudioFile(foundFile: file)]
                 }
@@ -147,6 +216,83 @@ extension AudioFile {
         }
     }
 
+    /// Wartet höchstens die verbleibende Kapitelanalyse-Frist auf den Prozess.
+    /// EOF allein bedeutet nicht, dass ein fehlerhaftes Ersatzprogramm beendet ist.
+    static func waitForProcessExit(_ process: Process, timeout: TimeInterval) -> Bool {
+        let boundedTimeout = timeout.isFinite ? min(max(0, timeout), 3_600) : 0
+        let timeoutNanoseconds = UInt64(boundedTimeout * 1_000_000_000)
+        let start = DispatchTime.now().uptimeNanoseconds
+        let deadline = start > UInt64.max - timeoutNanoseconds
+            ? UInt64.max
+            : start + timeoutNanoseconds
+        while process.isRunning, DispatchTime.now().uptimeNanoseconds < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return !process.isRunning
+    }
+
+    /// Liest eine ffmetadata-Pipe bis zu einer festen Obergrenze und Frist.
+    /// `poll` hält die Frist auch dann ein, wenn weder Daten noch EOF kommen.
+    /// Beim ersten Grenzfehler beendet `onAbort` den direkten Kindprozess; der
+    /// Leser kehrt danach sofort zurück und wartet nicht auf vererbte Pipe-Enden.
+    static func readFFMetadata(
+        from handle: FileHandle,
+        maximumByteCount: Int = maximumFFMetadataByteCount,
+        timeout: TimeInterval = chapterExtractionTimeout,
+        onAbort: () -> Void = {}
+    ) -> (data: Data, exceededLimit: Bool, timedOut: Bool, readFailed: Bool) {
+        let limit = max(0, maximumByteCount)
+        let boundedTimeout = timeout.isFinite ? min(max(0, timeout), 3_600) : chapterExtractionTimeout
+        let timeoutNanoseconds = UInt64(boundedTimeout * 1_000_000_000)
+        let start = DispatchTime.now().uptimeNanoseconds
+        let deadline = start > UInt64.max - timeoutNanoseconds
+            ? UInt64.max
+            : start + timeoutNanoseconds
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadline else {
+                onAbort()
+                return (data, false, true, false)
+            }
+            let remainingNanoseconds = deadline - now
+            let roundedMilliseconds = remainingNanoseconds / 1_000_000
+                + (remainingNanoseconds % 1_000_000 == 0 ? 0 : 1)
+            let remainingMilliseconds = max(
+                1,
+                min(50, Int(roundedMilliseconds))
+            )
+            var candidate = pollfd(
+                fd: handle.fileDescriptor,
+                events: Int16(POLLIN | POLLHUP | POLLERR),
+                revents: 0
+            )
+            let pollResult = Darwin.poll(&candidate, 1, Int32(remainingMilliseconds))
+            if pollResult == 0 { continue }
+            if pollResult < 0 {
+                if errno == EINTR { continue }
+                onAbort()
+                return (data, false, false, true)
+            }
+            let count = buffer.withUnsafeMutableBytes { storage in
+                Darwin.read(handle.fileDescriptor, storage.baseAddress, storage.count)
+            }
+            if count == 0 { return (data, false, false, false) }
+            if count < 0 {
+                if errno == EINTR || errno == EAGAIN { continue }
+                onAbort()
+                return (data, false, false, true)
+            }
+            let byteCount = Int(count)
+            guard byteCount <= limit - data.count else {
+                onAbort()
+                return (data, true, false, false)
+            }
+            data.append(contentsOf: buffer.prefix(byteCount))
+        }
+    }
+
     /// Ein aus FFMETADATA gelesenes Kapitel (Zeiten bereits in Sekunden).
     struct FFChapter { var start: TimeInterval = 0; var end: TimeInterval = 0; var title: String = "" }
 
@@ -160,26 +306,41 @@ extension AudioFile {
         var chapters: [FFChapter] = []
         var current: FFChapter?
         var tbNum: Double = 1, tbDen: Double = 1000
-        var rawStart: Double = 0
-        var rawEnd: Double?   // nil = END fehlt -> später aus Folgekapitel ableiten
+        var rawStart: Double?
+        var rawEnd: Double?
+        var sawEnd = false
 
         func parseTimebase(_ value: String) {
             let parts = value.trimmingCharacters(in: .whitespaces).split(separator: "/")
-            if parts.count == 2, let n = Double(parts[0]), let d = Double(parts[1]), d != 0 { tbNum = n; tbDen = d }
+            guard parts.count == 2,
+                  let numerator = Double(parts[0]), numerator.isFinite, numerator > 0,
+                  let denominator = Double(parts[1]), denominator.isFinite, denominator > 0 else {
+                // Ein vorhandener, aber kaputter Wert darf nicht still wie eine
+                // fehlende TIMEBASE behandelt werden. NaN lässt die spätere
+                // Kapitelvalidierung kontrolliert auf die ganze Datei zurückfallen.
+                tbNum = .nan
+                tbDen = 1
+                return
+            }
+            tbNum = numerator
+            tbDen = denominator
         }
 
         func flush() {
             guard var c = current else { return }
             let factor = tbNum / tbDen
-            c.start = rawStart * factor
-            c.end = (rawEnd ?? rawStart) * factor
+            c.start = (rawStart ?? .nan) * factor
+            c.end = sawEnd ? (rawEnd ?? .nan) * factor : c.start
             chapters.append(c)
         }
 
         for line in text.components(separatedBy: "\n") {
             if line.trimmingCharacters(in: .whitespaces) == "[CHAPTER]" {
                 flush()
-                current = FFChapter(); rawStart = 0; rawEnd = nil   // TIMEBASE bewusst geerbt
+                current = FFChapter()
+                rawStart = nil
+                rawEnd = nil
+                sawEnd = false   // TIMEBASE bewusst geerbt
                 continue
             }
             guard let eq = line.firstIndex(of: "=") else { continue }
@@ -192,15 +353,18 @@ extension AudioFile {
             }
             switch key {
             case "TIMEBASE": parseTimebase(value)
-            case "START": rawStart = Double(value.trimmingCharacters(in: .whitespaces)) ?? 0
-            case "END": rawEnd = Double(value.trimmingCharacters(in: .whitespaces))
+            case "START": rawStart = Double(value.trimmingCharacters(in: .whitespaces))
+            case "END":
+                sawEnd = true
+                rawEnd = Double(value.trimmingCharacters(in: .whitespaces))
             case "TITLE": current?.title = unescapeFFMetadata(value)
             default: break
             }
         }
         flush()
 
-        // Fehlende/ungültige END-Zeiten aus dem Start des nächsten Kapitels füllen.
+        // Fehlende oder nichtpositive END-Zeiten aus dem Start des nächsten
+        // Kapitels füllen. Nicht parsebare Werte bleiben NaN und damit ungültig.
         for i in chapters.indices where chapters[i].end <= chapters[i].start && i + 1 < chapters.count {
             chapters[i].end = chapters[i + 1].start
         }

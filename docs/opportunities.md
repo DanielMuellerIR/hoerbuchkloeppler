@@ -71,6 +71,20 @@ Snapshot-Regeln nicht duplizieren.
 
 ## Performance
 
+### P1 — Audioanalyse je Datei zusammenführen
+
+Eine gewöhnliche Datei wird heute zuerst über `AudioFile.loadDurationAndTitle`
+für Dauer und Titel und danach über `extractEmbeddedArtwork` mit einem zweiten
+`AVAsset` erneut für Metadaten geöffnet. Der Ordnerscan hält die Ergebnisse zwar
+geordnet, teilt aber keinen Analyse-Snapshot. Ein gemeinsames Ergebnis aus Dauer,
+Titel und geprüftem Artwork könnte je physischer URL genau eine Metadatenladung
+verwenden und zugleich die Datenmenge eingebetteter Cover früh sichtbar machen.
+
+Vor der Zusammenlegung messen: 100 und 1.000 Dateien mit und ohne Artwork,
+Anzahl der `AVAsset`-/Metadatenladungen, Gesamtdauer und Spitzen-RSS. Der Snapshot
+muss an die beim Scan erfasste Dateiidentität gebunden sein; ein bloßer Pfadcache
+darf nach einem Dateiaustausch keine alten Metadaten liefern.
+
 ### P1 — Ordneranalyse begrenzt parallelisieren
 
 `ConversionSession.scanFolder` wartet in einer Schleife auf jede Audioanalyse,
