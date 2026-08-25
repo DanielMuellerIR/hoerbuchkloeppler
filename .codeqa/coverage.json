@@ -4,9 +4,11 @@
   "campaign": {
     "id": "20260825T162949635422+0200",
     "token_budget": 3000000,
-    "status": "active",
+    "status": "paused",
     "started_at": "2026-08-25T16:29:49+02:00",
-    "tokens_spent": 2287056
+    "tokens_spent": 2487965,
+    "finished_at": "2026-08-25T20:32:24+02:00",
+    "finish_reason": "budget-reached"
   },
   "campaign_history": [
     {
@@ -160,16 +162,20 @@
       "reason": "AVFoundation-Analyse, Kapitelimport und externe ffmpeg-Prozessgrenze",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134633974092+0200",
-        "completed_at": "2026-08-15T14:10:51+02:00",
-        "observed_head": "0fa952a4642c185fb0446253390bde6ce4201c7b",
-        "content_sha256": "81d2b9fc64885c94bf860e65c9a2821c07ef55f36dd80c888d9851cde0c4857a",
+        "campaign_id": "20260825T162949635422+0200",
+        "completed_at": "2026-08-25T20:32:10+02:00",
+        "observed_head": "cb953d32a8d606f22c8910a24d8e00ddea6f05a6",
+        "content_sha256": "daa7a4470ebbe10e16605b1883099f88a955672d0c614e48c9f823ed2fb41e2f",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Themen-Diff und Session-Grenze geprüft: AudioFile-Initialisierung, Tags, Artwork und Kapitelextraktion prüfen Task-Cancellation nach suspendierenden AVFoundation-Aufrufen und liefern keine Teilergebnisse mehr an den Import zurück.",
+        "summary": "Kapitelanalyse lehnt kaputte Pflichtzahlen und ffmpeg-Fehlercodes ab, begrenzt stdout auf 8 MiB sowie den gesamten Prozess auf 30 Sekunden und verwirft stderr ohne blockierende Pipe. Eingebettete Cover müssen dekodierbar und höchstens 32 MiB groß sein; ein kaputter früher Tag verhindert keinen späteren gültigen Treffer.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 90 Tests in 17 Suites passed"
+          "swift test -Xswiftc -warnings-as-errors: 180 Tests in 21 Suites bestanden",
+          "swift build -c release -Xswiftc -warnings-as-errors: bestanden",
+          "xcodebuild Release mit Swift-/Clang-Warnungen als Fehler: BUILD SUCCEEDED",
+          "CLI-E2E mit echtem 2-Kapitel-M4B: 2 Kapitel erkannt und 2 Kapitel ausgegeben",
+          "drei read-only Subreviews plus abschließender Diff-Review: Prozessfrist nachgebessert, danach reviewed-clean"
         ]
       }
     },
@@ -518,6 +524,19 @@
       "priority": 2,
       "state": "pending",
       "noted_at": "2026-08-25T19:53:56+02:00",
+      "campaign_id": "20260825T162949635422+0200"
+    },
+    {
+      "id": "input-analysis-failure-policy",
+      "summary": "Kapitelanalyse-Timeouts und unlesbare/Null-Dauer-Audiodateien werden protokolliert und als leere Teilergebnisse übersprungen; ein Mehrdateien-Import kann dadurch mit einem unvollständigen Buch fortfahren. Eine typisierte Importfehler-Policy muss zwischen bewusstem Skip, Abbruch und bestätigtem Teilergebnis unterscheiden und in GUI sowie CLI gleich gelten.",
+      "evidence": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift",
+        "Hörbuchklöppler/ContentView.swift"
+      ],
+      "priority": 2,
+      "state": "pending",
+      "noted_at": "2026-08-25T20:31:17+02:00",
       "campaign_id": "20260825T162949635422+0200"
     }
   ]
