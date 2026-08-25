@@ -6,7 +6,7 @@
     "token_budget": 3000000,
     "status": "active",
     "started_at": "2026-08-25T16:29:49+02:00",
-    "tokens_spent": 1789704
+    "tokens_spent": 2287056
   },
   "campaign_history": [
     {
@@ -59,16 +59,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260825T162949635422+0200",
-        "completed_at": "2026-08-25T17:27:25+02:00",
-        "observed_head": "87022e430e482de8c5977958e478493bd18ef18a",
-        "content_sha256": "dbec80fd4fbab840371b413192957f49bf798bb5eb6d6003d697466f731f2cc2",
+        "completed_at": "2026-08-25T20:02:37+02:00",
+        "observed_head": "dca94d9231c761e93e9f2274029b47fcc39b0ba1",
+        "content_sha256": "6bfa8db20a7e2b18ac95b2c965a7c66ef3ca0c5fcc3aea1752f01c5ea0d9bafd",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Process-Abbruch-Diff erneut an Session-, Audioanalyse- und CLI-Grenzen geprüft: Vorbereitungstasks und direkte Tools eskalieren bounded; laufbezogene Konvertierungsbereinigung endet erst nach Prozessende.",
+        "summary": "Der Cover-Zustand hält bei manueller Auswahl neben UI-Bild und Pfad nun den sicher gelesenen Inhalt; removeCover/reset und automatische Artwork-Priorität bleiben unverändert.",
         "tests": [
-          "swift test: 121 Tests in 18 Suites passed",
-          "xcodebuild Release CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED"
+          "swift test: 175 Tests inklusive Cover-Auswahl-Regression bestanden"
         ]
       }
     },
@@ -84,15 +83,16 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260825T162949635422+0200",
-        "completed_at": "2026-08-25T19:36:33+02:00",
-        "observed_head": "60b5c7c9492a0e1cea81984038f31da355f216f4",
-        "content_sha256": "41a3454f9ad506dcafa0e926bf3390cf2fce326e73a88720877eb6edbc78f3f5",
+        "completed_at": "2026-08-25T20:02:21+02:00",
+        "observed_head": "dca94d9231c761e93e9f2274029b47fcc39b0ba1",
+        "content_sha256": "6abbe7d93f9b02d5586eb77745e47f9067f6ebf7d671f102bb69ff34ddb419d2",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Konvertierungsplan, Eingabe-/Ziel-Snapshots, Output-Leases, Prozess-I/O und -Abbruch, Cover-Lesen sowie atomare, FD-gebundene Staging-/Commit-/Crash-Cleanup-Pfade gehärtet; GUI und CLI nutzen denselben bestätigten Plan.",
+        "summary": "Manuell gewählte Cover werden bei der Auswahl sicher und größenbegrenzt als unveränderliche Daten gelesen; ein später gelöschter oder ausgetauschter Pfad fällt beim Worker auf diesen Snapshot zurück.",
         "tests": [
-          "swift test: 174 Tests/20 Suites; Swift Release-Build; Xcode Release mit warnings-as-errors; realer CLI-E2E mit 2 Kapiteln, AAC/32 kHz, Metadaten und ohne HB-Reste; drei read-only Grenzreviews."
+          "swift test: 175 Tests inklusive neuem Cover-Snapshot-Test bestanden",
+          "Realer CLI-Cover-Export: Exit 0 und ein eingebetteter Video-/Cover-Stream"
         ]
       }
     },
@@ -106,16 +106,18 @@
       "reason": "Signalbehandlung, Fehler-Exit-Codes, Eingabevalidierung und skriptfähige Ausgabe",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134633974092+0200",
-        "completed_at": "2026-08-15T14:10:51+02:00",
-        "observed_head": "0fa952a4642c185fb0446253390bde6ce4201c7b",
-        "content_sha256": "c173964ba5f726e309c690871a1bbcbee5669582ecd7d603c6365d323a932820",
+        "campaign_id": "20260825T162949635422+0200",
+        "completed_at": "2026-08-25T20:02:13+02:00",
+        "observed_head": "dca94d9231c761e93e9f2274029b47fcc39b0ba1",
+        "content_sha256": "c7be728ad15fae206e2fd7b948798a183355978ac247d41024d304739b26d8d1",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Themen-Diff und Core-Grenze geprüft: Die CLI nutzt prepareFolder, der außerhalb des Main Actors erzeugte DispatchSource-Handler bleibt thread-sicher und SIGINT endet während der Vorbereitung mit Exit 130.",
+        "summary": "SIGINT/SIGTERM werden über einen gemeinsamen synchronisierten Abschluss mit korrekten Exit-Codes behandelt; CLI begrenzt tatsächliche Zielnamen und ASCII-Art, fragt nur bei sichtbarem TTY, bindet sichtbare Symlink-Semantik korrekt und lehnt übergroße Cover früh ab.",
         "tests": [
-          "Realer CLI-SIGINT während der Analyse von 1.001 WAV-Dateien: Exit 130 innerhalb der 10-Sekunden-Grenze"
+          "swift test: 175 Tests in 21 Suites bestanden",
+          "Swift Release-Build und Xcode Release-Build mit Warnungen als Fehler bestanden",
+          "Reale CLI-E2E: lange UTF-8-Titel, explizit zu langer Output, Quell-Symlink, Cover, TTY-Umleitung sowie SIGINT 130/SIGTERM 143 ohne Ausgabe- oder Staging-Reste bestanden"
         ]
       }
     },
@@ -131,19 +133,20 @@
       "reason": "Notarisierung, Signaturprüfung und einziger mutierender Pfad nach /Applications",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134633974092+0200",
-        "completed_at": "2026-08-15T13:59:09+02:00",
-        "observed_head": "8ca25891d4c6757cfef74da3b2c38e01ca053a8d",
-        "content_sha256": "5ea00236eaa1e2d5380894e7f093e9cb50635a666a0b985ece3cd55a909925a6",
+        "campaign_id": "20260825T162949635422+0200",
+        "completed_at": "2026-08-25T20:16:23+02:00",
+        "observed_head": "f09f28db8bb4ec74f39cc41b604f823fe3ebbf15",
+        "content_sha256": "4fbdb9d933469ea6523970d434cc8b0ec01fca7e8d143475f910907f4fc9d832",
         "file_count": 3,
-        "review": "full",
+        "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Installationsziel wird vor Build und Mutation als normalisierter absoluter .app-Pfad unterhalb eines vorhandenen Nicht-Root-Ordners geprüft; beendet wird nur noch der Prozess des tatsächlich ersetzten Bundles statt jeder gleichnamigen App.",
+        "summary": "Signierung propagiert Ressourcenscan-Fehler; Notary-Profilprüfung nutzt konsistente Retries und shell-sichere Hilfe; install.sh validiert den kopierten Staging-Build, beendet nur die Ziel-App mit TERM/KILL und hält das vorige Bundle bis zur Zielprüfung für atomaren Rollback bereit.",
         "tests": [
-          "bash -n install.sh sign-bundle.sh notary-profile.sh: passed",
-          "Installationsziel /, Nicht-.app, Datei-.app und /tmp/../RootApp.app: jeweils früher Exit 1 vor Build/Mutation",
-          "install.sh --unknown: Exit 64; install.sh --help: Exit 0",
-          "sign-bundle.sh ohne Argumente: Exit 2"
+          "bash -n install.sh sign-bundle.sh notary-profile.sh",
+          "mock: find-Fehler Exit 23, fehlendes Bundle Exit 1, Notary-Retry beim zweiten Versuch, Apostroph shell-sicher",
+          "./install.sh --no-notarize (Developer-ID Release-Build, eingebettete Tools und Bundle geprüft, keine Installation)",
+          "verdeckte Kopie der lokal notarisierten App: codesign, stapler, spctl, ffmpeg und mediainfo erfolgreich",
+          "Foundation-Austausch: Backup bleibt erhalten; Rollback mit bestehendem und fehlendem Ziel erfolgreich"
         ]
       }
     },
@@ -260,18 +263,16 @@
       "reason": "Breite Querschnittstests für Laufzeit, Import, Einstellungen und Tool-Auflösung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134633974092+0200",
-        "completed_at": "2026-08-15T14:19:15+02:00",
-        "observed_head": "b0b373263d637130e46fcf5a8bd5f28da59ee259",
-        "content_sha256": "843170c6976c2d5db2f04506051a1fcc2d295d93505e676163dccbba0b1a75af",
+        "campaign_id": "20260825T162949635422+0200",
+        "completed_at": "2026-08-25T20:02:27+02:00",
+        "observed_head": "dca94d9231c761e93e9f2274029b47fcc39b0ba1",
+        "content_sha256": "231bedd37490316e23984b0af91eb9f0b1dd3bbea9771ca8005ec2a1dceb5a41",
         "file_count": 1,
-        "review": "full",
+        "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Alle 849 Zeilen der Querschnittstests auf Aussagekraft, Ressourcenbesitz, Zeitgrenzen und Wiederholung geprüft. Der CLI-Quoting-Test vergleicht nun nach echtem /bin/sh-Durchlauf alle Argumente bytegenau statt nur brüchige Teilstrings; beide temporären Abbruchordner werden garantiert bereinigt.",
+        "summary": "Regressionstest belegt, dass eine manuelle Cover-Auswahl den ursprünglichen Bildinhalt unabhängig von einem späteren Pfadaustausch hält.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors --filter completeShellSafeCLICommand: passed mit echtem Shell-Roundtrip",
-          "swift test -Xswiftc -warnings-as-errors --filter contextsAreIsolated: passed",
-          "swift test -Xswiftc -warnings-as-errors: 90 Tests in 17 Suites passed"
+          "swift test: 175 Tests in 21 Suites bestanden"
         ]
       }
     },
@@ -505,6 +506,18 @@
       "priority": 3,
       "state": "pending",
       "noted_at": "2026-08-25T19:36:42+02:00",
+      "campaign_id": "20260825T162949635422+0200"
+    },
+    {
+      "id": "directory-handle-binding",
+      "summary": "CLI und Core binden aufgelöste Quell- und Ausgabeordner weiterhin nur an Pfadnamen. Ein Prozess derselben Benutzer-ID kann einen Ordner nach der Prüfung ersetzen; bei fehlender Zieldatei erkennt der bestehende Entry-Snapshot den gewechselten Elternordner nicht. Descriptorgebundenen Scan sowie Staging/Commit relativ zu O_DIRECTORY-Dateideskriptoren bewerten.",
+      "evidence": [
+        "HoerbuchkloepplerCore/Sources/kloeppler/KloepplerCLI.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift"
+      ],
+      "priority": 2,
+      "state": "pending",
+      "noted_at": "2026-08-25T19:53:56+02:00",
       "campaign_id": "20260825T162949635422+0200"
     }
   ]
