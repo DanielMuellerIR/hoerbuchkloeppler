@@ -6,7 +6,7 @@
     "token_budget": 3000000,
     "status": "active",
     "started_at": "2026-08-25T16:29:49+02:00",
-    "tokens_spent": 560361
+    "tokens_spent": 1789704
   },
   "campaign_history": [
     {
@@ -81,28 +81,19 @@
       "risk": "critical",
       "priority": 2,
       "reason": "Datenintegrität, externe Prozesse, Parallelität, Abbruch und atomare Ausgabedateien",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134633974092+0200",
-        "completed_at": "2026-08-15T13:54:18+02:00",
-        "observed_head": "5e997c5a82271896f71d2c517d1a3ea27c70e5e9",
-        "content_sha256": "bcd0515ba771e7513eafcac0c716d5997459cea056e59ff2ed4667abd5ababf4",
-        "file_count": 2,
-        "review": "full",
-        "outcome": "improved",
-        "summary": "Aufräumen verwaister Staging-Dateien prüft neben Zielbasis und Besitzer-PID nun auch die Zielendung; gleichnamige Partial-Dateien anderer Formate bleiben erhalten.",
-        "tests": [
-          "swift test --filter doesNotRemoveStagingFilesForDifferentExtension: vor Fix rot, nach Fix passed",
-          "swift build -Xswiftc -warnings-as-errors: passed",
-          "swift test: 89 Tests in 17 Suites passed"
-        ]
-      },
-      "active_run": {
         "campaign_id": "20260825T162949635422+0200",
-        "started_at": "2026-08-25T17:27:34+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
+        "completed_at": "2026-08-25T19:36:33+02:00",
+        "observed_head": "60b5c7c9492a0e1cea81984038f31da355f216f4",
+        "content_sha256": "41a3454f9ad506dcafa0e926bf3390cf2fce326e73a88720877eb6edbc78f3f5",
+        "file_count": 2,
+        "review": "delta-plus-boundaries",
+        "outcome": "improved",
+        "summary": "Konvertierungsplan, Eingabe-/Ziel-Snapshots, Output-Leases, Prozess-I/O und -Abbruch, Cover-Lesen sowie atomare, FD-gebundene Staging-/Commit-/Crash-Cleanup-Pfade gehärtet; GUI und CLI nutzen denselben bestätigten Plan.",
+        "tests": [
+          "swift test: 174 Tests/20 Suites; Swift Release-Build; Xcode Release mit warnings-as-errors; realer CLI-E2E mit 2 Kapiteln, AAC/32 kHz, Metadaten und ohne HB-Reste; drei read-only Grenzreviews."
+        ]
       }
     },
     {
@@ -503,6 +494,17 @@
       "priority": 3,
       "state": "pending",
       "noted_at": "2026-08-25T17:25:01+02:00",
+      "campaign_id": "20260825T162949635422+0200"
+    },
+    {
+      "id": "equal-uid-cleanup-boundary",
+      "summary": "macOS bietet kein atomisches unlink-if-inode: Cleanup quarantänisiert und prüft erneut, kann einen absichtlichen Austausch durch einen Prozess derselben Benutzer-ID nach der letzten Prüfung aber nicht vollständig ausschließen. Schutzmodell dokumentieren und NSFileCoordinator, getrennte Rechte oder einen bewusst rest-erhaltenden Abschluss bewerten.",
+      "evidence": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift"
+      ],
+      "priority": 3,
+      "state": "pending",
+      "noted_at": "2026-08-25T19:36:42+02:00",
       "campaign_id": "20260825T162949635422+0200"
     }
   ]
