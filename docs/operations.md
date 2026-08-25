@@ -25,6 +25,12 @@ Versionsausgabe.
 
 `./install.sh` mutiert `/Applications` erst, nachdem Notarisierungs-Ticket,
 Signatur und Gatekeeper-Akzeptanz am Build-Artefakt erfolgreich geprüft wurden.
+Das Skript kopiert das Bundle zunächst neben das Ziel und wiederholt dort die
+Signatur-, Ticket-, Gatekeeper- und Laufzeitprogramm-Prüfungen. Beim Austausch
+behält es die vorige App bis zur erfolgreichen Prüfung des Installationsziels
+als Backup; schlägt ein nachgelagerter Test fehl, setzt der EXIT-Trap dieses
+Bundle atomar zurück. Eine laufende Ziel-App erhält zuerst SIGTERM und nach fünf
+Sekunden ohne Beendigung SIGKILL.
 `./install.sh --no-notarize` erzeugt und prüft ausschließlich den
 Developer-ID-signierten Test-Build im Projekt-Root und installiert ihn nie.
 

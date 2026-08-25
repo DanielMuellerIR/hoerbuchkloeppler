@@ -13,6 +13,20 @@
 #   2. clone-lokale Git-Config  hoerbuchkloeppler.notaryProfile  (nicht gepusht)
 #   3. interaktive Abfrage (Default-Platzhalter "notary")
 
+# `notarytool history` liefert auf manchen Macs sporadisch einen falschen
+# Profilfehler. Jeder Aufrufer — auch direkt nach `store-credentials` — nutzt
+# deshalb denselben begrenzten Retry.
+hoerbuchkloeppler_notary_profile_works() {
+  local profile="$1" attempt
+  for attempt in 1 2 3 4 5; do
+    if xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1; then
+      return 0
+    fi
+    [ "$attempt" -eq 5 ] || sleep 3
+  done
+  return 1
+}
+
 hoerbuchkloeppler_require_notary_profile() {
   local profile="${NOTARY_PROFILE:-}"
 
@@ -41,21 +55,13 @@ hoerbuchkloeppler_require_notary_profile() {
   # einzelner Fehlversuch würde sonst einen ganzen Lauf grundlos abbrechen oder
   # unnötig nach store-credentials fragen; ein wirklich fehlendes Profil
   # scheitert auch nach fünf Versuchen.
-  local attempt profile_ok=0
-  for attempt in 1 2 3 4 5; do
-    if xcrun notarytool history --keychain-profile "$profile" >/dev/null 2>&1; then
-      profile_ok=1
-      break
-    fi
-    sleep 3
-  done
-  if [ "$profile_ok" = 0 ]; then
+  if ! hoerbuchkloeppler_notary_profile_works "$profile"; then
     echo "✗ Notary-Profil '$profile' ist auf diesem Mac nicht verwendbar." >&2
     echo "  (Schlüsselbund-Profile werden zwischen Macs nicht synchronisiert;" >&2
     echo "   über SSH ist der Login-Schlüsselbund oft gesperrt.)" >&2
     if [ ! -t 0 ]; then
       echo "  Einmalig in einer lokalen GUI-Terminalsitzung einrichten:" >&2
-      echo "  xcrun notarytool store-credentials '$profile' --apple-id '<apple-id>' --team-id '<team-id>'" >&2
+      printf "  xcrun notarytool store-credentials %q --apple-id '<apple-id>' --team-id '<team-id>'\n" "$profile" >&2
       echo "  Das App-spezifische Passwort NUR an der verdeckten Abfrage eingeben, nie als Argument." >&2
       return 1
     fi
@@ -75,7 +81,10 @@ hoerbuchkloeppler_require_notary_profile() {
     # Absichtlich kein --password: notarytool fragt das App-Passwort verdeckt ab
     # und legt es direkt im lokalen Schlüsselbund ab.
     xcrun notarytool store-credentials "$profile" --apple-id "$apple_id" --team-id "$team_id"
-    xcrun notarytool history --keychain-profile "$profile" >/dev/null
+    if ! hoerbuchkloeppler_notary_profile_works "$profile"; then
+      echo "✗ Neu gespeichertes Notary-Profil '$profile' ist nicht verwendbar." >&2
+      return 1
+    fi
   fi
 
   # Nur der Profilname landet clone-lokal in .git/config (wird nie committet/gepusht).

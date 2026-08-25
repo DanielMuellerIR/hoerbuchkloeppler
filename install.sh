@@ -69,7 +69,7 @@ log() { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
 # Ein benutzerdefiniertes Testziel darf den späteren Staging-Pfad nicht auf ein
 # breites oder unerwartetes Dateisystemziel lenken. `--no-install` braucht diese
 # Prüfung nicht, weil dieser Modus DEST überhaupt nicht anfasst.
-if [ "$INSTALL" -eq 1 ]; then
+if [ "$INSTALL" -eq 1 ] && [ "$NOTARIZE" -eq 1 ]; then
   case "$DEST" in
     /*/*.app) ;;
     *) echo "✗ Installationsziel muss ein absoluter .app-Pfad unterhalb eines Ordners sein: $DEST" >&2
@@ -86,6 +86,10 @@ if [ "$INSTALL" -eq 1 ]; then
   # Normalisieren, damit spätere dirname-/basename-Aufrufe nicht erneut `..`
   # oder einen Symlink-Elternpfad interpretieren müssen.
   DEST="$DEST_PARENT/$DEST_BASENAME"
+  if [ -L "$DEST" ]; then
+    echo "✗ Installationsziel darf kein Symlink sein: $DEST" >&2
+    exit 1
+  fi
   if [ -e "$DEST" ] && [ ! -d "$DEST" ]; then
     echo "✗ Installationsziel existiert, ist aber kein App-Bundle-Ordner: $DEST" >&2
     exit 1
@@ -117,6 +121,10 @@ log "Signatur-Identität: $SIGN_IDENTITY"
 ./build.sh
 APP="./${APP_NAME}.app"
 [ -d "$APP" ] || { echo "✗ Build-Ergebnis fehlt: $APP" >&2; exit 1; }
+APP_EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist" 2>/dev/null || true)"
+case "$APP_EXECUTABLE_NAME" in
+  ""|*/*) echo "✗ Build-Ergebnis enthält keinen sicheren CFBundleExecutable-Namen." >&2; exit 1 ;;
+esac
 
 # ── 2. Mit Developer ID + Hardened Runtime signieren (innen→außen) ───────────
 log "Signiere Bundle mit Developer ID + Hardened Runtime (eingebettete Programme → App)…"
@@ -186,29 +194,127 @@ fi
 # ── 4. Nach /Applications installieren (laufende Ziel-Instanz vorher beenden) ─
 # Nur Prozesse des tatsächlich zu ersetzenden Bundles beenden. Ein pauschales
 # `pkill -x` träfe auch einen Test-Build aus diesem oder einem anderen Worktree.
-DEST_EXECUTABLE="$DEST/Contents/MacOS/$APP_NAME"
-stopped_destination=0
+DEST_EXECUTABLE_NAME="$APP_EXECUTABLE_NAME"
+if [ -f "$DEST/Contents/Info.plist" ]; then
+  installed_executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$DEST/Contents/Info.plist" 2>/dev/null || true)"
+  case "$installed_executable_name" in
+    ""|*/*) ;;
+    *) DEST_EXECUTABLE_NAME="$installed_executable_name" ;;
+  esac
+fi
+DEST_EXECUTABLE=""
+if [ -d "$DEST/Contents/MacOS" ]; then
+  DEST_EXECUTABLE_DIR="$(cd "$DEST/Contents/MacOS" && pwd -P)"
+  DEST_EXECUTABLE="$DEST_EXECUTABLE_DIR/$DEST_EXECUTABLE_NAME"
+fi
+destination_pids=()
 while IFS= read -r pid; do
   [ -n "$pid" ] || continue
   process_command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
   case "$process_command" in
     "$DEST_EXECUTABLE"|"$DEST_EXECUTABLE "*)
-      if kill "$pid" 2>/dev/null; then stopped_destination=1; fi
+      destination_pids+=("$pid")
       ;;
   esac
-done < <(pgrep -x "$APP_NAME" 2>/dev/null || true)
-if [ "$stopped_destination" -eq 1 ]; then
+done < <(pgrep -x "$DEST_EXECUTABLE_NAME" 2>/dev/null || true)
+if [ "${#destination_pids[@]}" -gt 0 ]; then
   log "Beende laufende ${APP_NAME}-Instanz aus $DEST"
-  sleep 1
+  for pid in "${destination_pids[@]}"; do kill "$pid" 2>/dev/null || true; done
+  for _ in {1..50}; do
+    still_running=0
+    for pid in "${destination_pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then still_running=1; break; fi
+    done
+    [ "$still_running" -eq 0 ] && break
+    sleep 0.1
+  done
+  for pid in "${destination_pids[@]}"; do
+    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+  done
+  for _ in {1..20}; do
+    still_running=0
+    for pid in "${destination_pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then still_running=1; break; fi
+    done
+    [ "$still_running" -eq 0 ] && break
+    sleep 0.1
+  done
+  [ "$still_running" -eq 0 ] \
+    || { echo "✗ Laufende Ziel-App konnte nicht beendet werden: $DEST" >&2; exit 1; }
 fi
 # Atomar austauschen: erst neben das Ziel legen, dann in einem Schritt
 # eintauschen. Ein Abbruch mittendrin darf keine halb ersetzte App unter
 # /Applications hinterlassen — genau das konnte `rm -rf` + `cp -R` erzeugen.
-STAGED="$(dirname "$DEST")/.$(basename "$DEST").install-$$"
-rm -rf "$STAGED"
-trap 'rm -rf "$STAGED"' EXIT
+DEST_STEM="${DEST_BASENAME%.app}"
+STAGED="$DEST_PARENT/.${DEST_STEM}.install-$$.app"
+BACKUP_BASENAME=".${DEST_STEM}.backup-$$.app"
+BACKUP="$DEST_PARENT/$BACKUP_BASENAME"
+[ ! -e "$STAGED" ] && [ ! -L "$STAGED" ] \
+  || { echo "✗ Installations-Staging-Pfad ist bereits belegt: $STAGED" >&2; exit 1; }
+[ ! -e "$BACKUP" ] && [ ! -L "$BACKUP" ] \
+  || { echo "✗ Installations-Backup-Pfad ist bereits belegt: $BACKUP" >&2; exit 1; }
+DEST_EXISTED=0
+[ -e "$DEST" ] && DEST_EXISTED=1
+INSTALL_STATE="staged"
+
+rollback_install() {
+  local status="$?" rollback_ok=1
+  trap - EXIT
+  if [ "$status" -ne 0 ]; then
+    if [ "$DEST_EXISTED" -eq 1 ] && [ -e "$BACKUP" ]; then
+      if /usr/bin/swift - "$BACKUP" "$DEST" <<'SWIFT'
+import Foundation
+
+let fileManager = FileManager.default
+let backup = URL(fileURLWithPath: CommandLine.arguments[1])
+let destination = URL(fileURLWithPath: CommandLine.arguments[2])
+if fileManager.fileExists(atPath: destination.path) {
+    _ = try fileManager.replaceItemAt(
+        destination,
+        withItemAt: backup,
+        backupItemName: nil,
+        options: [.usingNewMetadataOnly]
+    )
+} else {
+    try fileManager.moveItem(at: backup, to: destination)
+}
+SWIFT
+      then
+        echo "⚠ Fehlgeschlagene Installation wurde auf das vorige Bundle zurückgerollt." >&2
+      else
+        rollback_ok=0
+        echo "✗ KRITISCH: Rollback fehlgeschlagen; vorige App liegt unter $BACKUP" >&2
+      fi
+    elif [ "$DEST_EXISTED" -eq 0 ] && [ "$INSTALL_STATE" = "replacing" ] && [ -e "$DEST" ]; then
+      if mv "$DEST" "$STAGED"; then
+        echo "⚠ Fehlgeschlagene Erstinstallation wurde entfernt." >&2
+      else
+        rollback_ok=0
+        echo "✗ KRITISCH: Fehlgeschlagene Erstinstallation konnte nicht entfernt werden: $DEST" >&2
+      fi
+    fi
+  fi
+  rm -rf "$STAGED"
+  if [ "$status" -eq 0 ]; then rm -rf "$BACKUP"; fi
+  [ "$rollback_ok" -eq 1 ] || exit 1
+  exit "$status"
+}
+trap rollback_install EXIT
 ditto "$APP" "$STAGED"
-/usr/bin/swift - "$STAGED" "$DEST" <<'SWIFT'
+
+# Die tatsächlich kopierte Staging-App vollständig prüfen. Nur so kann ein
+# Kopierfehler nicht erst auffallen, nachdem die vorige Installation ersetzt ist.
+codesign --verify --deep --strict "$STAGED"
+xcrun stapler validate "$STAGED"
+spctl --assess --type execute -vv "$STAGED" 2>&1 | sed 's/^/    /'
+STAGED_RESOURCE_BIN="$STAGED/Contents/Resources/HoerbuchkloepplerCore_HoerbuchkloepplerCore.bundle/Contents/Resources/bin"
+"$STAGED_RESOURCE_BIN/ffmpeg" -version >/dev/null 2>&1 \
+  || { echo "✗ Gebündeltes ffmpeg startet im Staging-Bundle nicht." >&2; exit 1; }
+"$STAGED_RESOURCE_BIN/mediainfo" --Version >/dev/null 2>&1 \
+  || { echo "✗ Gebündeltes mediainfo startet im Staging-Bundle nicht." >&2; exit 1; }
+
+INSTALL_STATE="replacing"
+/usr/bin/swift - "$STAGED" "$DEST" "$BACKUP_BASENAME" <<'SWIFT'
 import Foundation
 
 let fileManager = FileManager.default
@@ -218,14 +324,13 @@ if fileManager.fileExists(atPath: destination.path) {
     _ = try fileManager.replaceItemAt(
         destination,
         withItemAt: source,
-        backupItemName: nil,
-        options: [.usingNewMetadataOnly]
+        backupItemName: CommandLine.arguments[3],
+        options: [.usingNewMetadataOnly, .withoutDeletingBackupItem]
     )
 } else {
     try fileManager.moveItem(at: source, to: destination)
 }
 SWIFT
-trap - EXIT
 
 # ── 5. Verifizieren: Signatur, Gatekeeper und gebündeltes ffmpeg im DEST ─────
 codesign --verify --deep --strict "$DEST"
@@ -237,6 +342,12 @@ DEST_RESOURCE_BIN="$DEST/Contents/Resources/HoerbuchkloepplerCore_Hoerbuchkloepp
 "$DEST_RESOURCE_BIN/mediainfo" --Version >/dev/null 2>&1 \
   || { echo "✗ Gebündeltes mediainfo startet nach der Installation nicht." >&2; exit 1; }
 log "Gebündelte Laufzeitprogramme im installierten Bundle sind ausführbar."
+
+# Erst nach allen Zielprüfungen ist das alte Bundle entbehrlich. Der EXIT-Trap
+# hält es bis hierhin als atomar einwechselbares Rollback bereit.
+INSTALL_STATE="verified"
+rm -rf "$BACKUP" "$STAGED"
+trap - EXIT
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/Contents/Info.plist" 2>/dev/null || echo "?")"
 echo

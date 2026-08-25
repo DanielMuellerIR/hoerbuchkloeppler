@@ -18,8 +18,11 @@ fi
 APP="$1"
 IDENTITY="$2"
 FRAMEWORK="$APP/Contents/Frameworks/HoerbuchkloepplerCore.framework"
+RESOURCE_DIR="$APP/Contents/Resources"
 
 [ -d "$APP" ] || { echo "✗ App-Bundle fehlt: $APP" >&2; exit 1; }
+[ -d "$RESOURCE_DIR" ] \
+  || { echo "✗ Ressourcenordner fehlt: $RESOURCE_DIR" >&2; exit 1; }
 
 # Ad-hoc-Builds brauchen weder Hardened Runtime noch einen Netz-Zeitstempel.
 # Verteilbare Builds erhalten beides mit derselben Developer ID.
@@ -59,11 +62,15 @@ fi
 # Programme (keine Frameworks/Helpers) und müssen einzeln signiert werden — eine
 # äußere Bundle-Signatur erfasst sie nicht korrekt. (Beide linken nur gegen
 # System-Bibliotheken, daher kein Library-Validation-Entitlement nötig.)
-while IFS= read -r -d '' embedded_file; do
-  if file -b "$embedded_file" 2>/dev/null | grep -q 'Mach-O'; then
-    codesign "${SIGN_ARGS[@]}" "$embedded_file"
-  fi
-done < <(find "$APP/Contents/Resources" -type f -print0)
+# Die Pipeline ist mit `pipefail` absichtlich Teil des Skript-Exit-Status. In
+# einer Prozesssubstitution bliebe ein fehlgeschlagenes `find` unsichtbar und
+# das äußere Bundle könnte trotz unvollständigem Innenscan signiert werden.
+find "$RESOURCE_DIR" -type f -print0 \
+  | while IFS= read -r -d '' embedded_file; do
+      if file -b "$embedded_file" 2>/dev/null | grep -q 'Mach-O'; then
+        codesign "${SIGN_ARGS[@]}" "$embedded_file"
+      fi
+    done
 
 # Das Xcode-Projekt bindet den SwiftPM-Core derzeit statisch ein. Sollte Xcode
 # ihn später wieder als dynamisches Framework ausgeben, bleibt die notwendige
