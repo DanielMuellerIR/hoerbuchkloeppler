@@ -3,6 +3,67 @@ import AVFoundation
 import CoreMedia
 import Darwin
 
+/// Beendet eigene Tool-Prozesse zweistufig. `terminate()` sendet nur SIGTERM;
+/// ffmpeg, MediaInfo oder ein Ersatzprogramm aus PATH darf den Abbruch dadurch
+/// nicht unbegrenzt in `waitUntilExit()` festhalten.
+enum ProcessTerminator {
+    private static let queue = DispatchQueue(
+        label: "com.hoerbuchkloeppler.process-termination",
+        attributes: .concurrent
+    )
+    static let defaultGraceInterval: TimeInterval = 0.5
+
+    static func terminateAndWait(
+        _ processes: [Process],
+        graceInterval: TimeInterval = defaultGraceInterval
+    ) {
+        let running = processes.filter(\.isRunning)
+        guard !running.isEmpty else { return }
+
+        // Allen Prozessen dieselbe Schonfrist geben, statt sie nacheinander um
+        // je eine volle Frist zu verlängern.
+        running.forEach { $0.terminate() }
+        let grace = graceInterval.isFinite
+            ? max(0, graceInterval)
+            : defaultGraceInterval
+        let deadline = DispatchTime.now().uptimeNanoseconds
+            + UInt64(grace * 1_000_000_000)
+        while running.contains(where: \.isRunning),
+              DispatchTime.now().uptimeNanoseconds < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        for process in running where process.isRunning {
+            Darwin.kill(process.processIdentifier, SIGKILL)
+        }
+        // Genau der besitzende Worker ruft `waitUntilExit()` auf. Der Terminator
+        // beobachtet nur den Status, damit nie zwei Threads dieselbe
+        // Process-Instanz gleichzeitig reap-en.
+        while running.contains(where: \.isRunning) {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+    }
+
+    static func requestTermination(
+        _ process: Process,
+        graceInterval: TimeInterval = defaultGraceInterval
+    ) {
+        guard process.isRunning else { return }
+        queue.async {
+            terminateAndWait([process], graceInterval: graceInterval)
+        }
+    }
+
+    static func terminateInBackground(
+        _ processes: [Process],
+        completion: @escaping @Sendable () -> Void
+    ) {
+        queue.async {
+            terminateAndWait(processes)
+            completion()
+        }
+    }
+}
+
 public struct ConversionPlan: Sendable {
     public let groups: [[AudioFile]]
     public let outputURLs: [URL]
@@ -40,12 +101,24 @@ final class ConversionContext: @unchecked Sendable {
         return cancelled
     }
 
-    func register(_ process: Process) {
+    /// Startet und registriert den Prozess atomar gegenüber `cancel()`. Ein
+    /// bereits gewonnener Abbruch verhindert den Start vollständig.
+    func run(_ process: Process) throws -> Bool {
         lock.lock()
+        guard !cancelled else {
+            lock.unlock()
+            return false
+        }
         processes.insert(process)
-        let shouldTerminate = cancelled
-        lock.unlock()
-        if shouldTerminate, process.isRunning { process.terminate() }
+        do {
+            try process.run()
+            lock.unlock()
+            return true
+        } catch {
+            processes.remove(process)
+            lock.unlock()
+            throw error
+        }
     }
 
     func unregister(_ process: Process) {
@@ -157,18 +230,29 @@ final class ConversionContext: @unchecked Sendable {
         stagedOutputs.removeAll()
         lock.unlock()
 
-        for process in ownedProcesses where process.isRunning { process.terminate() }
-        for directory in ownedDirectories { try? FileManager.default.removeItem(at: directory) }
-        for output in ownedStagedOutputs {
-            ConversionContext.unlinkStagedOutput(output) { [id, log] message in
-                log(id, message)
+        let finishCleanup: @Sendable () -> Void = { [self] in
+            for directory in ownedDirectories {
+                try? FileManager.default.removeItem(at: directory)
             }
-        }
+            for output in ownedStagedOutputs {
+                ConversionContext.unlinkStagedOutput(output) { [id, log] message in
+                    log(id, message)
+                }
+            }
 
-        lock.lock()
-        cancellationCleanupInProgress = false
-        lock.broadcast()
-        lock.unlock()
+            lock.lock()
+            cancellationCleanupInProgress = false
+            lock.broadcast()
+            lock.unlock()
+        }
+        if ownedProcesses.contains(where: \.isRunning) {
+            ProcessTerminator.terminateInBackground(
+                Array(ownedProcesses),
+                completion: finishCleanup
+            )
+        } else {
+            finishCleanup()
+        }
         return true
     }
 
@@ -325,18 +409,13 @@ public struct FFmpegWrapper {
             while process.isRunning, Date() < deadline {
                 Thread.sleep(forTimeInterval: 0.02)
             }
-            if process.isRunning {
-                process.terminate()
-                let terminateDeadline = Date().addingTimeInterval(0.5)
-                while process.isRunning, Date() < terminateDeadline {
-                    Thread.sleep(forTimeInterval: 0.02)
-                }
-                if process.isRunning {
-                    Darwin.kill(process.processIdentifier, SIGKILL)
-                }
+            let timedOut = process.isRunning
+            if timedOut {
+                ProcessTerminator.terminateAndWait([process])
             }
             process.waitUntilExit()
             reader.readabilityHandler = nil
+            guard !timedOut else { return nil }
             let rest = reader.availableData
             if !rest.isEmpty { outputBuffer.append(rest) }
             let data = outputBuffer.snapshot()
@@ -533,11 +612,9 @@ public struct FFmpegWrapper {
                     process.arguments = [stagedURL.path]
                     let pipe = Pipe()
                     process.standardOutput = pipe
-                    context.register(process)
                     do {
+                        guard try context.run(process) else { throw CancellationError() }
                         defer { context.unregister(process) }
-                        try process.run()
-                        if context.isCancelled { process.terminate() }
                         // Erst die Pipe leeren, DANN auf Exit warten — sonst
                         // Deadlock, wenn die mediainfo-Ausgabe den Pipe-Puffer füllt.
                         let data = pipe.fileHandleForReading.readDataToEndOfFile()
@@ -676,7 +753,6 @@ public struct FFmpegWrapper {
                 process.executableURL = ffmpegURL
                 process.arguments = finalArgs
                 
-                context.register(process)
                 defer { context.unregister(process) }
                 
                 session.enqueueVerboseLog(
@@ -725,13 +801,7 @@ public struct FFmpegWrapper {
                 }
 
                 do {
-                    try process.run()
-                    // Abbruch-Race schließen: Wird zwischen dem Cancel-Check oben und
-                    // diesem Start abgebrochen, hat cancelConversion den Prozess evtl.
-                    // noch nicht laufen sehen (isRunning war false) und übersprungen.
-                    // Jetzt läuft er — sofort erneut prüfen und ggf. beenden, damit kein
-                    // ungetrackter ffmpeg nach dem "Abbruch" voll durchläuft.
-                    if context.isCancelled { process.terminate() }
+                    guard try context.run(process) else { return }
                     process.waitUntilExit()
                     reader.readabilityHandler = nil
                     // Letzten, evtl. noch im Puffer liegenden stderr-Rest nachlesen,
@@ -1042,12 +1112,10 @@ public struct FFmpegWrapper {
             runID: context.id
         )
         
-        context.register(process)
         defer { context.unregister(process) }
         
         do {
-            try process.run()
-            if context.isCancelled { process.terminate() }
+            guard try context.run(process) else { return false }
             let reader = pipe.fileHandleForReading
             let stderrBuffer = LockedDataBuffer()
             

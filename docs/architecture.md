@@ -45,7 +45,9 @@ Core.
 - Laufbezogene Abbrüche bleiben synchron erreichbar: kleine, sperrengeschützte
   Koordinatoren besitzen den Swift-Vorbereitungstask sowie die Vorbereitungs-
   und Konvertierungsprozesse. Dadurch kann SIGINT abbrechen, ohne die
-  Main-Actor-Isolation zu umgehen.
+  Main-Actor-Isolation zu umgehen. Externe Prozesse erhalten zuerst SIGTERM und
+  nach 0,5 Sekunden SIGKILL; der Konvertierungs-Context entfernt temporäre und
+  unvollständige Dateien erst, nachdem diese Prozesse beendet wurden.
 - **App-Sandbox: AUS** — nötig, um externe Binaries auszuführen.
 
 ## UI-Pattern (App)

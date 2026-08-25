@@ -735,6 +735,74 @@ struct CancellationIsolationTests {
         #expect(!FileManager.default.fileExists(atPath: staged.path))
     }
 
+    @Test("Ein bereits abgebrochener Lauf startet keinen neuen Prozess")
+    func cancelledContextRejectsProcessStart() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sentinel = directory.appendingPathComponent("unerwartet-gestartet")
+        let context = ConversionContext()
+        #expect(context.cancel())
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/touch")
+        process.arguments = [sentinel.path]
+
+        #expect(try !context.run(process))
+        #expect(!FileManager.default.fileExists(atPath: sentinel.path))
+    }
+
+    @Test("SIGTERM-resistenter Prozess wird vor der Dateibereinigung beendet")
+    func cancellationEscalatesAndThenCleansFiles() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staged = directory.appendingPathComponent(".Buch.partial-stubborn.m4b")
+        let context = ConversionContext()
+        context.registerStagedOutput(staged)
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = [
+            "-c",
+            "trap 'printf late > \"$1\"' TERM; printf READY; while :; do :; done",
+            "hoerbuchkloeppler-test",
+            staged.path
+        ]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = Pipe()
+        defer {
+            if process.isRunning {
+                Darwin.kill(process.processIdentifier, SIGKILL)
+            }
+        }
+
+        #expect(try context.run(process))
+        let ready = output.fileHandleForReading.readData(ofLength: 5)
+        #expect(String(data: ready, encoding: .utf8) == "READY")
+
+        let workerFinished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            process.waitUntilExit()
+            workerFinished.signal()
+        }
+        #expect(context.cancel())
+        let cleanupFinished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            context.finishAfterCancellationCleanup { _ in }
+            cleanupFinished.signal()
+        }
+
+        let cleanupResult = cleanupFinished.wait(timeout: .now() + 2)
+        let workerResult = workerFinished.wait(timeout: .now() + 2)
+
+        #expect(cleanupResult == .success)
+        #expect(workerResult == .success)
+        #expect(!process.isRunning)
+        #expect(process.terminationReason == .uncaughtSignal)
+        #expect(process.terminationStatus == SIGKILL)
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
+    }
+
     @Test("Abbruchmeldung und Bereinigungswarnung gehen dem Abschluss voraus")
     func cancellationCleanupPrecedesTerminalEvent() async throws {
         let directory = try temporaryDirectory()

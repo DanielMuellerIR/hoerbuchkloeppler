@@ -69,75 +69,81 @@ extension AudioFile {
         guard registerProcess(process) else { return [] }
         defer { unregisterProcess(process) }
 
-        do {
-            guard !shouldCancel(), !taskCancellationRequested() else { return [] }
-            try process.run()
-            // Cancel kann genau zwischen dem letzten Check und `run()` liegen.
-            // Der Context hat den damals noch nicht laufenden Process dann nicht
-            // beendet; nach dem Start deshalb nochmals prüfen.
-            if shouldCancel() { process.terminate() }
-            // Erst die Pipe leeren, DANN auf Exit warten — sonst Deadlock, wenn
-            // die Kapitelliste den Pipe-Puffer (~64 KB) füllt.
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard !shouldCancel(), !taskCancellationRequested() else { return [] }
-
-            guard let text = String(data: data, encoding: .utf8) else {
-                log("⚠️ FFMETADATA von \(visibleURL.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
-                return [await AudioFile(foundFile: file)]
-            }
-            var chapters = parseFFMetadataChapters(text)
-            guard !chapters.isEmpty else {
-                log("⚠️ Keine Kapitel in \(visibleURL.lastPathComponent) gefunden. Nutze die Datei als ein Kapitel.")
-                return [await AudioFile(foundFile: file)]
-            }
-
-            let loadedDuration = try? await AVURLAsset(url: url).load(.duration)
-            guard !shouldCancel(), !taskCancellationRequested() else { return [] }
-            let totalDuration = sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
-            // Das LETZTE Kapitel hat in FFMETADATA oft keine END-Zeit — es gibt kein
-            // Folgekapitel, aus dem sie (wie in parseFFMetadataChapters) abgeleitet
-            // werden könnte. Ohne Korrektur bliebe es ein Null-Dauer-Kapitel, das ein
-            // leeres Segment erzeugt und die GANZE Konvertierung scheitern lässt.
-            // Deshalb die fehlende letzte END-Zeit aus der Gesamtdauer der Datei ableiten.
-            if let last = chapters.indices.last, chapters[last].end <= chapters[last].start {
-                if totalDuration.isFinite, totalDuration > chapters[last].start {
-                    chapters[last].end = totalDuration
+        return await withTaskCancellationHandler {
+            do {
+                guard !shouldCancel(), !taskCancellationRequested() else { return [] }
+                try process.run()
+                // Cancel kann genau zwischen dem letzten Check und `run()` liegen.
+                // Der Context hat den damals noch nicht laufenden Process dann nicht
+                // beendet; nach dem Start deshalb nochmals prüfen.
+                if shouldCancel() || taskCancellationRequested() {
+                    ProcessTerminator.requestTermination(process)
                 }
-            }
+                // Erst die Pipe leeren, DANN auf Exit warten — sonst Deadlock, wenn
+                // die Kapitelliste den Pipe-Puffer (~64 KB) füllt.
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                guard !shouldCancel(), !taskCancellationRequested() else { return [] }
 
-            // Eine teilweise kaputte Kapitelliste nicht in garantiert leere
-            // `ffmpeg -t 0`-Segmente übersetzen. Der sichere Fallback ist die
-            // komplette Datei als ein Kapitel; so scheitert nicht das ganze Buch.
-            guard chaptersAreValid(chapters, totalDuration: totalDuration) else {
-                log("⚠️ Unvollständige Kapitelzeiten in \(visibleURL.lastPathComponent). Nutze die Datei als ein Kapitel.")
+                guard let text = String(data: data, encoding: .utf8) else {
+                    log("⚠️ FFMETADATA von \(visibleURL.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
+                    return [await AudioFile(foundFile: file)]
+                }
+                var chapters = parseFFMetadataChapters(text)
+                guard !chapters.isEmpty else {
+                    log("⚠️ Keine Kapitel in \(visibleURL.lastPathComponent) gefunden. Nutze die Datei als ein Kapitel.")
+                    return [await AudioFile(foundFile: file)]
+                }
+
+                let loadedDuration = try? await AVURLAsset(url: url).load(.duration)
+                guard !shouldCancel(), !taskCancellationRequested() else { return [] }
+                let totalDuration = sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
+                // Das LETZTE Kapitel hat in FFMETADATA oft keine END-Zeit — es gibt kein
+                // Folgekapitel, aus dem sie (wie in parseFFMetadataChapters) abgeleitet
+                // werden könnte. Ohne Korrektur bliebe es ein Null-Dauer-Kapitel, das ein
+                // leeres Segment erzeugt und die GANZE Konvertierung scheitern lässt.
+                // Deshalb die fehlende letzte END-Zeit aus der Gesamtdauer der Datei ableiten.
+                if let last = chapters.indices.last, chapters[last].end <= chapters[last].start {
+                    if totalDuration.isFinite, totalDuration > chapters[last].start {
+                        chapters[last].end = totalDuration
+                    }
+                }
+
+                // Eine teilweise kaputte Kapitelliste nicht in garantiert leere
+                // `ffmpeg -t 0`-Segmente übersetzen. Der sichere Fallback ist die
+                // komplette Datei als ein Kapitel; so scheitert nicht das ganze Buch.
+                guard chaptersAreValid(chapters, totalDuration: totalDuration) else {
+                    log("⚠️ Unvollständige Kapitelzeiten in \(visibleURL.lastPathComponent). Nutze die Datei als ein Kapitel.")
+                    return [await AudioFile(foundFile: file)]
+                }
+                // Rundungsdifferenzen im FFMETADATA-Container lückenlos an die
+                // tatsächliche Dateidauer anlegen.
+                chapters[0].start = 0
+                for index in chapters.indices.dropFirst() {
+                    chapters[index].start = chapters[index - 1].end
+                }
+                if let last = chapters.indices.last { chapters[last].end = totalDuration }
+
+                var audioFiles: [AudioFile] = []
+                for (index, ch) in chapters.enumerated() {
+                    let title = ch.title.isEmpty ? "Kapitel \(index + 1)" : ch.title
+                    // AudioFile.init klemmt Dauer/startTime auf endlich und >= 0.
+                    audioFiles.append(AudioFile(
+                        foundFile: file,
+                        startTime: ch.start,
+                        duration: ch.end - ch.start,
+                        chapterTitle: title
+                    ))
+                }
+                log("✅ \(audioFiles.count) Kapitel aus \(visibleURL.lastPathComponent) extrahiert.")
+                return audioFiles
+            } catch {
+                if shouldCancel() || taskCancellationRequested() { return [] }
+                log("⚠️ Kapitel aus \(visibleURL.lastPathComponent) konnten nicht gelesen werden: \(error.localizedDescription)")
                 return [await AudioFile(foundFile: file)]
             }
-            // Rundungsdifferenzen im FFMETADATA-Container lückenlos an die
-            // tatsächliche Dateidauer anlegen.
-            chapters[0].start = 0
-            for index in chapters.indices.dropFirst() {
-                chapters[index].start = chapters[index - 1].end
-            }
-            if let last = chapters.indices.last { chapters[last].end = totalDuration }
-
-            var audioFiles: [AudioFile] = []
-            for (index, ch) in chapters.enumerated() {
-                let title = ch.title.isEmpty ? "Kapitel \(index + 1)" : ch.title
-                // AudioFile.init klemmt Dauer/startTime auf endlich und >= 0.
-                audioFiles.append(AudioFile(
-                    foundFile: file,
-                    startTime: ch.start,
-                    duration: ch.end - ch.start,
-                    chapterTitle: title
-                ))
-            }
-            log("✅ \(audioFiles.count) Kapitel aus \(visibleURL.lastPathComponent) extrahiert.")
-            return audioFiles
-        } catch {
-            if shouldCancel() || taskCancellationRequested() { return [] }
-            log("⚠️ Kapitel aus \(visibleURL.lastPathComponent) konnten nicht gelesen werden: \(error.localizedDescription)")
-            return [await AudioFile(foundFile: file)]
+        } onCancel: {
+            ProcessTerminator.requestTermination(process)
         }
     }
 

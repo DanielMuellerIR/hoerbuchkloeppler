@@ -191,7 +191,7 @@ private final class PreparationContext: @unchecked Sendable {
         taskCancellations.removeAll()
         lock.unlock()
         activeTaskCancellations.forEach { $0() }
-        activeProcesses.forEach { if $0.isRunning { $0.terminate() } }
+        ProcessTerminator.terminateInBackground(activeProcesses) {}
         return true
     }
 }
@@ -1022,7 +1022,9 @@ public final class ConversionSession: ObservableObject, Identifiable {
                         // Dasselbe Start-Race wie bei Encoding-Prozessen: Ein
                         // Cancel unmittelbar vor `run()` sah den Process noch
                         // nicht laufen. Nach dem Start sofort erneut prüfen.
-                        if preparation?.isCancelled == true { process.terminate() }
+                        if preparation?.isCancelled == true {
+                            ProcessTerminator.requestTermination(process)
+                        }
                         let data = pipe.fileHandleForReading.readDataToEndOfFile()
                         process.waitUntilExit()
                         guard process.terminationStatus == 0,

@@ -6,7 +6,7 @@
     "token_budget": 3000000,
     "status": "active",
     "started_at": "2026-08-25T16:29:49+02:00",
-    "tokens_spent": 207187
+    "tokens_spent": 400048
   },
   "campaign_history": [
     {
@@ -59,15 +59,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260825T162949635422+0200",
-        "completed_at": "2026-08-25T16:48:23+02:00",
-        "observed_head": "0b27acf318e2bd950809b7bc460a58f7aa7d8131",
-        "content_sha256": "f9d111368f55799bad7a659a3b588f7519a2140aca0babf18f7e4558d02fae23",
+        "completed_at": "2026-08-25T17:06:45+02:00",
+        "observed_head": "b33303c1dd735e5f205b9b1cd84b05857dede80c",
+        "content_sha256": "de020c5068daf112c1aa12a46372a9f0d6be392d2d624877664b78674a0d01af",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Ordnerscans brechen bei Lesefehlern ohne Teilergebnis ab; getrennte Provider deduplizieren Kapitelgruppen nach physischer Datei und bevorzugen Symlinks; MediaInfo-Fehler löschen alte Kandidaten; nur dekodierbares Artwork wird übernommen und je physischer Quelle einmal analysiert; kopierbares Log wächst inkrementell.",
+        "summary": "Theme-Diff erneut an Session-Grenzen zu FFmpegWrapper und CLI geprüft: ein serieller, laufbezogener Ereignisstrom schützt Main-Actor-State; Abbruchbereinigung und Abschluss sind deterministisch geordnet.",
         "tests": [
-          "swift test: 116 Tests in 18 Suites passed",
+          "swift test: 119 Tests in 18 Suites passed",
           "xcodebuild Release CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED"
         ]
       }
@@ -377,14 +377,19 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift"
       ],
       "priority": 1,
-      "state": "in_progress",
+      "state": "completed",
       "noted_at": "2026-08-25T16:46:04+02:00",
       "campaign_id": "20260825T162949635422+0200",
       "started_at": "2026-08-25T16:48:58+02:00",
-      "active_run": {
+      "completed": {
         "campaign_id": "20260825T162949635422+0200",
-        "started_at": "2026-08-25T16:48:58+02:00",
-        "observed_head": "0b27acf318e2bd950809b7bc460a58f7aa7d8131"
+        "completed_at": "2026-08-25T17:06:21+02:00",
+        "observed_head": "b33303c1dd735e5f205b9b1cd84b05857dede80c",
+        "summary": "Alle Worker-Ereignisse laufen mit Lauf-ID über einen einzelnen seriellen AsyncStream-Konsumenten auf dem Main Actor; veraltete Ereignisse werden verworfen. Abbruchmeldung und Bereinigungswarnungen werden vor dem terminalen Event geordnet, und Start/Ende bleiben Main-Actor-isoliert.",
+        "tests": [
+          "swift test: 119 Tests in 18 Suites passed",
+          "xcodebuild Release CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED"
+        ]
       }
     },
     {
@@ -395,9 +400,15 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift"
       ],
       "priority": 1,
-      "state": "pending",
+      "state": "in_progress",
       "noted_at": "2026-08-25T16:46:04+02:00",
-      "campaign_id": "20260825T162949635422+0200"
+      "campaign_id": "20260825T162949635422+0200",
+      "started_at": "2026-08-25T17:07:03+02:00",
+      "active_run": {
+        "campaign_id": "20260825T162949635422+0200",
+        "started_at": "2026-08-25T17:07:03+02:00",
+        "observed_head": "b33303c1dd735e5f205b9b1cd84b05857dede80c"
+      }
     },
     {
       "id": "gui-import-cancellation",
@@ -445,6 +456,40 @@
       "priority": 3,
       "state": "pending",
       "noted_at": "2026-08-25T16:46:05+02:00",
+      "campaign_id": "20260825T162949635422+0200"
+    },
+    {
+      "id": "process-tree-termination",
+      "summary": "ProcessTerminator beendet nur den direkten PID. Ein als PATH-Tool zugelassenes Wrapper-Skript kann Kindprozesse mit geerbter Pipe hinterlassen; für echten Prozessbaum-Besitz wäre ein kontrollierter Prozessgruppen-Start nötig.",
+      "evidence": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift"
+      ],
+      "priority": 2,
+      "state": "pending",
+      "noted_at": "2026-08-25T17:19:14+02:00",
+      "campaign_id": "20260825T162949635422+0200"
+    },
+    {
+      "id": "cli-handoff-process-status",
+      "summary": "Der GUI-Handoff startet /usr/bin/open, wertet dessen späteren Exit-Code aber nicht aus; ein fehlgeschlagener Terminal-Start bleibt ohne konkrete Meldung.",
+      "evidence": [
+        "Hörbuchklöppler/ContentView.swift"
+      ],
+      "priority": 3,
+      "state": "pending",
+      "noted_at": "2026-08-25T17:19:14+02:00",
+      "campaign_id": "20260825T162949635422+0200"
+    },
+    {
+      "id": "process-cancellation-boundary-tests",
+      "summary": "PreparationContext und der öffentliche Task-Cancellation-Handler der Kapitelextraktion nutzen den gemeinsamen TERM/KILL-Helfer, besitzen aber noch keinen eigenen injizierten Prozess-Regressionstest.",
+      "evidence": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift"
+      ],
+      "priority": 3,
+      "state": "pending",
+      "noted_at": "2026-08-25T17:25:01+02:00",
       "campaign_id": "20260825T162949635422+0200"
     }
   ]
