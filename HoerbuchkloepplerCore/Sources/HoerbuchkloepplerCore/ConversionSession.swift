@@ -102,6 +102,31 @@ public struct AudioLoadResult: Sendable {
     }
 }
 
+struct FileDiscoveryResult: Sendable {
+    let files: [FoundFile]
+    let failureDescription: String?
+}
+
+/// `DirectoryEnumerator` darf seinen Fehler-Handler nebenläufig aufrufen. Der
+/// Recorder hält deshalb nur den ersten Fehler hinter einer kleinen Sperre fest.
+private final class DirectoryScanFailureRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var firstFailure: String?
+
+    func record(url: URL, error: Error) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard firstFailure == nil else { return }
+        firstFailure = "\(url.path): \(error.localizedDescription)"
+    }
+
+    func snapshot() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return firstFailure
+    }
+}
+
 /// Besitzt nur die externen Prozesse des Imports (Kapitel- und Metadatenanalyse).
 /// Damit kann die CLI schon vor dem eigentlichen Konvertierungs-Context auf
 /// Ctrl-C reagieren, ohne Prozesse eines anderen Fensters anzufassen.
@@ -455,7 +480,12 @@ public final class ConversionSession: ObservableObject, Identifiable {
     public func addLog(_ message: String, type: LogType = .info) {
         let entry = LogEntry(type: type, message: message, date: Date())
         eventLogs.append(entry)
-        logString = eventLogs.map { $0.message }.joined(separator: "\n")
+        // `logString` dient nur dem „Gesamtes Log kopieren“-Fallback. Den bereits
+        // aufgebauten Text nicht für jede neue Zeile aus allen Einträgen neu
+        // erzeugen: Bei langen Läufen blockierte diese quadratische Arbeit den
+        // Main Actor zunehmend.
+        let appendedText = logString.isEmpty ? message : "\n\(message)"
+        logString.append(contentsOf: appendedText)
         let timeStr = ConversionSession.logDateFormatter.string(from: entry.date)
         emit("[\(timeStr)] \(message)")
     }
@@ -775,9 +805,21 @@ public final class ConversionSession: ObservableObject, Identifiable {
         // „Alle löschen“ aus und würde den gemeinsamen Mehrfach-Drop entwerten.
         guard !newFiles.isEmpty else { return }
         let canRepresentFolder = audioFiles.isEmpty && sourceFolderForCLI != nil
-        addLog("📥 Importiere \(newFiles.count) Datei(en)...")
-        self.audioFiles.append(contentsOf: newFiles)
-        self.audioFiles.sort(by: Self.audioFileComesBefore)
+        let sourceCount = Set(newFiles.map { $0.sourceURL.standardizedFileURL.path }).count
+        let sourceLabel = sourceCount == 1 ? "Audiodatei" : "Audiodateien"
+        if sourceCount == newFiles.count {
+            addLog("📥 Importiere \(sourceCount) \(sourceLabel)...")
+        } else {
+            addLog("📥 Importiere \(sourceCount) \(sourceLabel) mit \(newFiles.count) Kapiteln...")
+        }
+        let deduplicated = Self.deduplicateAudioFiles(audioFiles + newFiles)
+        self.audioFiles = deduplicated.files.sorted(by: Self.audioFileComesBefore)
+        for duplicate in deduplicated.discardedSources {
+            addLog(
+                "⚠️ \(duplicate.discarded.lastPathComponent) und \(duplicate.kept.lastPathComponent) "
+                + "lesen dieselbe Audiodatei; importiert wird nur \(duplicate.kept.lastPathComponent)."
+            )
+        }
         if canRepresentFolder, let sourceFolderForCLI {
             cliSourceFolderURL = sourceFolderForCLI
             cliRepresentedFileIDs = Set(audioFiles.map(\.id))
@@ -803,11 +845,16 @@ public final class ConversionSession: ObservableObject, Identifiable {
             let importedFileIDs = Set(filesToSearch.map(\.id))
             isPreparingArtwork = true
             Task { [weak self] in
-                var foundArtwork: (image: NSImage?, data: Data)?
-                for file in filesToSearch {
+                var foundArtwork: (image: NSImage, data: Data)?
+                for file in Self.uniqueArtworkCandidates(filesToSearch) {
                     if let artworkData = await AudioFile.extractEmbeddedArtwork(from: file.url) {
-                        foundArtwork = (NSImage(data: artworkData), artworkData)
-                        break
+                        // Manche Container deklarieren beliebige Binärdaten als
+                        // Artwork. Nur tatsächlich dekodierbare Bilder dürfen in
+                        // den späteren ffmpeg-Auftrag gelangen.
+                        if let image = NSImage(data: artworkData) {
+                            foundArtwork = (image, artworkData)
+                            break
+                        }
                     }
                 }
                 guard let self,
@@ -913,7 +960,12 @@ public final class ConversionSession: ObservableObject, Identifiable {
             return
         }
         guard let candidates else {
-            showSelectionUI = true
+            // Kandidaten gehören immer genau zum aktuellen Import. Andernfalls
+            // könnte die Auswahl nach einem MediaInfo-Fehler Werte des vorherigen
+            // Buchs anbieten.
+            titleCandidates = []
+            authorCandidates = []
+            showSelectionUI = importToken != nil
             return
         }
         titleCandidates = candidates.titles
@@ -1047,10 +1099,20 @@ public final class ConversionSession: ObservableObject, Identifiable {
         var foundAudio: [AudioFile] = []
         var foundImages: [URL] = []
         var warnings: [String] = []
-        let discovered = Self.recursiveFileURLs(
+        let discovery = Self.discoverFileURLs(
             in: url,
             cancellationRequested: { preparationCancellationRequested() }
         )
+        if let failure = discovery.failureDescription {
+            return ScannedFolder(
+                folderURL: url,
+                audioFiles: [],
+                imageURLs: [],
+                embeddedArtwork: nil,
+                warnings: ["❌ Ordnerimport abgebrochen, weil nicht alle Einträge gelesen werden konnten: \(failure)"]
+            )
+        }
+        let discovered = discovery.files
         let supported = discovered.filter { $0.kind != .unsupported }
         let deduplicated = Self.deduplicateFoundFiles(supported)
         var loggedTargets = Set<String>()
@@ -1080,12 +1142,14 @@ public final class ConversionSession: ObservableObject, Identifiable {
             }
         }
         var embedded: Data? = nil
-        for audioFile in foundAudio {
+        for audioFile in Self.uniqueArtworkCandidates(foundAudio) {
             if preparationCancellationRequested() { break }
             if let artworkData = await AudioFile.extractEmbeddedArtwork(from: audioFile.url) {
                 if preparationCancellationRequested() { break }
-                embedded = artworkData
-                break
+                if NSImage(data: artworkData) != nil {
+                    embedded = artworkData
+                    break
+                }
             }
         }
         return ScannedFolder(
@@ -1139,31 +1203,91 @@ public final class ConversionSession: ObservableObject, Identifiable {
         return (kept, discarded)
     }
 
+    /// Dedupliziert auch über getrennt eintreffende Drop-Provider hinweg. Alle
+    /// Kapitel derselben Containerdatei bleiben als Gruppe erhalten; ein
+    /// sichtbarer Symlink gewinnt wie beim Ordnerscan gegen das direkte Ziel.
+    nonisolated static func deduplicateAudioFiles(
+        _ files: [AudioFile]
+    ) -> (files: [AudioFile], discardedSources: [(discarded: URL, kept: URL)]) {
+        var selectedSourceByTarget: [String: URL] = [:]
+        for file in files {
+            let target = file.url.standardizedFileURL.path
+            let source = file.sourceURL.standardizedFileURL
+            guard let selected = selectedSourceByTarget[target] else {
+                selectedSourceByTarget[target] = source
+                continue
+            }
+            let selectedIsLink = selected.path != target
+            let candidateIsLink = source.path != target
+            if candidateIsLink && !selectedIsLink {
+                selectedSourceByTarget[target] = source
+            }
+        }
+
+        var reportedDiscardedSources = Set<String>()
+        var discardedSources: [(discarded: URL, kept: URL)] = []
+        let kept = files.filter { file in
+            let target = file.url.standardizedFileURL.path
+            guard let selected = selectedSourceByTarget[target] else { return false }
+            let source = file.sourceURL.standardizedFileURL
+            guard source != selected else { return true }
+            let reportKey = "\(target)\u{0}\(source.path)"
+            if reportedDiscardedSources.insert(reportKey).inserted {
+                discardedSources.append((discarded: source, kept: selected))
+            }
+            return false
+        }
+        return (kept, discardedSources)
+    }
+
+    /// Ein m4b liefert mehrere Kapitel mit derselben physischen URL. Seine
+    /// eingebetteten Metadaten müssen trotzdem nur einmal gelesen werden.
+    nonisolated static func uniqueArtworkCandidates(_ files: [AudioFile]) -> [AudioFile] {
+        var seen = Set<String>()
+        return files.filter { seen.insert($0.url.standardizedFileURL.path).inserted }
+    }
+
     /// `FileManager.DirectoryEnumerator` ist absichtlich nicht über einen
     /// asynchronen Aufruf hinweg haltbar. Die Dateiliste wird deshalb synchron
     /// aufgebaut, prüft den laufbezogenen Abbruch aber vor und nach jedem
     /// `nextObject()`, damit auch ein großer Ordnerscan sofort enden kann.
-    nonisolated static func recursiveFileURLs(
+    nonisolated static func discoverFileURLs(
         in url: URL,
         cancellationRequested: () -> Bool = { false }
-    ) -> [FoundFile] {
-        guard !cancellationRequested() else { return [] }
+    ) -> FileDiscoveryResult {
+        guard !cancellationRequested() else {
+            return FileDiscoveryResult(files: [], failureDescription: nil)
+        }
+        let failureRecorder = DirectoryScanFailureRecorder()
         guard let enumerator = FileManager.default.enumerator(
             at: url,
-            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            errorHandler: { failedURL, error in
+                failureRecorder.record(url: failedURL, error: error)
+                // Bei einem Lesefehler wäre jedes Teilergebnis potenziell ein
+                // Hörbuch mit fehlenden Kapiteln. Deshalb sofort stoppen.
+                return false
+            }
         ) else {
-            return []
+            return FileDiscoveryResult(
+                files: [],
+                failureDescription: "\(url.path): Ordner kann nicht gelesen werden."
+            )
         }
 
         var files: [FoundFile] = []
         while !cancellationRequested() {
             guard let item = enumerator.nextObject() else { break }
             guard !cancellationRequested() else { break }
-            guard let fileURL = item as? URL,
-                  let values = try? fileURL.resourceValues(
+            guard let fileURL = item as? URL else { continue }
+            let values: URLResourceValues
+            do {
+                values = try fileURL.resourceValues(
                     forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
-                  ) else {
-                continue
+                )
+            } catch {
+                failureRecorder.record(url: fileURL, error: error)
+                break
             }
 
             if values.isRegularFile == true {
@@ -1181,7 +1305,17 @@ public final class ConversionSession: ObservableObject, Identifiable {
             enumerator.skipDescendants()
             if let found = foundFile(at: fileURL) { files.append(found) }
         }
-        return files
+        if let failure = failureRecorder.snapshot() {
+            return FileDiscoveryResult(files: [], failureDescription: failure)
+        }
+        return FileDiscoveryResult(files: files, failureDescription: nil)
+    }
+
+    nonisolated static func recursiveFileURLs(
+        in url: URL,
+        cancellationRequested: () -> Bool = { false }
+    ) -> [FoundFile] {
+        discoverFileURLs(in: url, cancellationRequested: cancellationRequested).files
     }
 
     /// Leichter Teil: das Scan-Ergebnis in den Main-Actor-isolierten
@@ -1196,8 +1330,9 @@ public final class ConversionSession: ObservableObject, Identifiable {
         let expectedCoverRevision = importToken?.coverRevision ?? coverRevision
         if coverRevision == expectedCoverRevision, !isCoverSuppressed,
            coverImage == nil, coverPath == nil,
-           let artworkData = scanned.embeddedArtwork {
-            coverImage = NSImage(data: artworkData)
+           let artworkData = scanned.embeddedArtwork,
+           let image = NSImage(data: artworkData) {
+            coverImage = image
             coverPath = nil
             // Rohdaten merken (siehe processIncomingFiles): nur so landet ein
             // eingebettetes Cover ohne separate Bilddatei auch im Output.

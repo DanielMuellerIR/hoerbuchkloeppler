@@ -158,6 +158,30 @@ struct AsyncAVFoundationTests {
         #expect(files.isEmpty)
         #expect(cancellationChecks == 3)
     }
+
+    @Test("Ein Lesefehler verwirft das vollständige Scan-Teilergebnis")
+    func scanFailsClosedAfterTraversalError() throws {
+        let directory = try temporaryDirectory()
+        let blocked = directory.appendingPathComponent("zz-nicht-lesbar")
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: blocked.path
+            )
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try writeSilentWAV(to: directory.appendingPathComponent("01-gueltig.wav"))
+        try FileManager.default.createDirectory(at: blocked, withIntermediateDirectories: false)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o000],
+            ofItemAtPath: blocked.path
+        )
+
+        let discovered = ConversionSession.discoverFileURLs(in: directory)
+
+        #expect(discovered.files.isEmpty)
+        #expect(discovered.failureDescription?.contains("zz-nicht-lesbar") == true)
+    }
 }
 
 @Suite("Review-Fixes – Ausgabeplan und atomare Übernahme")
@@ -954,6 +978,122 @@ struct MetadataAndCLITests {
 @Suite("Review-Fixes – Import-Lebenszyklus")
 @MainActor
 struct ImportLifecycleTests {
+    @Test("Kopierbares Log wächst zeilenweise und wird vollständig zurückgesetzt")
+    func copyableLogPreservesOrderAndReset() {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+
+        session.addLog("Erste Zeile")
+        session.addLog("Zweite Zeile", type: .highlight)
+        session.addLog("Dritte Zeile", type: .dim)
+
+        #expect(session.logString == "Erste Zeile\nZweite Zeile\nDritte Zeile")
+        #expect(session.eventLogs.map(\.message) == ["Erste Zeile", "Zweite Zeile", "Dritte Zeile"])
+
+        session.resetSession()
+        #expect(session.logString.isEmpty)
+        #expect(session.eventLogs.isEmpty)
+    }
+
+    @Test("Getrennte Provider behalten beim gleichen Ziel nur die Symlink-Kapitelgruppe")
+    func providerResultsAreDeduplicatedByReadURL() async {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        let token = session.beginImport(expectedItemCount: 2)
+        let target = URL(fileURLWithPath: "/tmp/Original.m4b")
+        let link = URL(fileURLWithPath: "/tmp/Bewusst benannt.m4b")
+        let directFile = FoundFile(source: target, resolved: target)
+        let linkedFile = FoundFile(source: link, resolved: target)
+        let directChapters = [
+            AudioFile(foundFile: directFile, startTime: 0, duration: 1, chapterTitle: "Direkt 1"),
+            AudioFile(foundFile: directFile, startTime: 1, duration: 1, chapterTitle: "Direkt 2")
+        ]
+        let linkedChapters = [
+            AudioFile(foundFile: linkedFile, startTime: 0, duration: 1, chapterTitle: "Link 1"),
+            AudioFile(foundFile: linkedFile, startTime: 1, duration: 1, chapterTitle: "Link 2")
+        ]
+
+        await session.processIncomingFiles(
+            directChapters,
+            skipCoverExtraction: true,
+            importToken: token
+        )
+        await session.finishImport(token)
+        await session.processIncomingFiles(
+            linkedChapters,
+            skipCoverExtraction: true,
+            importToken: token
+        )
+        await session.finishImport(token)
+
+        #expect(session.audioFiles.map(\.chapterTitle) == ["Link 1", "Link 2"])
+        #expect(session.audioFiles.allSatisfy { $0.sourceURL == link })
+        #expect(session.eventLogs.contains { $0.message.contains("1 Audiodatei mit 2 Kapiteln") })
+        #expect(session.eventLogs.contains { $0.message.contains("lesen dieselbe Audiodatei") })
+    }
+
+    @Test("Artwork-Kandidaten enthalten jede physische Datei nur einmal")
+    func artworkCandidatesDeduplicateContainerChapters() {
+        let source = URL(fileURLWithPath: "/tmp/Buch.m4b")
+        let files = [
+            AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "1"),
+            AudioFile(url: source, startTime: 1, duration: 1, chapterTitle: "2"),
+            AudioFile(
+                url: URL(fileURLWithPath: "/tmp/Zweites.m4a"),
+                startTime: 0,
+                duration: 1,
+                chapterTitle: "3"
+            )
+        ]
+
+        let candidates = ConversionSession.uniqueArtworkCandidates(files)
+
+        #expect(candidates.map { $0.url.lastPathComponent } == ["Buch.m4b", "Zweites.m4a"])
+    }
+
+    @Test("Ungültige eingebettete Bilddaten werden nicht als Cover gespeichert")
+    func invalidEmbeddedArtworkIsRejected() async {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+
+        await session.applyScannedFolder(.init(
+            folderURL: URL(fileURLWithPath: "/tmp/Buch"),
+            audioFiles: [],
+            imageURLs: [],
+            embeddedArtwork: Data("kein Bild".utf8)
+        ))
+
+        #expect(session.coverImage == nil)
+        #expect(session.coverPath == nil)
+        #expect(session.embeddedCoverData == nil)
+    }
+
+    @Test("MediaInfo-Fehler entfernt Kandidaten des vorherigen Imports")
+    func metadataFailureClearsStaleCandidates() async {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        session.titleCandidates = [TagCandidate(type: "Alt", key: "Title", value: "Falscher Titel")]
+        session.authorCandidates = [TagCandidate(type: "Alt", key: "Artist", value: "Falscher Autor")]
+        let token = session.beginImport()
+        let missing = AudioFile(
+            url: URL(fileURLWithPath: "/tmp/fehlt-\(UUID().uuidString).mp3"),
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Fehlt"
+        )
+
+        await session.processIncomingFiles(
+            [missing],
+            skipCoverExtraction: true,
+            importToken: token
+        )
+        await session.finishImport(token)
+
+        #expect(session.titleCandidates.isEmpty)
+        #expect(session.authorCandidates.isEmpty)
+        #expect(session.showSelectionUI)
+    }
+
     @Test("Alle löschen entwertet noch laufende Drop-Ergebnisse")
     func clearingFilesInvalidatesPendingImport() async {
         let session = ConversionSession(settings: AudioSettings())

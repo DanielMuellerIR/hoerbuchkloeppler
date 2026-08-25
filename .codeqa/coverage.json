@@ -2,15 +2,22 @@
   "schema_version": 1,
   "project": "Hoerbuchkloeppler",
   "campaign": {
-    "id": "20260815T134633974092+0200",
-    "token_budget": 2000000,
-    "status": "complete",
-    "started_at": "2026-08-15T13:46:33+02:00",
-    "tokens_spent": 599452,
-    "finished_at": "2026-08-15T14:26:45+02:00",
-    "finish_reason": "all-current"
+    "id": "20260825T162949635422+0200",
+    "token_budget": 3000000,
+    "status": "active",
+    "started_at": "2026-08-25T16:29:49+02:00"
   },
-  "campaign_history": [],
+  "campaign_history": [
+    {
+      "id": "20260815T134633974092+0200",
+      "token_budget": 2000000,
+      "status": "complete",
+      "started_at": "2026-08-15T13:46:33+02:00",
+      "tokens_spent": 599452,
+      "finished_at": "2026-08-15T14:26:45+02:00",
+      "finish_reason": "all-current"
+    }
+  ],
   "scope": {
     "paths": [
       "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore",
@@ -48,7 +55,7 @@
       "risk": "critical",
       "priority": 1,
       "reason": "Bekannte SIGINT-Lücke in der Vorbereitungsphase sowie zentraler Main-Actor-, Import- und Metadatenzustand",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260815T134633974092+0200",
         "completed_at": "2026-08-15T14:10:51+02:00",
@@ -61,6 +68,13 @@
         "tests": [
           "swift test -Xswiftc -warnings-as-errors: 90 Tests in 17 Suites passed"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260825T162949635422+0200",
+        "started_at": "2026-08-25T16:30:20+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
@@ -326,13 +340,13 @@
     }
   ],
   "architecture": {
-    "campaign_id": "20260815T134633974092+0200",
-    "recorded_at": "2026-08-15T13:47:22+02:00",
-    "observed_head": "4c6590b080ddb87076963b2fe898118a65ee67a2",
-    "summary": "Das Paradigma passt zu zwei Frontends, aber ConversionSession bündelt Zustandsmodell, Import und Metadatenanalyse; FFmpegWrapper bündelt Planung, Prozesssteuerung, Encoding und atomare Ausgabe.",
+    "campaign_id": "20260825T162949635422+0200",
+    "recorded_at": "2026-08-25T16:29:55+02:00",
+    "observed_head": "a0f310ec408f0e15c188878a8481e56e31075f7b",
+    "summary": "Das Paradigma passt weiterhin zu zwei Frontends. ConversionSession bündelt jedoch Zustandsmodell, Import und Metadatenanalyse; FFmpegWrapper bündelt Planung, Prozesssteuerung, Encoding, Fortschritt und atomare Ausgabe.",
     "paradigm": "Schichtenmodell mit gemeinsamem Core; SwiftUI-Frontend MVVM-artig über ConversionSession und CLI als separater Adapter",
     "fit": "gespannt",
-    "recommendation": "Lokale Verantwortungsgrenzen und testbare Hilfsfunktionen bereichsweise schärfen; kein Paradigmenwechsel, da der gemeinsame Core weiterhin die passende Architektur ist."
+    "recommendation": "Verantwortungsgrenzen und testbare Hilfsfunktionen nur bereichsweise schärfen. Ein Paradigmenwechsel lohnt sich derzeit nicht: Der gemeinsame Core verhindert weiterhin doppelte Konvertierungslogik in GUI und CLI."
   },
   "themes": [
     {
@@ -359,6 +373,78 @@
           "Realer CLI-SIGINT während der Analyse von 1.001 WAV-Dateien: Exit 130 innerhalb der 10-Sekunden-Grenze"
         ]
       }
+    },
+    {
+      "id": "conversion-event-ordering",
+      "summary": "Worker-Ereignisse aus FFmpegWrapper laufen als unabhängige MainActor-Tasks; Logs haben keine Run-ID und alte oder umsortierte Meldungen können einen neuen Lauf verunreinigen.",
+      "evidence": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift"
+      ],
+      "priority": 1,
+      "state": "pending",
+      "noted_at": "2026-08-25T16:46:04+02:00",
+      "campaign_id": "20260825T162949635422+0200"
+    },
+    {
+      "id": "process-termination-escalation",
+      "summary": "Import- und Konvertierungsabbruch senden nur SIGTERM; mehrere anschließende waitUntilExit-Aufrufe haben keine Frist und hängen bei einem SIGTERM-ignorierenden Tool unbegrenzt.",
+      "evidence": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift"
+      ],
+      "priority": 1,
+      "state": "pending",
+      "noted_at": "2026-08-25T16:46:04+02:00",
+      "campaign_id": "20260825T162949635422+0200"
+    },
+    {
+      "id": "gui-import-cancellation",
+      "summary": "GUI-Provider umgehen den PreparationCoordinator; ein neuer Drop entwertet nur den Token, beendet aber alte AVFoundation-/ffmpeg-Arbeit und tokenlose Logs nicht.",
+      "evidence": [
+        "Hörbuchklöppler/ContentView.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift"
+      ],
+      "priority": 2,
+      "state": "pending",
+      "noted_at": "2026-08-25T16:46:05+02:00",
+      "campaign_id": "20260825T162949635422+0200"
+    },
+    {
+      "id": "artwork-analysis-pipeline",
+      "summary": "Mehrfach-Drops starten 1+…+N Artwork-Suchen, Teilentfernung startet nach verworfenem Ergebnis keine Ersatzsuche und CLI-Optionen können unnötige automatische Analyse nicht vorab unterdrücken.",
+      "evidence": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift",
+        "Hörbuchklöppler/ContentView.swift"
+      ],
+      "priority": 2,
+      "state": "pending",
+      "noted_at": "2026-08-25T16:46:05+02:00",
+      "campaign_id": "20260825T162949635422+0200"
+    },
+    {
+      "id": "audio-track-validation",
+      "summary": "Die positive Asset-Gesamtdauer genügt für den Import; eine video-only MP4 wird ohne Audio-Track-Prüfung akzeptiert und scheitert erst beim ffmpeg-Audiomapping.",
+      "evidence": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift"
+      ],
+      "priority": 2,
+      "state": "pending",
+      "noted_at": "2026-08-25T16:46:05+02:00",
+      "campaign_id": "20260825T162949635422+0200"
+    },
+    {
+      "id": "cancellable-media-process-runner",
+      "summary": "ConversionSession startet MediaInfo-Prozesse selbst; alte Dateiinfo-Abfragen werden nur im Ergebnis verworfen, nicht beendet, und Prozess-Frist/Cancellation sind mehrfach implementiert.",
+      "evidence": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift"
+      ],
+      "priority": 3,
+      "state": "pending",
+      "noted_at": "2026-08-25T16:46:05+02:00",
+      "campaign_id": "20260825T162949635422+0200"
     }
   ]
 }
