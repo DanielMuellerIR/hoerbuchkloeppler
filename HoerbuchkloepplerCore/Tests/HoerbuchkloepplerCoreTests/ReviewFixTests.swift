@@ -45,6 +45,39 @@ private final class ThreadSafeLogProbe: @unchecked Sendable {
     }
 }
 
+/// Deterministische Schranke für Race-Tests: Der Hintergrund-Thread meldet,
+/// dass er den kritischen Abschnitt erreicht hat, und wartet auf die Freigabe.
+private final class BlockingGate: @unchecked Sendable {
+    private let condition = NSCondition()
+    private var blocked = false
+    private var released = false
+
+    func blockUntilReleased() {
+        condition.lock()
+        blocked = true
+        condition.broadcast()
+        while !released {
+            condition.wait()
+        }
+        condition.unlock()
+    }
+
+    func waitUntilBlocked() {
+        condition.lock()
+        while !blocked {
+            condition.wait()
+        }
+        condition.unlock()
+    }
+
+    func release() {
+        condition.lock()
+        released = true
+        condition.broadcast()
+        condition.unlock()
+    }
+}
+
 private actor PreparationCancellationProbe {
     private var started = false
     private var observedCancellation = false
@@ -637,6 +670,58 @@ struct CancellationIsolationTests {
         #expect(session.isCurrentConversion(second.id))
     }
 
+    @Test("Ereignisse eines alten Laufs erreichen den neuen Lauf nicht")
+    func staleWorkerEventsAreDiscardedAfterRestart() async {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        let first = session.beginConversionRun()
+        session.enqueueLog("Veralteter Lauf", runID: first.id)
+
+        let second = session.beginConversionRun()
+        session.enqueueLog("Aktueller Lauf", runID: second.id)
+        await session.flushConversionEvents()
+
+        #expect(session.eventLogs.map(\.message) == ["Aktueller Lauf"])
+        #expect(first.isCancelled)
+        #expect(session.isCurrentConversion(second.id))
+    }
+
+    @Test("Reset, Fortschritt, Log und Abschluss bleiben in Sendereihenfolge")
+    func workerEventsRemainOrderedThroughCompletion() async {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        let context = session.beginConversionRun()
+        let output = URL(fileURLWithPath: "/tmp/Buch.m4b")
+
+        session.enqueueSegmentReset(title: "Finaler Lauf", runID: context.id)
+        session.enqueueSegmentInitialization(index: 1, filename: "Kapitel", runID: context.id)
+        session.enqueueProgress(
+            0.6,
+            segmentIndex: 1,
+            segmentProgress: 0.5,
+            runID: context.id
+        )
+        session.enqueueLog("Vor dem Abschluss", runID: context.id)
+        session.enqueueConversionFinished(
+            success: false,
+            cancelled: false,
+            completedOutputs: [output],
+            runID: context.id
+        )
+        await session.flushConversionEvents()
+
+        #expect(session.segmentProgress[0]?.filename == "Finaler Lauf")
+        #expect(session.segmentProgress[1] == SegmentStatus(filename: "Kapitel", progress: 0.5))
+        #expect(session.progress == 0.6)
+        #expect(session.eventLogs.map(\.message) == [
+            "Vor dem Abschluss",
+            "🏁 Vorgang mit Fehlern beendet."
+        ])
+        #expect(session.completedOutputURLs == [output])
+        #expect(session.lastConversionSucceeded == false)
+        #expect(!session.isCurrentConversion(context.id))
+    }
+
     @Test("Abbruch entfernt auch die laufbezogene Partial-Datei")
     func cancellationRemovesStagedOutput() throws {
         let directory = try temporaryDirectory()
@@ -648,6 +733,54 @@ struct CancellationIsolationTests {
 
         #expect(context.cancel())
         #expect(!FileManager.default.fileExists(atPath: staged.path))
+    }
+
+    @Test("Abbruchmeldung und Bereinigungswarnung gehen dem Abschluss voraus")
+    func cancellationCleanupPrecedesTerminalEvent() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let stagedDirectory = directory.appendingPathComponent(".Buch.partial-race.m4b")
+        try FileManager.default.createDirectory(
+            at: stagedDirectory,
+            withIntermediateDirectories: true
+        )
+
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        let context = session.beginConversionRun()
+        context.registerStagedOutput(stagedDirectory)
+        let cancellationGate = BlockingGate()
+
+        let cancellation = Task.detached {
+            context.cancel {
+                session.enqueueCancellationStarted(runID: context.id)
+                cancellationGate.blockUntilReleased()
+            }
+        }
+        cancellationGate.waitUntilBlocked()
+
+        let finish = Task.detached {
+            context.finishAfterCancellationCleanup { cancelled in
+                session.enqueueConversionFinished(
+                    success: false,
+                    cancelled: cancelled,
+                    completedOutputs: [],
+                    runID: context.id
+                )
+            }
+        }
+        cancellationGate.release()
+
+        #expect(await cancellation.value)
+        await finish.value
+        await session.flushConversionEvents()
+
+        let messages = session.eventLogs.map(\.message)
+        #expect(messages.count == 2)
+        #expect(messages.first == "🛑 Vorgang wird abgebrochen und bereinigt.")
+        #expect(messages.last?.contains("Staging-Datei konnte nicht entfernt werden") == true)
+        #expect(session.conversionStatus == "Abgebrochen")
+        #expect(!session.isCurrentConversion(context.id))
     }
 
     @Test("Cancel und Commit haben eine eindeutige Reihenfolge")
@@ -670,7 +803,7 @@ struct CancellationIsolationTests {
     }
 
     @Test("Der Abschluss übernimmt die erfolgreichen Ziel-URLs in einer Nachricht")
-    func conversionFinishCarriesCompletedOutputs() async throws {
+    func conversionFinishCarriesCompletedOutputs() async {
         let session = ConversionSession(settings: AudioSettings())
         let context = session.beginConversionRun()
         let url = URL(fileURLWithPath: "/tmp/Buch-01.m4b")
@@ -681,12 +814,7 @@ struct CancellationIsolationTests {
             completedOutputs: [url],
             runID: context.id
         )
-        // Die Nachricht läuft als Main-Actor-Task; bis zu 1 s darauf warten.
-        var attempts = 0
-        while session.lastConversionSucceeded == nil, attempts < 1_000 {
-            attempts += 1
-            try await Task.sleep(for: .milliseconds(1))
-        }
+        await session.flushConversionEvents()
 
         // Auch bei einem Teilerfolg (success == false) kennt die Session damit
         // die bereits atomar übernommenen Dateien — die CLI listet sie auf,
@@ -1429,7 +1557,7 @@ struct ReviewFixes20260817Tests {
         try Data("nicht löschen".utf8).write(to: inhalt)
 
         let logs = ThreadSafeLogProbe()
-        let context = ConversionContext(log: logs.append)
+        let context = ConversionContext { _, message in logs.append(message) }
         context.registerStagedOutput(staging)
         context.discardStagedOutput(staging)
 

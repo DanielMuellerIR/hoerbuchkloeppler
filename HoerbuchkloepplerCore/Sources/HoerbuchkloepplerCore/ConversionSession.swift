@@ -231,7 +231,7 @@ private final class ConversionCoordinator: @unchecked Sendable {
     private var active: ConversionContext?
     private var finished = false
 
-    func begin(log: @escaping @Sendable (String) -> Void) -> ConversionContext {
+    func begin(log: @escaping @Sendable (UUID, String) -> Void) -> ConversionContext {
         let next = ConversionContext(log: log)
         lock.lock()
         let previous = active
@@ -270,12 +270,62 @@ private final class ConversionCoordinator: @unchecked Sendable {
     }
 }
 
+private enum ConversionEvent: Sendable {
+    case log(String, LogType, UUID)
+    case verboseLog(String, UUID)
+    case segmentReset(String?, UUID)
+    case segmentInitialization(Int, String, UUID)
+    case progress(Double, Int?, Double?, UUID)
+    case finished(Bool, Bool, [URL], UUID)
+    case cancellationStarted(UUID)
+    case barrier(CheckedContinuation<Void, Never>)
+}
+
+/// Thread-sichere Eingangsqueue für alle Nachrichten eines ffmpeg-Workers.
+/// Genau ein Main-Actor-Task konsumiert den Stream; damit bleibt die Reihenfolge
+/// erhalten, ohne einen blockierenden Worker auf den Main Actor warten zu lassen.
+private final class ConversionEventQueue: @unchecked Sendable {
+    private let stream: AsyncStream<ConversionEvent>
+    private let continuation: AsyncStream<ConversionEvent>.Continuation
+    private var consumerTask: Task<Void, Never>?
+
+    init() {
+        let pair = AsyncStream<ConversionEvent>.makeStream()
+        stream = pair.stream
+        continuation = pair.continuation
+    }
+
+    @MainActor
+    func start(
+        handler: @escaping @MainActor @Sendable (ConversionEvent) -> Void
+    ) {
+        let stream = stream
+        consumerTask = Task { @MainActor in
+            for await event in stream {
+                handler(event)
+            }
+        }
+    }
+
+    func send(_ event: ConversionEvent) {
+        continuation.yield(event)
+    }
+
+    deinit {
+        continuation.finish()
+        consumerTask?.cancel()
+    }
+}
+
 @MainActor
 public final class ConversionSession: ObservableObject, Identifiable {
     public let id = UUID()
     @Published public var settings: AudioSettings
     public init(settings: AudioSettings = SettingsManager.shared.loadSettings()) {
         self.settings = settings.normalized()
+        conversionEventQueue.start { [weak self] event in
+            self?.applyConversionEvent(event)
+        }
     }
     
     @Published public var audioFiles: [AudioFile] = [] {
@@ -321,6 +371,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     public var lastConversionSucceeded: Bool?
 
     private nonisolated let conversionCoordinator = ConversionCoordinator()
+    private nonisolated let conversionEventQueue = ConversionEventQueue()
 
     /// Beginnt einen abbrechbaren Import-/Metadatenlauf. Die CLI startet ihn vor
     /// dem asynchron erwarteten Ordnerscan.
@@ -415,9 +466,10 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// Startet einen neuen Lauf und macht einen eventuell noch auslaufenden
     /// Vorgänger ungültig. Dessen spätere Completion darf den neuen UI-State
     /// dadurch nicht mehr überschreiben.
-    nonisolated func beginConversionRun() -> ConversionContext {
-        conversionCoordinator.begin { [weak self] message in
-            self?.enqueueLog(message, type: .highlight)
+    func beginConversionRun() -> ConversionContext {
+        let queue = conversionEventQueue
+        return conversionCoordinator.begin { runID, message in
+            queue.send(.log(message, .highlight, runID))
         }
     }
 
@@ -433,7 +485,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         conversionCoordinator.hasFinished()
     }
 
-    nonisolated func endConversion(_ id: UUID) {
+    func endConversion(_ id: UUID) {
         conversionCoordinator.end(id)
     }
     
@@ -503,25 +555,23 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// Sichere Brücke für den blockierenden ffmpeg-Worker. Der Worker darf die
     /// Session als Main-Actor-Objekt referenzieren, aber ihren Zustand nur über
     /// diese gezielten Nachrichten verändern.
-    nonisolated func enqueueLog(_ message: String, type: LogType = .info) {
-        Task { @MainActor [weak self] in self?.addLog(message, type: type) }
+    nonisolated func enqueueLog(
+        _ message: String,
+        type: LogType = .info,
+        runID: UUID
+    ) {
+        conversionEventQueue.send(.log(message, type, runID))
     }
 
-    nonisolated func enqueueVerboseLog(_ message: String) {
-        Task { @MainActor [weak self] in self?.logVerbose(message) }
+    nonisolated func enqueueVerboseLog(_ message: String, runID: UUID) {
+        conversionEventQueue.send(.verboseLog(message, runID))
     }
 
     nonisolated func enqueueSegmentReset(
         title: String?,
         runID: UUID
     ) {
-        Task { @MainActor [weak self] in
-            guard let self, isCurrentConversion(runID) else { return }
-            segmentProgress = [:]
-            if let title {
-                initSegmentProgress(index: 0, filename: title, runID: runID)
-            }
-        }
+        conversionEventQueue.send(.segmentReset(title, runID))
     }
 
     nonisolated func enqueueSegmentInitialization(
@@ -529,9 +579,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         filename: String,
         runID: UUID
     ) {
-        Task { @MainActor [weak self] in
-            self?.initSegmentProgress(index: index, filename: filename, runID: runID)
-        }
+        conversionEventQueue.send(.segmentInitialization(index, filename, runID))
     }
 
     nonisolated func enqueueProgress(
@@ -540,17 +588,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         segmentProgress: Double? = nil,
         runID: UUID
     ) {
-        Task { @MainActor [weak self] in
-            guard let self, isCurrentConversion(runID) else { return }
-            progress = max(progress, value)
-            if let segmentIndex, let segmentProgress {
-                updateSegmentProgress(
-                    index: segmentIndex,
-                    progress: segmentProgress,
-                    runID: runID
-                )
-            }
-        }
+        conversionEventQueue.send(.progress(value, segmentIndex, segmentProgress, runID))
     }
 
     /// Übernimmt das Endergebnis des Workers in genau EINER Main-Actor-Nachricht,
@@ -566,8 +604,56 @@ public final class ConversionSession: ObservableObject, Identifiable {
         completedOutputs: [URL],
         runID: UUID
     ) {
-        Task { @MainActor [weak self] in
-            guard let self, isCurrentConversion(runID) else { return }
+        conversionEventQueue.send(.finished(success, cancelled, completedOutputs, runID))
+    }
+
+    nonisolated func enqueueCancellationStarted(runID: UUID) {
+        conversionEventQueue.send(.cancellationStarted(runID))
+    }
+
+    /// Wartet, bis alle zuvor eingereihten Worker-Ereignisse angewandt oder als
+    /// veraltet verworfen wurden. Produktion braucht keine Blockade; Tests nutzen
+    /// die Barriere für deterministische Race-Nachweise.
+    nonisolated func flushConversionEvents() async {
+        await withCheckedContinuation { continuation in
+            conversionEventQueue.send(.barrier(continuation))
+        }
+    }
+
+    private func applyConversionEvent(_ event: ConversionEvent) {
+        switch event {
+        case let .log(message, type, runID):
+            guard isCurrentConversion(runID) else { return }
+            addLog(message, type: type)
+
+        case let .verboseLog(message, runID):
+            guard isCurrentConversion(runID) else { return }
+            logVerbose(message)
+
+        case let .segmentReset(title, runID):
+            guard isCurrentConversion(runID) else { return }
+            segmentProgress = [:]
+            if let title {
+                initSegmentProgress(index: 0, filename: title, runID: runID)
+            }
+
+        case let .segmentInitialization(index, filename, runID):
+            guard isCurrentConversion(runID) else { return }
+            initSegmentProgress(index: index, filename: filename, runID: runID)
+
+        case let .progress(value, segmentIndex, newSegmentProgress, runID):
+            guard isCurrentConversion(runID) else { return }
+            progress = max(progress, value)
+            if let segmentIndex, let newSegmentProgress {
+                updateSegmentProgress(
+                    index: segmentIndex,
+                    progress: newSegmentProgress,
+                    runID: runID
+                )
+            }
+
+        case let .finished(success, cancelled, completedOutputs, runID):
+            guard isCurrentConversion(runID) else { return }
             completedOutputURLs = completedOutputs
             isConverting = false
             progress = success ? 1.0 : progress
@@ -582,14 +668,14 @@ public final class ConversionSession: ObservableObject, Identifiable {
                 )
             }
             endConversion(runID)
-        }
-    }
 
-    nonisolated func enqueueCancellationStarted(runID: UUID) {
-        Task { @MainActor [weak self] in
-            guard let self, isCurrentConversion(runID) else { return }
+        case let .cancellationStarted(runID):
+            guard isCurrentConversion(runID) else { return }
             conversionStatus = "Abbruch läuft …"
             addLog("🛑 Vorgang wird abgebrochen und bereinigt.", type: .info)
+
+        case let .barrier(continuation):
+            continuation.resume()
         }
     }
     

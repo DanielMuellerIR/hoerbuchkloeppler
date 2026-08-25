@@ -21,15 +21,16 @@ public enum ConversionCancellationOutcome: Sendable {
 final class ConversionContext: @unchecked Sendable {
     let id = UUID()
 
-    private let lock = NSLock()
-    private let log: @Sendable (String) -> Void
+    private let lock = NSCondition()
+    private let log: @Sendable (UUID, String) -> Void
     private var cancelled = false
     private var finished = false
+    private var cancellationCleanupInProgress = false
     private var processes = Set<Process>()
     private var tempDirectories = Set<URL>()
     private var stagedOutputs = Set<URL>()
 
-    init(log: @escaping @Sendable (String) -> Void = { _ in }) {
+    init(log: @escaping @Sendable (UUID, String) -> Void = { _, _ in }) {
         self.log = log
     }
 
@@ -100,7 +101,11 @@ final class ConversionContext: @unchecked Sendable {
         stagedOutputs.insert(url)
         let shouldRemove = cancelled
         lock.unlock()
-        if shouldRemove { ConversionContext.unlinkStagedOutput(url, log: log) }
+        if shouldRemove {
+            ConversionContext.unlinkStagedOutput(url) { [id, log] message in
+                log(id, message)
+            }
+        }
     }
 
     func unregisterStagedOutput(_ url: URL) {
@@ -111,7 +116,9 @@ final class ConversionContext: @unchecked Sendable {
 
     func discardStagedOutput(_ url: URL) {
         unregisterStagedOutput(url)
-        ConversionContext.unlinkStagedOutput(url, log: log)
+        ConversionContext.unlinkStagedOutput(url) { [id, log] message in
+            log(id, message)
+        }
     }
 
     /// Führt den atomaren Commit nur aus, solange noch kein Abbruch gewonnen hat.
@@ -131,13 +138,17 @@ final class ConversionContext: @unchecked Sendable {
     /// hat. Ein bereits mit dem letzten atomaren Commit abgeschlossener Lauf
     /// ignoriert einen verspäteten Cancel.
     @discardableResult
-    func cancel() -> Bool {
+    func cancel(onAccepted: @Sendable () -> Void = {}) -> Bool {
         lock.lock()
         guard !finished, !cancelled else {
             lock.unlock()
             return false
         }
         cancelled = true
+        cancellationCleanupInProgress = true
+        // Der Queue-Eintrag gehört atomar zum gewonnenen Abbruch. So kann der
+        // Worker keinen Abschluss zwischen Statuswechsel und Meldung einreihen.
+        onAccepted()
         let ownedProcesses = processes
         let ownedDirectories = tempDirectories
         let ownedStagedOutputs = stagedOutputs
@@ -149,9 +160,31 @@ final class ConversionContext: @unchecked Sendable {
         for process in ownedProcesses where process.isRunning { process.terminate() }
         for directory in ownedDirectories { try? FileManager.default.removeItem(at: directory) }
         for output in ownedStagedOutputs {
-            ConversionContext.unlinkStagedOutput(output, log: log)
+            ConversionContext.unlinkStagedOutput(output) { [id, log] message in
+                log(id, message)
+            }
         }
+
+        lock.lock()
+        cancellationCleanupInProgress = false
+        lock.broadcast()
+        lock.unlock()
         return true
+    }
+
+    /// Reiht den terminalen Worker-Event erst nach einer bereits laufenden
+    /// Abbruchbereinigung ein. Ohne diese Barriere könnte der Main Actor den
+    /// Lauf beenden und nachfolgende Bereinigungswarnungen als veraltet löschen.
+    func finishAfterCancellationCleanup(
+        _ action: @Sendable (Bool) -> Void
+    ) {
+        lock.lock()
+        while cancellationCleanupInProgress {
+            lock.wait()
+        }
+        finished = true
+        action(cancelled)
+        lock.unlock()
     }
 }
 
@@ -428,7 +461,8 @@ public struct FFmpegWrapper {
                 } catch {
                     session.enqueueLog(
                         "❌ Temporäres Arbeitsverzeichnis konnte nicht erstellt werden: \(error.localizedDescription)",
-                        type: .highlight
+                        type: .highlight,
+                        runID: context.id
                     )
                     overallSuccess = false
                     break
@@ -440,7 +474,7 @@ public struct FFmpegWrapper {
                 // für dieses Ziel zuerst wegräumen — sie sind versteckt, oft
                 // mehrere GB groß und sonst für immer unsichtbar.
                 removeOrphanedStagedOutputs(for: finalURL, log: { message in
-                    session.enqueueLog(message, type: .highlight)
+                    session.enqueueLog(message, type: .highlight, runID: context.id)
                 })
                 let stagedURL = stagingOutputURL(for: finalURL)
                 context.registerStagedOutput(stagedURL)
@@ -482,7 +516,8 @@ public struct FFmpegWrapper {
                     if !context.isCancelled {
                         session.enqueueLog(
                             "❌ KRITISCHER FEHLER beim Erstellen von \(finalURL.lastPathComponent). Vorgang abgebrochen.",
-                            type: .highlight
+                            type: .highlight,
+                            runID: context.id
                         )
                     }
                     context.removeTempDirectory(tempDir)
@@ -510,16 +545,27 @@ public struct FFmpegWrapper {
                         if !context.isCancelled,
                            let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
                            !output.isEmpty {
-                            session.enqueueLog("--- MediaInfo Eigenschaften ---\n" + output, type: .dim)
+                            session.enqueueLog(
+                                "--- MediaInfo Eigenschaften ---\n" + output,
+                                type: .dim,
+                                runID: context.id
+                            )
                             // Gilt in BEIDEN Modi: aac_at/CVBR wird von ffmpeg+mediainfo
                             // immer als 'Constant' gelabelt (verifiziert), nicht nur beim
                             // Stream-Copy. Der Audio-Stream bleibt dennoch Constrained VBR.
-                            session.enqueueLog("Hinweis: MediaInfo labelt aac_at/CVBR fälschlicherweise als 'Bitrate-Modus: Constant'. Die Audiodaten sind dennoch durchgehend variables Apple CVBR.", type: .dim)
+                            session.enqueueLog(
+                                "Hinweis: MediaInfo labelt aac_at/CVBR fälschlicherweise als 'Bitrate-Modus: Constant'. Die Audiodaten sind dennoch durchgehend variables Apple CVBR.",
+                                type: .dim,
+                                runID: context.id
+                            )
                         }
                     } catch {
                         // Die Nachanalyse ist rein informativ und darf einen sonst
                         // gültigen Output nicht verhindern.
-                        session.enqueueVerboseLog("MediaInfo-Nachanalyse übersprungen: \(error.localizedDescription)")
+                        session.enqueueVerboseLog(
+                            "MediaInfo-Nachanalyse übersprungen: \(error.localizedDescription)",
+                            runID: context.id
+                        )
                     }
                 }
 
@@ -543,27 +589,32 @@ public struct FFmpegWrapper {
                     context.discardStagedOutput(stagedURL)
                     session.enqueueLog(
                         "❌ Ausgabe konnte nicht atomar übernommen werden: \(error.localizedDescription)",
-                        type: .highlight
+                        type: .highlight,
+                        runID: context.id
                     )
                     context.removeTempDirectory(tempDir)
                     overallSuccess = false
                     break
                 }
 
-                session.enqueueLog("✅ Datei erfolgreich erstellt!", type: .highlight)
-                session.enqueueLog("Name: \(finalURL.lastPathComponent)", type: .info)
-                session.enqueueLog("Pfad: \(finalURL.path)", type: .info)
-                session.enqueueLog("Größe: \(formatFileSize(size))", type: .info)
+                session.enqueueLog("✅ Datei erfolgreich erstellt!", type: .highlight, runID: context.id)
+                session.enqueueLog("Name: \(finalURL.lastPathComponent)", type: .info, runID: context.id)
+                session.enqueueLog("Pfad: \(finalURL.path)", type: .info, runID: context.id)
+                session.enqueueLog("Größe: \(formatFileSize(size))", type: .info, runID: context.id)
                 context.removeTempDirectory(tempDir)
                 completedDuration += groupDuration
             }
 
-            session.enqueueConversionFinished(
-                success: overallSuccess,
-                cancelled: context.isCancelled,
-                completedOutputs: committedOutputs,
-                runID: context.id
-            )
+            let succeeded = overallSuccess
+            let outputs = committedOutputs
+            context.finishAfterCancellationCleanup { cancelled in
+                session.enqueueConversionFinished(
+                    success: succeeded,
+                    cancelled: cancelled,
+                    completedOutputs: outputs,
+                    runID: context.id
+                )
+            }
         }
     }
 
@@ -577,7 +628,8 @@ public struct FFmpegWrapper {
         guard let ffmpegURL = getBinaryURL(name: "ffmpeg") else {
             session.enqueueLog(
                 "❌ ffmpeg wurde nicht gefunden (weder gebündelt noch im PATH/Homebrew/MacPorts). Bitte ./build.sh ausführen oder ffmpeg installieren.",
-                type: .highlight
+                type: .highlight,
+                runID: context.id
             )
             return nil
         }
@@ -627,7 +679,10 @@ public struct FFmpegWrapper {
                 context.register(process)
                 defer { context.unregister(process) }
                 
-                session.enqueueVerboseLog("Starte Segment \(idx+1): ffmpeg \(finalArgs.joined(separator: " "))")
+                session.enqueueVerboseLog(
+                    "Starte Segment \(idx+1): ffmpeg \(finalArgs.joined(separator: " "))",
+                    runID: context.id
+                )
                 
                 let errorPipe = Pipe()
                 process.standardError = errorPipe
@@ -715,7 +770,8 @@ public struct FFmpegWrapper {
                         } else {
                             session.enqueueLog(
                                 "❌ KRITISCHER FEHLER: Zieldatei Segment \(idx+1) ist leer oder fehlt.",
-                                type: .highlight
+                                type: .highlight,
+                                runID: context.id
                             )
                         }
                     } else {
@@ -724,7 +780,8 @@ public struct FFmpegWrapper {
                         let errorMessage = (errorString?.isEmpty == false) ? errorString! : "Unbekannter FFmpeg Fehler"
                         session.enqueueLog(
                             "❌ Segment \(idx+1) fehlgeschlagen (Exit-Code \(process.terminationStatus)):\n\(errorMessage)",
-                            type: .highlight
+                            type: .highlight,
+                            runID: context.id
                         )
                     }
                 } catch {
@@ -735,7 +792,8 @@ public struct FFmpegWrapper {
                     if !context.isCancelled {
                         session.enqueueLog(
                             "❌ Prozess-Fehler bei Segment \(idx+1): \(error.localizedDescription)",
-                            type: .highlight
+                            type: .highlight,
+                            runID: context.id
                         )
                     }
                 }
@@ -765,7 +823,14 @@ public struct FFmpegWrapper {
         return metaContent
     }
 
-    private static func writeConcatAndChapters(validPaths: [String], group: [AudioFile], listFile: URL, metaFile: URL, session: ConversionSession) -> Bool {
+    private static func writeConcatAndChapters(
+        validPaths: [String],
+        group: [AudioFile],
+        listFile: URL,
+        metaFile: URL,
+        session: ConversionSession,
+        runID: UUID
+    ) -> Bool {
         let fileListContent = validPaths.map { "file '\($0.replacingOccurrences(of: "'", with: "'\\''"))'" }.joined(separator: "\n")
         let metaContent = buildChapterMetadata(group: group)
         do {
@@ -775,7 +840,8 @@ public struct FFmpegWrapper {
         } catch {
             session.enqueueLog(
                 "❌ KRITISCHER FEHLER: Steuerdateien konnten nicht geschrieben werden: \(error.localizedDescription)",
-                type: .highlight
+                type: .highlight,
+                runID: runID
             )
             return false
         }
@@ -838,9 +904,15 @@ public struct FFmpegWrapper {
             group: group,
             listFile: listFile,
             metaFile: metaFile,
-            session: session
+            session: session,
+            runID: context.id
         ) else { return false }
-        let coverInput = resolveCoverInputPath(job: job, session: session, tempDir: tempDir)
+        let coverInput = resolveCoverInputPath(
+            job: job,
+            session: session,
+            tempDir: tempDir,
+            runID: context.id
+        )
         let args = finalMuxArguments(
             listFile: listFile,
             metaFile: metaFile,
@@ -948,14 +1020,15 @@ public struct FFmpegWrapper {
     ) -> Bool {
         session.enqueueSegmentReset(title: pacmanTitle, runID: context.id)
         if context.isCancelled { return false }
-        session.enqueueLog(logMessage, type: .highlight)
+        session.enqueueLog(logMessage, type: .highlight, runID: context.id)
         
         // Fehlendes ffmpeg klar melden statt (wie früher) /usr/bin/false zu starten,
         // dessen Exit-Code nur eine irreführende Fehlermeldung produzierte.
         guard let ffmpegURL = getBinaryURL(name: "ffmpeg") else {
             session.enqueueLog(
                 "❌ ffmpeg wurde nicht gefunden (weder gebündelt noch im PATH/Homebrew/MacPorts). Bitte ./build.sh ausführen oder ffmpeg installieren.",
-                type: .highlight
+                type: .highlight,
+                runID: context.id
             )
             return false
         }
@@ -964,7 +1037,10 @@ public struct FFmpegWrapper {
         process.arguments = args
         let pipe = Pipe()
         process.standardError = pipe
-        session.enqueueVerboseLog("Führe Final-Prozess aus: ffmpeg \(args.joined(separator: " "))")
+        session.enqueueVerboseLog(
+            "Führe Final-Prozess aus: ffmpeg \(args.joined(separator: " "))",
+            runID: context.id
+        )
         
         context.register(process)
         defer { context.unregister(process) }
@@ -1023,14 +1099,16 @@ public struct FFmpegWrapper {
             session.enqueueLog(
                 "❌ KRITISCHER FEHLER beim finalen Zusammenfügen. "
                 + "Exit-Code: \(process.terminationStatus)\(suffix)",
-                type: .highlight
+                type: .highlight,
+                runID: context.id
             )
             return false
         } catch {
             if !context.isCancelled {
                 session.enqueueLog(
                     "❌ KRITISCHER FEHLER: \(error.localizedDescription)",
-                    type: .highlight
+                    type: .highlight,
+                    runID: context.id
                 )
             }
             return false
@@ -1068,7 +1146,8 @@ public struct FFmpegWrapper {
     private static func resolveCoverInputPath(
         job: ConversionJob,
         session: ConversionSession,
-        tempDir: URL
+        tempDir: URL,
+        runID: UUID
     ) -> String? {
         if let path = job.coverPath {
             // Existiert die gewählte Cover-Datei nicht mehr (verschoben/gelöscht),
@@ -1077,7 +1156,8 @@ public struct FFmpegWrapper {
             if FileManager.default.fileExists(atPath: path) { return path }
             session.enqueueLog(
                 "⚠️ Cover-Datei nicht mehr vorhanden, fahre ohne dieses Cover fort: \(path)",
-                type: .info
+                type: .info,
+                runID: runID
             )
         }
         if let data = job.embeddedCoverData {
@@ -1088,7 +1168,8 @@ public struct FFmpegWrapper {
             } catch {
                 session.enqueueLog(
                     "⚠️ Eingebettetes Cover konnte nicht zwischengespeichert werden — Output ohne Cover.",
-                    type: .info
+                    type: .info,
+                    runID: runID
                 )
                 return nil
             }
@@ -1279,11 +1360,9 @@ public struct FFmpegWrapper {
                 ? .rejected
                 : .noActiveConversion
         }
-        guard context.cancel() else { return .rejected }
-
-        // Der Worker setzt den definitiven Abschluss erst, nachdem alle Prozesse
-        // beendet und alle laufbezogenen Dateien entfernt sind.
-        session.enqueueCancellationStarted(runID: context.id)
+        guard context.cancel(onAccepted: {
+            session.enqueueCancellationStarted(runID: context.id)
+        }) else { return .rejected }
         return .cancelled
     }
 

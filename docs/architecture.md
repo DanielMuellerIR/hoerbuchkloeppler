@@ -20,7 +20,12 @@ Core.
 - **Swift-6-Isolation:** `ConversionSession` gehört vollständig zum Main Actor;
   nur dort wird `@Published`-State gelesen oder geändert. Der blockierende
   ffmpeg-Worker erhält dafür einen unveränderlichen `ConversionJob`-Snapshot und
-  meldet Logs/Fortschritt über gezielte Main-Actor-Nachrichten zurück.
+  meldet Logs, Fortschritt, Abbruch und Abschluss über einen einzigen
+  `AsyncStream` zurück. Ein Main-Actor-Task verarbeitet dessen Ereignisse
+  seriell und verwirft sie, wenn ihre Lauf-ID nicht mehr aktuell ist. Der
+  `ConversionContext` hält den Abschluss bis zum Ende einer bereits laufenden
+  Abbruchbereinigung zurück, damit deren Warnungen nicht hinter dem Abschluss
+  verloren gehen.
 - **Asynchrone Audioanalyse:** Dauer, Metadaten, Tag-Werte und Artwork werden über
   `AVAsset.load(...)` beziehungsweise `AVMetadataItem.load(...)` geladen. GUI
   und CLI erwarten denselben asynchronen Import-Lebenszyklus; die frühere

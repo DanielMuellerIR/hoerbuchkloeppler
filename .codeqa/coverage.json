@@ -5,7 +5,8 @@
     "id": "20260825T162949635422+0200",
     "token_budget": 3000000,
     "status": "active",
-    "started_at": "2026-08-25T16:29:49+02:00"
+    "started_at": "2026-08-25T16:29:49+02:00",
+    "tokens_spent": 207187
   },
   "campaign_history": [
     {
@@ -55,26 +56,20 @@
       "risk": "critical",
       "priority": 1,
       "reason": "Bekannte SIGINT-Lücke in der Vorbereitungsphase sowie zentraler Main-Actor-, Import- und Metadatenzustand",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134633974092+0200",
-        "completed_at": "2026-08-15T14:10:51+02:00",
-        "observed_head": "0fa952a4642c185fb0446253390bde6ce4201c7b",
-        "content_sha256": "9fa967639023f9b9372b33eb41125826b5e0428c0681d3ecf2b510f5940ca64b",
+        "campaign_id": "20260825T162949635422+0200",
+        "completed_at": "2026-08-25T16:48:23+02:00",
+        "observed_head": "0b27acf318e2bd950809b7bc460a58f7aa7d8131",
+        "content_sha256": "f9d111368f55799bad7a659a3b588f7519a2140aca0babf18f7e4558d02fae23",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Themen-Diff und Grenzen zu CLI sowie AudioFile geprüft: Der laufbezogene PreparationContext registriert und cancelt genau den aktuellen Swift-Task; Scan und Zustandsübernahme brechen vor weiteren Seiteneffekten ab.",
+        "summary": "Ordnerscans brechen bei Lesefehlern ohne Teilergebnis ab; getrennte Provider deduplizieren Kapitelgruppen nach physischer Datei und bevorzugen Symlinks; MediaInfo-Fehler löschen alte Kandidaten; nur dekodierbares Artwork wird übernommen und je physischer Quelle einmal analysiert; kopierbares Log wächst inkrementell.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 90 Tests in 17 Suites passed"
+          "swift test: 116 Tests in 18 Suites passed",
+          "xcodebuild Release CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260825T162949635422+0200",
-        "started_at": "2026-08-25T16:30:20+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
@@ -382,9 +377,15 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift"
       ],
       "priority": 1,
-      "state": "pending",
+      "state": "in_progress",
       "noted_at": "2026-08-25T16:46:04+02:00",
-      "campaign_id": "20260825T162949635422+0200"
+      "campaign_id": "20260825T162949635422+0200",
+      "started_at": "2026-08-25T16:48:58+02:00",
+      "active_run": {
+        "campaign_id": "20260825T162949635422+0200",
+        "started_at": "2026-08-25T16:48:58+02:00",
+        "observed_head": "0b27acf318e2bd950809b7bc460a58f7aa7d8131"
+      }
     },
     {
       "id": "process-termination-escalation",
