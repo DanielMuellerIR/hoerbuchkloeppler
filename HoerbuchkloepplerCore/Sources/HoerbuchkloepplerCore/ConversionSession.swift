@@ -1463,12 +1463,17 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
     @discardableResult
     public func selectCover(url: URL) -> Bool {
-        guard let image = NSImage(contentsOf: url) else { return false }
+        // Auswahl bedeutet Besitz eines unveränderlichen Inhalts-Snapshots,
+        // nicht nur Merken eines später erneut gelesenen Pfads. Dadurch kann ein
+        // gelöschtes oder ausgetauschtes Bild zwischen Auswahl und Start weder
+        // das ausdrücklich gewählte Cover verlieren noch fremde Daten einsetzen.
+        guard let data = FFmpegWrapper.loadCoverSnapshot(at: url),
+              let image = NSImage(data: data) else { return false }
         coverRevision &+= 1
         invalidateArtworkWork()
         self.coverImage = resizeImage(image, maxDimension: 2000); self.coverPath = url.path
         // Gewählte Datei hat Vorrang vor eingebettetem Artwork.
-        self.embeddedCoverData = nil
+        self.embeddedCoverData = data
         self.isCoverSuppressed = false
         return true
     }

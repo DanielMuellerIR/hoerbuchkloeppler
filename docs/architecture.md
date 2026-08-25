@@ -74,3 +74,6 @@ Symbolnamen als Anker (bewusst **ohne** Zeilennummern — die driften bei jeder
 
 App-Views (`Hörbuchklöppler/`): `ContentView`, `ConversionOverlayView`,
 `MetadataSelectionView`, `SettingsView`, `Hörbuchklöppler.swift` (App-Entry).
+
+Belegte, noch nicht beauftragte Produkt- und Performance-Ansätze stehen getrennt
+in [opportunities.md](opportunities.md).

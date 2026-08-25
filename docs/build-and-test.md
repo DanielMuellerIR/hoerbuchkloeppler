@@ -43,7 +43,8 @@ kloeppler <ordner> [--mode parallel|standard] [--bitrate 48k] \
   nach fester Priorität: Album vor Title bzw. Performer vor Album_Performer
   (die GUI öffnet in diesem Fall stattdessen die manuelle Auswahl).
 - `--genre`, `--cover` und `--no-cover` bilden die entsprechenden GUI-Werte im
-  kopierten CLI-Handoff vollständig ab.
+  kopierten CLI-Handoff vollständig ab. Eine explizite Cover-Datei muss regulär,
+  lesbar und höchstens 32 MiB groß sein.
 - `--output <ziel>` = Zielordner (Datei heißt dann `<Titel>.m4b`) **oder** voller
   `.m4b`-Pfad. Ohne Angabe landet die `.m4b` im **Eltern**-Ordner der Quelle,
   benannt nach Titel-Tag bzw. Ordnername (sanitisiert) — `--output` ist nötig,
@@ -52,9 +53,11 @@ kloeppler <ordner> [--mode parallel|standard] [--bitrate 48k] \
   (8–320 kbit/s als `<zahl>[k]`) und `--samplerate` (8000–48000) werden vorab
   geprüft; ungültige
   Werte brechen mit Usage-Fehler (Exit 64) ab, statt erst später in ffmpeg.
-- Existiert die Zieldatei: ohne `--force` interaktive Nachfrage; bei
-  Pipe/Non-TTY bricht sie mit Fehlercode ab (Hinweis auf `--force`).
-- **Exit-Code:** 0 nur bei echtem Erfolg, sonst ≠ 0 (skript-/agent-tauglich).
+- Existiert die Zieldatei: ohne `--force` interaktive Nachfrage, aber nur wenn
+  stdin und stdout Terminals sind. Bei Umleitung oder Pipe bricht die CLI mit
+  Fehlercode ab und verweist auf `--force`.
+- **Exit-Code:** 0 nur bei echtem Erfolg, sonst ≠ 0; SIGINT liefert 130 und
+  SIGTERM 143 (skript-/agent-tauglich).
 
 ## Demo-/Verifikations-Rezept (2026-06-03 erprobt)
 
@@ -129,6 +132,9 @@ Deshalb laufen alle Terminal-Ausgaben der CLI über `TerminalRenderer` in
   (`--max-duration` → `-01`/`-02`), Stereo (44100 Hz), Cover (eingebettet +
   `folder.jpg`), Kapiteltitel mit Sonderzeichen, Fehler-Exit-Codes, SIGINT-
   Abbruch inkl. Temp-Cleanup. SIGINT während der AVFoundation-Vorbereitung
-  wurde am 2026-08-15 mit 1.001 WAV-Dateien und Exit 130 verifiziert.
+  wurde am 2026-08-15 mit 1.001 WAV-Dateien und Exit 130 verifiziert. Am
+  2026-08-25 wurden SIGINT und SIGTERM während eines realen ffmpeg-Laufs je
+  dreimal mit Exit 130 beziehungsweise 143, ohne finale Ausgabe und ohne
+  Staging-Reste geprüft; weitere 24 Läufe deckten die Abschluss-Rennbedingung ab.
 - **Noch ungetestet:** GUI-App-Lauf (nur Kompilierung via xcodebuild geprüft),
   Audio-Qualität nach Gehör.

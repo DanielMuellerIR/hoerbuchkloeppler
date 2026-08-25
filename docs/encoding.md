@@ -118,8 +118,8 @@ Original bleibt bis zum atomaren Commit erhalten.
 
 - **Laufbezogener Kontext:** Jeder Konvertierungslauf besitzt seine eigenen Prozesse und Temp-Verzeichnisse in einem `ConversionContext`.
 - **Cancellation:** Ein Abbruch beendet und bereinigt ausschließlich den Kontext der betroffenen `ConversionSession`; parallele Fenster bleiben unberührt. Ein schneller Neustart macht die alte Completion per Lauf-ID ungültig.
-- **Signal-Handling:** Das CLI fängt `SIGINT` (Ctrl+C) bereits während Ordnerscan
-  und Metadatenanalyse ab. Es cancelt den registrierten Swift-Vorbereitungstask,
+- **Signal-Handling:** Das CLI fängt `SIGINT` (Ctrl+C) und `SIGTERM` bereits
+  während Ordnerscan und Metadatenanalyse ab. Es cancelt den registrierten Swift-Vorbereitungstask,
   beendet laufbezogene externe Prozesse und wertet Cancellation zwischen den
   AVFoundation-Ladevorgängen aus. Beim Encoding wartet es auf das vollständige
   Temp-/Partial-Cleanup. Ein Signal nach dem letzten atomaren Commit ändert

@@ -1397,7 +1397,10 @@ public struct FFmpegWrapper {
             genre: session.genre,
             coverURL: coverURL,
             coverIdentity: coverIdentity,
-            coverData: coverURL == nil ? session.embeddedCoverData : nil
+            // `selectCover` hält bereits den beim Auswählen gelesenen Inhalt.
+            // Der Pfad-Snapshot bleibt eine Aktualitätsprüfung; bei Austausch
+            // fällt der Lauf auf den unveränderlichen Inhalt zurück.
+            coverData: session.embeddedCoverData
         )
         let plannedTotalDuration = plannedFiles.reduce(0) { $0 + $1.duration }
         guard session.isCurrentConversion(context.id) else { return }
@@ -1444,7 +1447,7 @@ public struct FFmpegWrapper {
                     isCancelled: { context.isCancelled }
                 )
             }
-                ?? (job.coverURL == nil ? job.coverData : nil)
+                ?? job.coverData
             if job.coverURL != nil, coverData == nil, !context.isCancelled {
                 session.enqueueLog(
                     "⚠️ Gewähltes Cover ist keine unveränderte, reguläre Bilddatei bis 32 MiB; Ausgabe ohne Cover.",

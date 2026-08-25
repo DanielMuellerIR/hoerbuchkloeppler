@@ -15,57 +15,99 @@ private final class InterruptState: @unchecked Sendable {
         case finished
     }
 
-    private let lock = NSLock()
-    private var received = false
+    private let condition = NSCondition()
+    private var receivedSignal: Int32?
+    private var pendingSignals = 0
+    private var announced = false
     private var phase: Phase = .preparing
 
     var shouldCancelPreparation: Bool {
-        lock.lock()
-        defer { lock.unlock() }
+        condition.lock()
+        defer { condition.unlock() }
         return phase == .preparing
+    }
+
+    /// Sperrt den Phasenabschluss, bevor der Handler Core-Cancellation aufruft.
+    /// Sonst kann dessen terminales Event die CLI zwischen akzeptiertem Cancel
+    /// und `recordSignal` mit Exit 0/1 statt 128+Signal beenden.
+    func beginSignal() -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        guard phase != .finished else { return false }
+        pendingSignals += 1
+        return true
     }
 
     /// Akzeptiert das Signal nur, solange noch Arbeit abgebrochen werden kann.
     /// Ein vom Core nach dem letzten atomaren Commit abgelehnter Cancel darf
     /// keinen falschen Exit 130 mehr erzeugen.
     func recordSignal(
+        _ signal: Int32,
         conversionOutcome: ConversionCancellationOutcome,
         preparationCancelled: Bool
     ) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
+        condition.lock()
+        defer {
+            pendingSignals -= 1
+            condition.broadcast()
+            condition.unlock()
+        }
         guard phase != .finished else { return false }
+        var accepted = false
         switch conversionOutcome {
         case .cancelled:
-            received = true
+            accepted = true
         case .noActiveConversion:
             // In der Vorbereitung oder in der winzigen Lücke direkt vor dem
             // synchronen Anlegen des Conversion-Contexts bleibt das Signal offen.
-            received = true
+            accepted = true
         case .rejected:
-            if phase == .preparing, preparationCancelled { received = true }
+            accepted = phase == .preparing && preparationCancelled
         }
-        return received
+        if accepted, receivedSignal == nil { receivedSignal = signal }
+        return accepted
     }
 
     func beginConversion() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !received else { return false }
+        condition.lock()
+        defer { condition.unlock() }
+        guard pendingSignals == 0, receivedSignal == nil else { return false }
         phase = .converting
         return true
     }
 
-    func finishConversion() {
-        lock.lock()
+    /// Wartet auf einen bereits laufenden Signal-Handler, bevor die Phase
+    /// unwiderruflich geschlossen wird. Der Handler braucht dafür keinen Main
+    /// Actor und kann die Condition auch dann auflösen, wenn dieser Thread wartet.
+    func finishExecution() -> Int32? {
+        condition.lock()
+        while pendingSignals > 0 { condition.wait() }
         phase = .finished
-        lock.unlock()
+        let signal = receivedSignal
+        condition.unlock()
+        return signal
     }
 
     var wasReceived: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return received
+        condition.lock()
+        defer { condition.unlock() }
+        return receivedSignal != nil || pendingSignals > 0
+    }
+
+    func waitForExitCode() -> ExitCode? {
+        condition.lock()
+        while pendingSignals > 0 { condition.wait() }
+        let signal = receivedSignal
+        condition.unlock()
+        return signal.map { ExitCode(128 + $0) }
+    }
+
+    func takeUnannouncedSignal() -> Int32? {
+        condition.lock()
+        defer { condition.unlock() }
+        guard let signal = receivedSignal, !announced else { return nil }
+        announced = true
+        return signal
     }
 }
 
@@ -89,21 +131,19 @@ private func readLine(unlessInterrupted state: InterruptState) -> String? {
 private func makeInterruptHandler(
     session: ConversionSession,
     interruptState: InterruptState,
-    renderer: TerminalRenderer
+    signal: Int32
 ) -> @Sendable () -> Void {
     {
+        guard interruptState.beginSignal() else { return }
         let preparationCancelled = interruptState.shouldCancelPreparation
             ? session.cancelPreparation()
             : false
         let outcome = FFmpegWrapper.cancelConversion(session: session)
-        if interruptState.recordSignal(
+        _ = interruptState.recordSignal(
+            signal,
             conversionOutcome: outcome,
             preparationCancelled: preparationCancelled
-        ) {
-            Task { @MainActor in
-                renderer.emitLog("🛑 Abbruchsignal (SIGINT) empfangen. Bereinige und beende...")
-            }
-        }
+        )
     }
 }
 
@@ -196,22 +236,22 @@ struct KloepplerCLI: AsyncParsableCommand {
         commandName: "kloeppler",
         abstract: "Ein Kommandozeilen-Tool zum Generieren von M4B Hörbüchern aus Audiodateien."
     )
-    
+
     @Argument(help: "Der absolute Pfad zum Ordner, der die Audiodateien enthält.")
     var folderPath: String
-    
+
     @Option(name: .shortAndLong, help: "Der Kodierungsmodus: 'parallel' (Performance) oder 'standard' (Sequenziell).")
     var mode: String?
-    
+
     @Option(name: .long, help: "Die Ziel-Bitrate, z.B. '48k' oder '64k'.")
     var bitrate: String?
-    
+
     @Option(name: .long, help: "Die Abtastrate (Sample Rate) in Hz, z.B. 48000.")
     var samplerate: Int?
 
     @Option(name: .long, help: "Maximale Dauer pro Ausgabedatei in Stunden. Längere Bücher werden auf -01, -02 ... aufgeteilt (0 = unbegrenzt).")
     var maxDuration: Int?
-    
+
     @Option(name: .long, help: "Setzt den Buchtitel explizit (überschreibt die aus den Tags erkannten Kandidaten). Wird auch für den Ausgabe-Dateinamen verwendet.")
     var title: String?
 
@@ -229,16 +269,16 @@ struct KloepplerCLI: AsyncParsableCommand {
 
     @Flag(name: .long, help: "Kodiert das Hörbuch in Mono.")
     var mono: Bool = false
-    
+
     @Flag(name: .long, help: "Kodiert das Hörbuch in Stereo.")
     var stereo: Bool = false
-    
+
     @Option(name: [.short, .long], help: "Ausgabeziel: Ordner (Datei heißt dann <Titel>.m4b) oder vollständiger .m4b-Pfad. Ohne Angabe landet die Datei wie bisher im Eltern-Ordner der Quelle — bei Quellen auf vollen/schreibgeschützten Datenträgern ist --output nötig.")
     var output: String?
 
     @Flag(name: .shortAndLong, help: "Aktiviert ausführliches Logging aller Pfade und Vorgänge.")
     var verbose: Bool = false
-    
+
     @Flag(name: .shortAndLong, help: "Überschreibt die Ausgabedatei ohne Nachfrage.")
     var force: Bool = false
 
@@ -304,13 +344,17 @@ struct KloepplerCLI: AsyncParsableCommand {
         let verbose = options.verbose
         let force = options.force
 
-        let url = URL(fileURLWithPath: folderPath)
+        let sourceURL = URL(fileURLWithPath: folderPath)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: folderPath, isDirectory: &isDir), isDir.boolValue else {
             writeStandardError("Fehler: Der Pfad \(folderPath) existiert nicht oder ist kein Ordner.")
             throw ExitCode.failure
         }
-        
+        // Nach der Existenzprüfung den physischen Ordner festhalten. Sonst kann
+        // ein später umgebogener Symlink sowohl die Quelle als auch das abgeleitete
+        // Standard-Ausgabeziel unbemerkt auf einen anderen Datenträger lenken.
+        let url = sourceURL.standardizedFileURL.resolvingSymlinksInPath()
+
         FFmpegWrapper.cleanupOldTempDirectories()
         // CLI-Aufrufe sind reproduzierbar: nicht gesetzte Optionen verwenden die
         // dokumentierten Defaults und hängen nicht von GUI-settings.json ab.
@@ -321,257 +365,361 @@ struct KloepplerCLI: AsyncParsableCommand {
         let renderer = TerminalRenderer()
         session.logSink = { renderer.emitLog($0) }
 
-        // Setup SIGINT handler
+        // SIGINT (Ctrl+C) und SIGTERM benutzen denselben geordneten Abbruchpfad.
+        // `InterruptState` verhindert dabei, dass der Abschluss dem Handler
+        // zuvorkommt und ein bereits akzeptiertes Signal als Exit 0 verloren geht.
         let interruptState = InterruptState()
-        let signalQueue = DispatchQueue(label: "de.hoerbuchkloeppler.sigint")
-        let sigintSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: signalQueue)
-        sigintSource.setEventHandler(handler: makeInterruptHandler(
-            session: session,
-            interruptState: interruptState,
-            renderer: renderer
-        ))
-        signal(SIGINT, SIG_IGN)
-        sigintSource.resume()
-        defer { sigintSource.cancel() }
-
-        session.beginPreparation()
-        if interruptState.wasReceived {
-            session.cancelPreparation()
-            throw ExitCode(130)
+        let signalQueue = DispatchQueue(label: "de.hoerbuchkloeppler.signals")
+        let handledSignals: [Int32] = [SIGINT, SIGTERM]
+        let signalSources = handledSignals.map { handledSignal in
+            let source = DispatchSource.makeSignalSource(signal: handledSignal, queue: signalQueue)
+            source.setEventHandler(handler: makeInterruptHandler(
+                session: session,
+                interruptState: interruptState,
+                signal: handledSignal
+            ))
+            Darwin.signal(handledSignal, SIG_IGN)
+            source.resume()
+            return source
         }
-        await session.prepareFolder(url)
+        defer { signalSources.forEach { $0.cancel() } }
 
-        if interruptState.wasReceived { throw ExitCode(130) }
-
-        guard !session.audioFiles.isEmpty else {
-            writeStandardError("Fehler: Keine gültigen Audiodateien im Ordner gefunden.")
-            throw ExitCode.failure
+        func signalName(_ signal: Int32) -> String {
+            signal == SIGTERM ? "SIGTERM" : "SIGINT"
         }
-        
-        if let mode = mode {
-            session.settings.useParallelEncoding = (mode.lowercased() == "parallel")
-        }
-        if let bitrate = bitrate { session.settings.bitrate = bitrate }
-        if let samplerate = samplerate { session.settings.sampleRate = samplerate }
-        if let maxDuration = maxDuration { session.settings.maxDurationHours = maxDuration > 0 ? maxDuration : nil }
-        if mono { session.settings.isMono = true }
-        else if stereo { session.settings.isMono = false }
-        if verbose { session.settings.isVerbose = true }
 
-        // Explizite CLI-Angaben gewinnen IMMER gegen die aus den Datei-Tags
-        // erkannten Kandidaten (die enthalten z.B. oft Übersetzer im Autor-Feld).
-        // Muss NACH dem vollständig erwarteten `addFolder` passieren, sonst
-        // würde der Metadaten-Fetch die Werte wieder überschreiben.
-        if let title = title { session.title = title }
-        if let author = author { session.author = author }
-        if let genre = genre { session.genre = genre }
-        if noCover {
-            session.removeCover()
-        } else if let cover {
-            let coverURL = URL(fileURLWithPath: cover)
-            guard session.selectCover(url: coverURL) else {
-                writeStandardError("❌ Cover-Datei ist nicht als Bild lesbar: \(cover)")
+        func emitInterruptIfNeeded() {
+            guard let receivedSignal = interruptState.takeUnannouncedSignal() else { return }
+            renderer.emitLog("⚠️ \(signalName(receivedSignal)) empfangen. Lauf wird geordnet abgebrochen …")
+        }
+
+        func throwIfInterrupted() throws {
+            guard interruptState.wasReceived else { return }
+            guard let exitCode = interruptState.waitForExitCode() else { return }
+            emitInterruptIfNeeded()
+            throw exitCode
+        }
+
+        // Jeder Ausgang nach Installation der Signalquellen läuft durch denselben
+        // Abschluss. So gewinnt ein bereits begonnener und anschließend
+        // akzeptierter Signal-Handler auch gegen einen gleichzeitig entstehenden
+        // Validierungs- oder Importfehler.
+        var executionError: Error?
+        do {
+            session.beginPreparation()
+            try throwIfInterrupted()
+            await session.prepareFolder(url)
+
+            try throwIfInterrupted()
+
+            guard !session.audioFiles.isEmpty else {
+                writeStandardError("Fehler: Keine gültigen Audiodateien im Ordner gefunden.")
                 throw ExitCode.failure
             }
-        }
-        if interruptState.wasReceived { throw ExitCode(130) }
 
-        let rawTitle = session.title.isEmpty ? url.lastPathComponent : session.title
-        let finalTitle = KloepplerCLI.sanitizeFilename(rawTitle)
-        let outputFile: URL
-        if let output = output {
-            var outIsDir: ObjCBool = false
-            let outExists = FileManager.default.fileExists(atPath: output, isDirectory: &outIsDir)
-            if outExists && outIsDir.boolValue {
-                // Ordner angegeben: Dateiname wie bisher aus dem Titel bilden
-                outputFile = URL(fileURLWithPath: output).appendingPathComponent("\(finalTitle).m4b")
-            } else if output.lowercased().hasSuffix(".m4b") {
-                // Voller Zielpfad: Eltern-Ordner muss existieren (bei Bedarf anlegen)
-                let target = URL(fileURLWithPath: output)
+            if let mode = mode {
+                session.settings.useParallelEncoding = (mode.lowercased() == "parallel")
+            }
+            if let bitrate = bitrate { session.settings.bitrate = bitrate }
+            if let samplerate = samplerate { session.settings.sampleRate = samplerate }
+            if let maxDuration = maxDuration { session.settings.maxDurationHours = maxDuration > 0 ? maxDuration : nil }
+            if mono { session.settings.isMono = true }
+            else if stereo { session.settings.isMono = false }
+            if verbose { session.settings.isVerbose = true }
+
+            // Explizite CLI-Angaben gewinnen IMMER gegen die aus den Datei-Tags
+            // erkannten Kandidaten (die enthalten z.B. oft Übersetzer im Autor-Feld).
+            // Muss NACH dem vollständig erwarteten `addFolder` passieren, sonst
+            // würde der Metadaten-Fetch die Werte wieder überschreiben.
+            if let title = title { session.title = title }
+            if let author = author { session.author = author }
+            if let genre = genre { session.genre = genre }
+            if noCover {
+                session.removeCover()
+            } else if let cover {
+                let coverURL = URL(fileURLWithPath: cover).standardizedFileURL.resolvingSymlinksInPath()
+                let coverValues: URLResourceValues
                 do {
-                    try FileManager.default.createDirectory(
-                        at: target.deletingLastPathComponent(),
-                        withIntermediateDirectories: true
-                    )
+                    coverValues = try coverURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
                 } catch {
-                    writeStandardError("❌ Ausgabeordner konnte nicht angelegt werden: \(error.localizedDescription)")
+                    writeStandardError("❌ Cover-Datei konnte nicht geprüft werden: \(cover)")
                     throw ExitCode.failure
                 }
-                outputFile = target
-            } else {
-                writeStandardError("❌ --output muss ein existierender Ordner oder ein .m4b-Pfad sein: \(output)")
-                throw ExitCode.failure
+                let maximumCoverByteCount = 32 * 1024 * 1024
+                guard coverValues.isRegularFile == true,
+                      let coverByteCount = coverValues.fileSize,
+                      coverByteCount <= maximumCoverByteCount else {
+                    writeStandardError("❌ Cover muss eine reguläre Bilddatei mit höchstens 32 MiB sein: \(cover)")
+                    throw ExitCode.failure
+                }
+                guard session.selectCover(url: coverURL) else {
+                    writeStandardError("❌ Cover-Datei ist nicht als Bild lesbar: \(cover)")
+                    throw ExitCode.failure
+                }
             }
-        } else {
-            outputFile = url.deletingLastPathComponent().appendingPathComponent("\(finalTitle).m4b")
-        }
-        
-        print("Starte Konvertierung...")
-        let conversionPlan = FFmpegWrapper.makeConversionPlan(
-            files: session.audioFiles,
-            outputURL: outputFile,
-            maxDurationHours: session.settings.maxDurationHours
-        )
-        print(conversionPlan.outputURLs.count == 1 ? "Zieldatei:" : "Zieldateien:")
-        conversionPlan.outputURLs.forEach { print("  \($0.path)") }
+            try throwIfInterrupted()
 
-        let existingOutputs = conversionPlan.outputURLsRequiringOverwriteConfirmation
-        if !existingOutputs.isEmpty {
-            let names = existingOutputs.map(\.lastPathComponent).joined(separator: ", ")
-            if force {
-                print("⚠️ Vorhandene Zieldatei(en) werden überschrieben (--force): \(names)")
-            } else if isatty(FileHandle.standardInput.fileDescriptor) == 0 {
-                // Nicht-interaktiv (Pipe/CI/AI-Agent): nicht blockierend nachfragen,
-                // sondern klar mit Fehlercode abbrechen und auf --force hinweisen.
-                writeStandardError("❌ Zieldatei(en) existieren bereits: \(names). Zum Überschreiben --force verwenden.")
-                throw ExitCode.failure
-            } else {
-                print("⚠️ Diese Zieldatei(en) existieren bereits: \(names)")
-                print("Möchten Sie die Dateien überschreiben? (j/N): ", terminator: "")
-                if let input = readLine(unlessInterrupted: interruptState),
-                   input.lowercased() == "j" || input.lowercased() == "y" {
-                    print("Datei wird überschrieben...")
-                } else if interruptState.wasReceived {
-                    throw ExitCode(130)
+            // Sichtbarer Linkname bestimmt wie bisher den Fallback-Titel; nur das
+            // Lesen selbst verwendet den aufgelösten physischen Ordner.
+            let rawTitle = session.title.isEmpty ? sourceURL.lastPathComponent : session.title
+            let finalTitle = KloepplerCLI.sanitizeFilename(rawTitle)
+            let outputFile: URL
+            if let output = output {
+                var outIsDir: ObjCBool = false
+                let outExists = FileManager.default.fileExists(atPath: output, isDirectory: &outIsDir)
+                if outExists && outIsDir.boolValue {
+                    // Ordner angegeben: Dateiname wie bisher aus dem Titel bilden
+                    let outputDirectory = URL(fileURLWithPath: output)
+                        .standardizedFileURL.resolvingSymlinksInPath()
+                    outputFile = outputDirectory.appendingPathComponent("\(finalTitle).m4b")
+                } else if output.lowercased().hasSuffix(".m4b") {
+                    // Voller Zielpfad: Eltern-Ordner muss existieren (bei Bedarf anlegen)
+                    let target = URL(fileURLWithPath: output).standardizedFileURL
+                    do {
+                        try FileManager.default.createDirectory(
+                            at: target.deletingLastPathComponent(),
+                            withIntermediateDirectories: true
+                        )
+                    } catch {
+                        writeStandardError("❌ Ausgabeordner konnte nicht angelegt werden: \(error.localizedDescription)")
+                        throw ExitCode.failure
+                    }
+                    let resolvedParent = target.deletingLastPathComponent().resolvingSymlinksInPath()
+                    outputFile = resolvedParent.appendingPathComponent(target.lastPathComponent)
                 } else {
-                    print("Vorgang abgebrochen.")
-                    throw ExitCode(2)
+                    writeStandardError("❌ --output muss ein existierender Ordner oder ein .m4b-Pfad sein: \(output)")
+                    throw ExitCode.failure
                 }
-            }
-        }
-
-        guard interruptState.beginConversion() else { throw ExitCode(130) }
-        FFmpegWrapper.convert(session: session, plan: conversionPlan)
-        // Ein Signal kann genau zwischen Phasenwechsel und dem synchronen
-        // Erzeugen des Contexts eintreffen. Dann jetzt den neuen Context stoppen.
-        if interruptState.wasReceived {
-            _ = FFmpegWrapper.cancelConversion(session: session)
-        }
-
-        // Print ASCII Art Cover if verbose
-        if verbose, let coverPath = session.coverPath, let img = NSImage(contentsOfFile: coverPath) {
-            print("\n--- Cover ASCII Art ---")
-            print(KloepplerCLI.generateAsciiArt(from: img, width: 40))
-            print("-----------------------\n")
-        }
-
-        // Asynchron warten, damit der Main Actor die Fortschrittsmeldungen des
-        // ffmpeg-Workers übernehmen kann.
-        // Abbruchbedingung ist das definitive Abschluss-Signal lastConversionSucceeded
-        // (vom Core genau einmal am Ende gesetzt). NICHT auf das transiente
-        // isConverting==true warten -- bei sehr schnell abschließenden Läufen
-        // (z.B. sofortiger Fehler) könnte die Schleife den kurzen Zustand sonst
-        // vollständig verpassen.
-        while session.lastConversionSucceeded == nil {
-            try await Task.sleep(for: .milliseconds(100))
-
-            var output = ""
-            let currentStatus = session.conversionStatus
-            output += "Status: \(currentStatus)\n"
-
-            // Draw Pacmans
-            let sortedKeys = session.segmentProgress.keys.sorted()
-            for key in sortedKeys {
-                if let status = session.segmentProgress[key] {
-                    let pacmanStr = KloepplerCLI.buildPacmanBar(progress: status.progress, width: 20)
-                    let keyStr = String(format: "%03d", key)
-                    let fileStr = status.filename.prefix(25).padding(toLength: 25, withPad: " ", startingAt: 0)
-                    let percentStr = String(format: "%3d%%", Int(status.progress * 100))
-                    output += "\(keyStr) \(fileStr) | \(pacmanStr) | \(percentStr)\n"
-                }
-            }
-
-            renderer.drawBlock(output)
-        }
-
-        // Fortschrittsanzeige abräumen — die Schlussmeldung soll allein stehen.
-        renderer.clearBlock()
-
-        // Exit 130 erst NACH dem definitiven Worker-Abschluss. So sind Prozesse,
-        // Temp-Verzeichnisse und große .partial-Dateien sicher bereinigt.
-        let wasInterrupted = interruptState.wasReceived
-        interruptState.finishConversion()
-        if wasInterrupted { throw ExitCode(130) }
-
-        // Ehrlicher Abschluss: nur bei echtem Erfolg Exit 0, sonst Fehler-Exit
-        // (wichtig für Skripte/AI-Agenten, die den Exit-Code auswerten).
-        if session.lastConversionSucceeded == true {
-            print(conversionPlan.outputURLs.count == 1 ? "🎉 Vorgang beendet. Datei:" : "🎉 Vorgang beendet. Dateien:")
-            conversionPlan.outputURLs.forEach { print("  \($0.path)") }
-        } else {
-            let completedOutputs = session.completedOutputURLs
-            if completedOutputs.isEmpty {
-                writeStandardError("❌ Vorgang fehlgeschlagen. Es wurde keine gültige Datei erzeugt.")
             } else {
-                writeStandardError("❌ Vorgang unvollständig. Erfolgreich erzeugte Datei(en):")
-                completedOutputs.forEach { writeStandardError("  \($0.path)") }
+                // Das dokumentierte Standardziel liegt neben dem angegebenen
+                // Quellpfad, nicht neben dem Ziel eines Quellordner-Symlinks. Nur
+                // dessen Elternordner wird physisch gebunden.
+                let sourceParent = sourceURL.standardizedFileURL
+                    .deletingLastPathComponent().resolvingSymlinksInPath()
+                outputFile = sourceParent.appendingPathComponent("\(finalTitle).m4b")
             }
-            throw ExitCode.failure
+
+            let conversionPlan = FFmpegWrapper.makeConversionPlan(
+                files: session.audioFiles,
+                outputURL: outputFile,
+                maxDurationHours: session.settings.maxDurationHours
+            )
+            // Auch ein expliziter --output-Name kann zu lang sein; bei Split-Läufen
+            // kommt der konkrete `-01`-Suffix erst im Plan hinzu. Vor jedem
+            // Dateisystemzugriff deshalb die tatsächlichen Zielnamen prüfen.
+            if let invalidOutput = conversionPlan.outputURLs.first(where: {
+                $0.lastPathComponent.utf8.count > Int(NAME_MAX)
+            }) {
+                writeStandardError(
+                    "❌ Ausgabe-Dateiname ist länger als \(NAME_MAX) UTF-8-Bytes: "
+                    + invalidOutput.lastPathComponent
+                )
+                throw ExitCode.failure
+            }
+            print("Starte Konvertierung...")
+            print(conversionPlan.outputURLs.count == 1 ? "Zieldatei:" : "Zieldateien:")
+            conversionPlan.outputURLs.forEach { print("  \($0.path)") }
+
+            let existingOutputs = conversionPlan.outputURLsRequiringOverwriteConfirmation
+            if !existingOutputs.isEmpty {
+                let names = existingOutputs.map(\.lastPathComponent).joined(separator: ", ")
+                if force {
+                    print("⚠️ Vorhandene Zieldatei(en) werden überschrieben (--force): \(names)")
+                } else if isatty(FileHandle.standardInput.fileDescriptor) == 0
+                            || isatty(FileHandle.standardOutput.fileDescriptor) == 0 {
+                    // Nur fragen, wenn Eingabe UND sichtbare Ausgabe an Terminals
+                    // hängen. Bei umgeleitetem stdout wäre die Frage unsichtbar.
+                    writeStandardError("❌ Zieldatei(en) existieren bereits: \(names). Zum Überschreiben --force verwenden.")
+                    throw ExitCode.failure
+                } else {
+                    print("⚠️ Diese Zieldatei(en) existieren bereits: \(names)")
+                    print("Möchten Sie die Dateien überschreiben? (j/N): ", terminator: "")
+                    if let input = readLine(unlessInterrupted: interruptState),
+                       input.lowercased() == "j" || input.lowercased() == "y" {
+                        print("Datei wird überschrieben...")
+                    } else if interruptState.wasReceived {
+                        try throwIfInterrupted()
+                    } else {
+                        print("Vorgang abgebrochen.")
+                        throw ExitCode(2)
+                    }
+                }
+            }
+
+            guard interruptState.beginConversion() else {
+                try throwIfInterrupted()
+                throw ExitCode.failure
+            }
+            FFmpegWrapper.convert(session: session, plan: conversionPlan)
+            // Ein Signal kann genau zwischen Phasenwechsel und dem synchronen
+            // Erzeugen des Contexts eintreffen. Dann jetzt den neuen Context stoppen.
+            if interruptState.wasReceived {
+                _ = FFmpegWrapper.cancelConversion(session: session)
+            }
+
+            // Print ASCII Art Cover if verbose
+            if verbose, let img = session.coverImage {
+                print("\n--- Cover ASCII Art ---")
+                print(KloepplerCLI.generateAsciiArt(from: img, width: 40))
+                print("-----------------------\n")
+            }
+
+            // Asynchron warten, damit der Main Actor die Fortschrittsmeldungen des
+            // ffmpeg-Workers übernehmen kann.
+            // Abbruchbedingung ist das definitive Abschluss-Signal lastConversionSucceeded
+            // (vom Core genau einmal am Ende gesetzt). NICHT auf das transiente
+            // isConverting==true warten -- bei sehr schnell abschließenden Läufen
+            // (z.B. sofortiger Fehler) könnte die Schleife den kurzen Zustand sonst
+            // vollständig verpassen.
+            while session.lastConversionSucceeded == nil {
+                try await Task.sleep(for: .milliseconds(100))
+                emitInterruptIfNeeded()
+
+                var output = ""
+                let currentStatus = session.conversionStatus
+                output += "Status: \(currentStatus)\n"
+
+                // Draw Pacmans
+                let sortedKeys = session.segmentProgress.keys.sorted()
+                for key in sortedKeys {
+                    if let status = session.segmentProgress[key] {
+                        let pacmanStr = KloepplerCLI.buildPacmanBar(progress: status.progress, width: 20)
+                        let keyStr = String(format: "%03d", key)
+                        let fileStr = status.filename.prefix(25).padding(toLength: 25, withPad: " ", startingAt: 0)
+                        let percentStr = String(format: "%3d%%", Int(status.progress * 100))
+                        output += "\(keyStr) \(fileStr) | \(pacmanStr) | \(percentStr)\n"
+                    }
+                }
+
+                renderer.drawBlock(output)
+            }
+
+            // Fortschrittsanzeige abräumen — die Schlussmeldung soll allein stehen.
+            renderer.clearBlock()
+
+            // Ein akzeptierter Abbruch setzt den Core-Abschluss absichtlich auf
+            // false. Vor der normalen Fehlerausgabe abfangen, damit SIGINT/
+            // SIGTERM nicht zusätzlich als Konvertierungsfehler erscheinen.
+            try throwIfInterrupted()
+
+            // Ehrlicher Abschluss: nur bei echtem Erfolg Exit 0, sonst Fehler-Exit
+            // (wichtig für Skripte/AI-Agenten, die den Exit-Code auswerten).
+            if session.lastConversionSucceeded == true {
+                print(conversionPlan.outputURLs.count == 1 ? "🎉 Vorgang beendet. Datei:" : "🎉 Vorgang beendet. Dateien:")
+                conversionPlan.outputURLs.forEach { print("  \($0.path)") }
+            } else {
+                let completedOutputs = session.completedOutputURLs
+                if completedOutputs.isEmpty {
+                    writeStandardError("❌ Vorgang fehlgeschlagen. Es wurde keine gültige Datei erzeugt.")
+                } else {
+                    writeStandardError("❌ Vorgang unvollständig. Erfolgreich erzeugte Datei(en):")
+                    completedOutputs.forEach { writeStandardError("  \($0.path)") }
+                }
+                throw ExitCode.failure
+            }
+        } catch {
+            executionError = error
         }
+
+        // Exit 128+Signal erst NACH dem definitiven Worker-/Handler-Abschluss.
+        // So sind Prozesse, Temp-Verzeichnisse und große .partial-Dateien sicher
+        // bereinigt, und ein akzeptiertes Signal kann keinem Fehlerausgang
+        // zeitlich hinterherlaufen.
+        let receivedSignal = interruptState.finishExecution()
+        emitInterruptIfNeeded()
+        if let receivedSignal { throw ExitCode(128 + receivedSignal) }
+        if let executionError { throw executionError }
     }
-    
+
     /// Macht aus einem (Metadaten-)Titel einen sicheren Dateinamen: Pfad- und
     /// Steuerzeichen (`/`, `:`, `\`, Umbrüche) werden durch `-` ersetzt, Rand-
-    /// Whitespace/Punkte entfernt. Sonst landete der Output bei einem Titel mit
-    /// `/` im falschen Verzeichnis oder der Schreibvorgang schlug fehl.
+    /// Whitespace/Punkte entfernt und der UTF-8-Name auf APFS/HFS-kompatible
+    /// Länge begrenzt. Sonst landete der Output bei einem Titel mit `/` im
+    /// falschen Verzeichnis oder scheiterte erst tief im Core mit ENAMETOOLONG.
     static func sanitizeFilename(_ name: String) -> String {
         let invalid = CharacterSet(charactersIn: "/:\\\n\r\t").union(.controlCharacters)
         let cleaned = name.components(separatedBy: invalid).joined(separator: "-")
             .trimmingCharacters(in: CharacterSet(charactersIn: " .").union(.whitespacesAndNewlines))
-        return cleaned.isEmpty ? "Hoerbuch" : cleaned
+        guard !cleaned.isEmpty else { return "Hoerbuch" }
+
+        // NAME_MAX beträgt auf den unterstützten macOS-Dateisystemen 255 Byte.
+        // Neben `.m4b` bleibt Platz für den größtmöglichen Split-Suffix
+        // `-<Int.max>`. Zeichen werden nie mitten in ihrer UTF-8-Folge getrennt.
+        let reservedByteCount = ".m4b".utf8.count + 1 + String(Int.max).utf8.count
+        let maximumBaseByteCount = Int(NAME_MAX) - reservedByteCount
+        var truncated = ""
+        var usedByteCount = 0
+        for character in cleaned {
+            let byteCount = String(character).utf8.count
+            guard usedByteCount + byteCount <= maximumBaseByteCount else { break }
+            truncated.append(character)
+            usedByteCount += byteCount
+        }
+        let safe = truncated.trimmingCharacters(
+            in: CharacterSet(charactersIn: " .").union(.whitespacesAndNewlines)
+        )
+        return safe.isEmpty ? "Hoerbuch" : safe
     }
 
     static func buildPacmanBar(progress: Double, width: Int) -> String {
         let filledCount = Int(progress * Double(width))
         let emptyCount = max(0, width - filledCount - 1)
-        
+
         if progress >= 1.0 {
             return String(repeating: " ", count: width) + "ᗧ"
         }
-        
+
         let spaces = String(repeating: " ", count: filledCount)
         let dots = String(repeating: "•", count: emptyCount)
         let mouthOpen = Int(Date().timeIntervalSince1970 * 5) % 2 == 0
         let pacman = mouthOpen ? "ᗧ" : "○"
-        
+
         return spaces + pacman + dots
     }
-    
+
     static func generateAsciiArt(from image: NSImage, width: Int) -> String {
         // Simple ASCII mapping from dark to light
         let asciiChars = ["@", "%", "#", "*", "+", "=", "-", ":", ".", " "]
 
         // Ungültige Maße abfangen: Bei width == 0 ergäbe das Seitenverhältnis
         // unten NaN/Infinity, und Int(NaN) crasht zur Laufzeit.
-        guard image.size.width > 0, image.size.height > 0, width > 0 else { return "" }
+        guard image.size.width > 0, image.size.height > 0,
+              image.size.width.isFinite, image.size.height.isFinite,
+              width > 0 else { return "" }
+
+        // Der Aufrufer nutzt 40 Spalten. Die Obergrenzen schützen die Hilfs-
+        // funktion zusätzlich vor riesigen Allokationen bei extremen Bildmaßen.
+        let renderWidth = min(width, 400)
 
         var rect = NSRect(x: 0, y: 0, width: image.size.width, height: image.size.height)
         guard let cgImage = image.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return "" }
-        
+
         // Calculate height to maintain aspect ratio (terminal characters are roughly 2x as tall as they are wide)
         let aspectRatio = image.size.height / image.size.width
-        let height = Int(Double(width) * aspectRatio * 0.5)
-        
+        let scaledHeight = Double(renderWidth) * Double(aspectRatio) * 0.5
+        guard scaledHeight.isFinite else { return "" }
+        let height = max(1, Int(min(200, scaledHeight)))
+
         let colorSpace = CGColorSpaceCreateDeviceGray()
         let bytesPerPixel = 1
-        let bytesPerRow = bytesPerPixel * width
-        
-        var pixelData = [UInt8](repeating: 0, count: width * height)
-        
+        let bytesPerRow = bytesPerPixel * renderWidth
+
+        var pixelData = [UInt8](repeating: 0, count: renderWidth * height)
+
         guard let context = CGContext(data: &pixelData,
-                                      width: width,
+                                      width: renderWidth,
                                       height: height,
                                       bitsPerComponent: 8,
                                       bytesPerRow: bytesPerRow,
                                       space: colorSpace,
                                       bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return "" }
-        
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-        
+
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: renderWidth, height: height))
+
         var result = ""
         for y in 0..<height {
-            for x in 0..<width {
-                let offset = (height - 1 - y) * width + x // CGContext draws inverted on macOS
+            for x in 0..<renderWidth {
+                let offset = (height - 1 - y) * renderWidth + x // CGContext draws inverted on macOS
                 let pixelValue = pixelData[offset]
                 // Map 0-255 to 0-9
                 let charIndex = Int(Double(pixelValue) / 255.0 * Double(asciiChars.count - 1))

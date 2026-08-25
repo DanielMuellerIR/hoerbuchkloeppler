@@ -100,10 +100,10 @@ kloeppler <folder> [--mode parallel|standard] [--bitrate 48k] \
 
 - `<folder>` — a folder of audio files (one file = one chapter). Cover = largest image / `folder.jpg`.
 - `--title` / `--author` override the tags detected from the files (`--title` also names the output file).
-- `--genre`, `--cover`, and `--no-cover` transfer the matching GUI metadata into the CLI run.
+- `--genre`, `--cover`, and `--no-cover` transfer the matching GUI metadata into the CLI run. Explicit cover files are limited to 32 MiB.
 - `--output` — a target folder or a full `.m4b` path. Without it the file lands next to the source.
 - `--max-duration <hours>` — split long books (`0` = unlimited).
-- **Exit codes:** `0` only on real success, `≠ 0` otherwise (SIGINT / Ctrl-C returns `130`) — safe for automation.
+- **Exit codes:** `0` only on real success, `≠ 0` otherwise (SIGINT / Ctrl-C returns `130`, SIGTERM returns `143`) — safe for automation.
 - Inputs are validated up front (mode, bitrate, sample rate), so mistakes fail fast with a clear message.
 
 ---

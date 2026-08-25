@@ -51,6 +51,28 @@ private func onePixelPNGData() throws -> Data {
     return data as Data
 }
 
+@Suite("ConversionSession – Cover-Auswahl")
+@MainActor
+struct CoverSelectionTests {
+    @Test("Manuell gewähltes Cover bleibt als unveränderlicher Inhalt erhalten")
+    func selectedCoverKeepsContentSnapshot() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cover = directory.appendingPathComponent("cover.png")
+        let original = try onePixelPNGData()
+        try original.write(to: cover)
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+
+        #expect(session.selectCover(url: cover))
+        try Data("nach Auswahl ausgetauscht".utf8).write(to: cover)
+
+        #expect(session.coverPath == cover.path)
+        #expect(session.embeddedCoverData == original)
+        #expect(session.coverImage != nil)
+    }
+}
+
 // Diese Tests decken die reine Kernlogik ab — also alles, was ohne echte
 // Audiodateien, ohne ffmpeg-Prozess und ohne Oberfläche prüfbar ist:
 // FFMETADATA-Escaping/Parsing, Kapitel-Arithmetik, Auto-Split, Zeit-Parsing.

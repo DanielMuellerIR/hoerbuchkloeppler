@@ -109,10 +109,10 @@ kloeppler <ordner> [--mode parallel|standard] [--bitrate 48k] \
 
 - `<ordner>` — ein Ordner mit Audiodateien (eine Datei = ein Kapitel). Cover = größtes Bild / `folder.jpg`.
 - `--title` / `--author` überschreiben die aus den Datei-Tags erkannten Werte (`--title` bestimmt auch den Dateinamen).
-- `--genre`, `--cover` und `--no-cover` übergeben die entsprechenden Metadaten der GUI an den CLI-Lauf.
+- `--genre`, `--cover` und `--no-cover` übergeben die entsprechenden Metadaten der GUI an den CLI-Lauf. Explizite Cover-Dateien dürfen höchstens 32 MiB groß sein.
 - `--output` — Zielordner oder voller `.m4b`-Pfad. Ohne Angabe landet die Datei neben der Quelle.
 - `--max-duration <std>` — lange Bücher aufteilen (`0` = unbegrenzt).
-- **Exit-Codes:** `0` nur bei echtem Erfolg, sonst `≠ 0` (SIGINT / Ctrl-C liefert `130`) — automatisierungstauglich.
+- **Exit-Codes:** `0` nur bei echtem Erfolg, sonst `≠ 0` (SIGINT / Ctrl-C liefert `130`, SIGTERM liefert `143`) — automatisierungstauglich.
 - Eingaben werden vorab geprüft (Modus, Bitrate, Abtastrate) und brechen bei Fehlern früh mit klarer Meldung ab.
 
 ---
