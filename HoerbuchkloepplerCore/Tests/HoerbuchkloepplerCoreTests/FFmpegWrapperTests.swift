@@ -23,9 +23,9 @@ private func writeExecutable(_ url: URL, _ source: String) throws {
     )
 }
 
-private func onePixelPNGData() throws -> Data {
+private func onePixelPNGData(channelValue: UInt8 = 255) throws -> Data {
     let colorSpace = CGColorSpaceCreateDeviceRGB()
-    let bytes = [UInt8](repeating: 255, count: 4)
+    let bytes = [UInt8](repeating: channelValue, count: 4)
     let image = bytes.withUnsafeBytes { storage -> CGImage? in
         guard let context = CGContext(
             data: UnsafeMutableRawPointer(mutating: storage.baseAddress),
@@ -60,15 +60,18 @@ struct CoverSelectionTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let cover = directory.appendingPathComponent("cover.png")
         let original = try onePixelPNGData()
+        let replacement = try onePixelPNGData(channelValue: 127)
         try original.write(to: cover)
         let session = ConversionSession(settings: AudioSettings())
         session.logSink = { _ in }
 
         #expect(session.selectCover(url: cover))
-        try Data("nach Auswahl ausgetauscht".utf8).write(to: cover)
+        try replacement.write(to: cover)
 
         #expect(session.coverPath == cover.path)
         #expect(session.embeddedCoverData == original)
+        #expect(FFmpegWrapper.coverSnapshotForConversion(session) == original)
+        #expect(FFmpegWrapper.coverSnapshotForConversion(session) != replacement)
         #expect(session.coverImage != nil)
     }
 }
@@ -662,9 +665,9 @@ struct ProcessPipeReaderTests {
             Issue.record("Helferprozess lieferte PID und Exit-Status nicht")
             return
         }
-        defer { _ = Darwin.kill(childPID, SIGKILL) }
         #expect(status == 0)
         #expect(Date().timeIntervalSince(start) < 2)
+        #expect(Darwin.kill(childPID, 0) == -1 && errno == ESRCH)
     }
 }
 
@@ -679,6 +682,36 @@ struct ConversionFileOwnershipTests {
             duration: duration,
             chapterTitle: url.lastPathComponent
         )
+    }
+
+    @Test("Synchroner Startfehler wird dem GUI-Aufrufer zurückgegeben")
+    @MainActor
+    func conversionStartReturnsPlanFailure() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let input = directory.appendingPathComponent("eingang.wav")
+        let output = directory.appendingPathComponent("ausgabe.m4b")
+        try Data("eingang".utf8).write(to: input)
+        let file = audio(input)
+        let plan = FFmpegWrapper.makeConversionPlan(
+            files: [file],
+            outputURL: output,
+            maxDurationHours: nil
+        )
+        try Data("fremd".utf8).write(to: output)
+        let session = ConversionSession(settings: AudioSettings())
+        session.audioFiles = [file]
+        session.logSink = { _ in }
+
+        let result = FFmpegWrapper.convert(session: session, plan: plan)
+
+        guard case .rejected(let message) = result else {
+            Issue.record("Geänderter Zielplan wurde trotzdem gestartet")
+            return
+        }
+        #expect(message.contains("seit der Bestätigung verändert"))
+        #expect(!session.showOverlay)
+        #expect(session.lastConversionSucceeded == false)
     }
 
     @Test("Ein nach der Planung angelegtes Ziel wird nicht überschrieben")

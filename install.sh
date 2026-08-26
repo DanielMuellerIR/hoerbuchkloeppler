@@ -208,33 +208,57 @@ if [ -d "$DEST/Contents/MacOS" ]; then
   DEST_EXECUTABLE="$DEST_EXECUTABLE_DIR/$DEST_EXECUTABLE_NAME"
 fi
 destination_pids=()
+destination_identities=()
+process_identity() {
+  ps -ww -p "$1" -o lstart= -o command= 2>/dev/null || true
+}
+process_is_original_destination() {
+  local pid="$1" expected="$2" current
+  current="$(process_identity "$pid")"
+  [ -n "$current" ] && [ "$current" = "$expected" ]
+}
 while IFS= read -r pid; do
   [ -n "$pid" ] || continue
   process_command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
   case "$process_command" in
     "$DEST_EXECUTABLE"|"$DEST_EXECUTABLE "*)
       destination_pids+=("$pid")
+      destination_identities+=("$(process_identity "$pid")")
       ;;
   esac
 done < <(pgrep -x "$DEST_EXECUTABLE_NAME" 2>/dev/null || true)
 if [ "${#destination_pids[@]}" -gt 0 ]; then
   log "Beende laufende ${APP_NAME}-Instanz aus $DEST"
-  for pid in "${destination_pids[@]}"; do kill "$pid" 2>/dev/null || true; done
+  for index in "${!destination_pids[@]}"; do
+    pid="${destination_pids[$index]}"
+    if process_is_original_destination "$pid" "${destination_identities[$index]}"; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
   for _ in {1..50}; do
     still_running=0
-    for pid in "${destination_pids[@]}"; do
-      if kill -0 "$pid" 2>/dev/null; then still_running=1; break; fi
+    for index in "${!destination_pids[@]}"; do
+      pid="${destination_pids[$index]}"
+      if process_is_original_destination "$pid" "${destination_identities[$index]}"; then
+        still_running=1; break
+      fi
     done
     [ "$still_running" -eq 0 ] && break
     sleep 0.1
   done
-  for pid in "${destination_pids[@]}"; do
-    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+  for index in "${!destination_pids[@]}"; do
+    pid="${destination_pids[$index]}"
+    if process_is_original_destination "$pid" "${destination_identities[$index]}"; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
   done
   for _ in {1..20}; do
     still_running=0
-    for pid in "${destination_pids[@]}"; do
-      if kill -0 "$pid" 2>/dev/null; then still_running=1; break; fi
+    for index in "${!destination_pids[@]}"; do
+      pid="${destination_pids[$index]}"
+      if process_is_original_destination "$pid" "${destination_identities[$index]}"; then
+        still_running=1; break
+      fi
     done
     [ "$still_running" -eq 0 ] && break
     sleep 0.1
@@ -346,8 +370,12 @@ log "Gebündelte Laufzeitprogramme im installierten Bundle sind ausführbar."
 # Erst nach allen Zielprüfungen ist das alte Bundle entbehrlich. Der EXIT-Trap
 # hält es bis hierhin als atomar einwechselbares Rollback bereit.
 INSTALL_STATE="verified"
-rm -rf "$BACKUP" "$STAGED"
 trap - EXIT
+if ! rm -rf "$BACKUP" "$STAGED"; then
+  echo "⚠ Die geprüfte neue App bleibt installiert; ein Backup-/Staging-Rest konnte nicht entfernt werden:" >&2
+  echo "  $BACKUP" >&2
+  echo "  $STAGED" >&2
+fi
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/Contents/Info.plist" 2>/dev/null || echo "?")"
 echo

@@ -78,7 +78,7 @@ nicht nur „Build grün".
 ## Unit-Tests (Core)
 
 ```bash
-cd HoerbuchkloepplerCore && swift test        # 110 Tests, 18 Suites
+cd HoerbuchkloepplerCore && swift test        # vollständige Core-/CLI-Suite
 ```
 
 Deckt die reine Kernlogik ab: FFMETADATA-Escaping/Parsing, Kapitel-Arithmetik
@@ -86,7 +86,8 @@ Deckt die reine Kernlogik ab: FFMETADATA-Escaping/Parsing, Kapitel-Arithmetik
 NaN/Infinity-Härtung sowie Ausgabeplan/atomare Übernahme, Tool-Auflösung,
 laufbezogenen Abbruch, Metadatenentscheidung, echte asynchrone
 AVFoundation-Analyse einer WAV-Datei, Symlink-Deduplizierung, Unterordner-
-Sortierung, Staging-Namensgrenzen und shell-sicheren CLI-Handoff.
+Sortierung, atomaren Mehrdateien-Import, Video-only-Ablehnung,
+Prozessgruppen-Abbruch, Staging-Namensgrenzen und shell-sicheren CLI-Handoff.
 Bewusst **nicht** dabei: das reale Encoding-Ergebnis — dafür ist das Rezept oben da.
 
 Die geprüften Funktionen sind `internal` statt `private`, damit `@testable

@@ -61,8 +61,8 @@ hoerbuchkloeppler_require_notary_profile() {
     echo "   über SSH ist der Login-Schlüsselbund oft gesperrt.)" >&2
     if [ ! -t 0 ]; then
       echo "  Einmalig in einer lokalen GUI-Terminalsitzung einrichten:" >&2
-      printf "  xcrun notarytool store-credentials %q --apple-id '<apple-id>' --team-id '<team-id>'\n" "$profile" >&2
-      echo "  Das App-spezifische Passwort NUR an der verdeckten Abfrage eingeben, nie als Argument." >&2
+      printf "  xcrun notarytool store-credentials %q\n" "$profile" >&2
+      echo "  Apple-ID, Team-ID und App-spezifisches Passwort nur an den interaktiven Abfragen eingeben." >&2
       return 1
     fi
     printf "Profil jetzt interaktiv im Schlüsselbund einrichten? [j/N] " >&2
@@ -71,16 +71,9 @@ hoerbuchkloeppler_require_notary_profile() {
       j|J|ja|Ja|JA|y|Y|yes|Yes|YES) ;;
       *) return 1 ;;
     esac
-    local apple_id team_id
-    printf "Apple-ID: " >&2;  IFS= read -r apple_id
-    printf "Team-ID: "  >&2;  IFS= read -r team_id
-    if [ -z "$apple_id" ] || [ -z "$team_id" ]; then
-      echo "✗ Apple-ID und Team-ID dürfen nicht leer sein." >&2
-      return 1
-    fi
-    # Absichtlich kein --password: notarytool fragt das App-Passwort verdeckt ab
-    # und legt es direkt im lokalen Schlüsselbund ab.
-    xcrun notarytool store-credentials "$profile" --apple-id "$apple_id" --team-id "$team_id"
+    # Keine Zugangsdaten als Argumente: notarytool fragt Apple-ID, Team-ID und
+    # App-Passwort selbst interaktiv ab und schreibt sie direkt in den Schlüsselbund.
+    xcrun notarytool store-credentials "$profile"
     if ! hoerbuchkloeppler_notary_profile_works "$profile"; then
       echo "✗ Neu gespeichertes Notary-Profil '$profile' ist nicht verwendbar." >&2
       return 1

@@ -412,6 +412,14 @@ struct KloepplerCLI: AsyncParsableCommand {
 
             try throwIfInterrupted()
 
+            if !session.lastImportFailures.isEmpty {
+                writeStandardError("Fehler: Der Ordnerimport wurde vollständig verworfen:")
+                session.lastImportFailures.forEach {
+                    writeStandardError("  \($0.sourceURL.lastPathComponent): \($0.message)")
+                }
+                throw ExitCode.failure
+            }
+
             guard !session.audioFiles.isEmpty else {
                 writeStandardError("Fehler: Keine gültigen Audiodateien im Ordner gefunden.")
                 throw ExitCode.failure
@@ -550,7 +558,13 @@ struct KloepplerCLI: AsyncParsableCommand {
                 try throwIfInterrupted()
                 throw ExitCode.failure
             }
-            FFmpegWrapper.convert(session: session, plan: conversionPlan)
+            if case .rejected(let message) = FFmpegWrapper.convert(
+                session: session,
+                plan: conversionPlan
+            ) {
+                writeStandardError("❌ Konvertierung konnte nicht gestartet werden: \(message)")
+                throw ExitCode.failure
+            }
             // Ein Signal kann genau zwischen Phasenwechsel und dem synchronen
             // Erzeugen des Contexts eintreffen. Dann jetzt den neuen Context stoppen.
             if interruptState.wasReceived {

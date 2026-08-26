@@ -56,6 +56,7 @@ struct ContentView: View {
     @State private var ffmpegStatus = "Prüfe..."
     @State private var miStatus = "Prüfe..."
     @State private var showingToolErrorAlert = false
+    @State private var conversionStartError: String?
 
     func checkTools() {
         session.logCurrentSettings()
@@ -107,7 +108,7 @@ struct ContentView: View {
                     self.collidingOutputNames = collisions.map(\.lastPathComponent)
                     self.showingOverwriteAlert = true
                 } else {
-                    FFmpegWrapper.convert(session: session, plan: plan)
+                    startConversion(plan)
                 }
             }
         }
@@ -263,13 +264,29 @@ struct ContentView: View {
         .alert("Tools fehlen", isPresented: $showingToolErrorAlert) { Button("OK", role: .cancel) { } } message: {
             Text("Für die Konvertierung werden FFmpeg und MediaInfo benötigt.\n\nBitte installieren Sie Homebrew und führen Sie im Terminal aus:\nbrew install ffmpeg mediainfo")
         }
+        .alert("Import nicht übernommen", isPresented: Binding(
+            get: { session.importErrorMessage != nil },
+            set: { if !$0 { session.importErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { session.importErrorMessage = nil }
+        } message: {
+            Text(session.importErrorMessage ?? "Unbekannter Analysefehler")
+        }
+        .alert("Konvertierung nicht gestartet", isPresented: Binding(
+            get: { conversionStartError != nil },
+            set: { if !$0 { conversionStartError = nil } }
+        )) {
+            Button("OK", role: .cancel) { conversionStartError = nil }
+        } message: {
+            Text(conversionStartError ?? "Unbekannter Startfehler")
+        }
         .onAppear { checkTools() }
         .frame(minWidth: 850, minHeight: 650) // Fenster etwas höher gemacht (650 statt 550)
         .sheet(isPresented: $showingSettings) { SettingsView(session: session, isPresented: $showingSettings) }
         .alert("Datei existiert bereits", isPresented: $showingOverwriteAlert) {
             Button("Abbrechen", role: .cancel) { }
             Button("Drüberklöppeln", role: .destructive) {
-                if let plan = pendingPlan { FFmpegWrapper.convert(session: session, plan: plan) }
+                if let plan = pendingPlan { startConversion(plan) }
             }
         } message: {
             Text("Diese tatsächlichen Zieldateien existieren bereits:\n\(collidingOutputNames.joined(separator: "\n"))\n\nMöchten Sie sie wirklich überklöppeln?")
@@ -297,11 +314,13 @@ struct ContentView: View {
                         await currentSession.finishImport(importToken)
                         return
                     }
-                    await Self.processDroppedURL(
-                        url,
-                        session: currentSession,
-                        importToken: importToken
-                    )
+                    await currentSession.runImportTask(importToken) {
+                        await Self.processDroppedURL(
+                            url,
+                            session: currentSession,
+                            importToken: importToken
+                        )
+                    }
                 }
             }
         }
@@ -315,8 +334,8 @@ struct ContentView: View {
     ) async {
         var isDir: ObjCBool = false
         if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
-            let scanned = await session.scanFolder(url)
-            await session.applyScannedFolder(scanned, importToken: importToken)
+            let scanned = await session.scanFolder(url, importToken: importToken)
+            session.stageScannedFolder(scanned, importToken: importToken)
             await session.finishImport(importToken)
         } else {
             await processSingleFile(url, session: session, importToken: importToken)
@@ -330,11 +349,19 @@ struct ContentView: View {
         importToken: ImportToken
     ) async {
         if let found = ConversionSession.foundFile(at: url) {
-            let loaded = await session.loadAudioFiles(from: found)
-            loaded.warnings.forEach { session.addLog($0) }
-            await session.processIncomingFiles(loaded.files, importToken: importToken)
+            let loaded = await session.loadAudioFiles(from: found, importToken: importToken)
+            session.stageAudioLoadResult(loaded, importToken: importToken)
         }
         await session.finishImport(importToken)
+    }
+
+    private func startConversion(_ plan: ConversionPlan) {
+        switch FFmpegWrapper.convert(session: session, plan: plan) {
+        case .started:
+            conversionStartError = nil
+        case .rejected(let message):
+            conversionStartError = message
+        }
     }
     
     /// Kapitel-Dauer als `m:ss` bzw. `h:mm:ss` (ab einer Stunde).

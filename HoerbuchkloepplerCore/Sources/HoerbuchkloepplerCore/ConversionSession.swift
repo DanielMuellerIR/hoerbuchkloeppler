@@ -92,13 +92,67 @@ public struct FoundFile: Equatable, Sendable {
     }
 }
 
-public struct AudioLoadResult: Sendable {
-    public let files: [AudioFile]
-    public let warnings: [String]
+public struct AudioImportFailure: Equatable, Sendable {
+    public enum Reason: Equatable, Sendable {
+        case unreadableDuration
+        case noAudioTrack
+        case chapterAnalysisTimedOut
+        case analysisFailed
+    }
 
-    public init(files: [AudioFile], warnings: [String] = []) {
-        self.files = files
-        self.warnings = warnings
+    public let sourceURL: URL
+    public let reason: Reason
+
+    public init(sourceURL: URL, reason: Reason) {
+        self.sourceURL = sourceURL
+        self.reason = reason
+    }
+
+    public var message: String {
+        switch reason {
+        case .unreadableDuration:
+            return "Keine positive Audiodauer lesbar"
+        case .noAudioTrack:
+            return "Kein lesbarer Audio-Stream enthalten"
+        case .chapterAnalysisTimedOut:
+            return "Kapitelanalyse hat das Zeitlimit überschritten"
+        case .analysisFailed:
+            return "Audioanalyse fehlgeschlagen"
+        }
+    }
+
+    public var logMessage: String {
+        "❌ \(sourceURL.lastPathComponent): \(message)."
+    }
+}
+
+/// Typisiertes Ergebnis genau einer Eingangsdatei. Ein absichtlicher Skip
+/// (beispielsweise ein gedropptes Bild) bleibt von Analysefehler und Abbruch
+/// unterscheidbar, damit ein Mehrdateien-Import atomar entschieden werden kann.
+public enum AudioLoadResult: Sendable {
+    case success(files: [AudioFile], warnings: [String])
+    case skipped
+    case failure(AudioImportFailure)
+    case cancelled
+
+    public var files: [AudioFile] {
+        guard case .success(let files, _) = self else { return [] }
+        return files
+    }
+
+    public var warnings: [String] {
+        guard case .success(_, let warnings) = self else { return [] }
+        return warnings
+    }
+
+    public var failures: [AudioImportFailure] {
+        guard case .failure(let failure) = self else { return [] }
+        return [failure]
+    }
+
+    public var wasCancelled: Bool {
+        if case .cancelled = self { return true }
+        return false
     }
 }
 
@@ -130,7 +184,7 @@ private final class DirectoryScanFailureRecorder: @unchecked Sendable {
 /// Besitzt nur die externen Prozesse des Imports (Kapitel- und Metadatenanalyse).
 /// Damit kann die CLI schon vor dem eigentlichen Konvertierungs-Context auf
 /// Ctrl-C reagieren, ohne Prozesse eines anderen Fensters anzufassen.
-private final class PreparationContext: @unchecked Sendable {
+private final class PreparationContext: ToolProcessContext, @unchecked Sendable {
     private let lock = NSLock()
     private var processes: [ObjectIdentifier: Process] = [:]
     private var taskCancellations: [UUID: @Sendable () -> Void] = [:]
@@ -142,21 +196,33 @@ private final class PreparationContext: @unchecked Sendable {
         return cancelled
     }
 
-    func register(_ process: Process) -> Bool {
+    /// Start und Registrierung passieren unter derselben Sperre wie `cancel()`.
+    /// Ein Abbruch gewinnt dadurch entweder vor dem Spawn oder sieht danach den
+    /// vollständigen Prozessgruppen-Besitz.
+    func run(_ process: Process) throws -> Bool {
         lock.lock()
         guard !cancelled else {
             lock.unlock()
             return false
         }
         processes[ObjectIdentifier(process)] = process
-        lock.unlock()
-        return true
+        do {
+            try process.run()
+            ProcessTerminator.recordOwnedProcessGroup(process)
+            lock.unlock()
+            return true
+        } catch {
+            processes.removeValue(forKey: ObjectIdentifier(process))
+            lock.unlock()
+            throw error
+        }
     }
 
     func unregister(_ process: Process) {
         lock.lock()
         processes.removeValue(forKey: ObjectIdentifier(process))
         lock.unlock()
+        ProcessTerminator.forgetOwnedProcessGroup(process)
     }
 
     /// Registriert einen Swift-Task zusätzlich zu den externen Prozessen. So
@@ -351,6 +417,16 @@ public final class ConversionSession: ObservableObject, Identifiable {
     public private(set) var isCoverSuppressed = false
     private var pendingImportOperations = 0
     @Published public private(set) var isImporting = false
+    @Published public var importErrorMessage: String?
+    public private(set) var lastImportFailures: [AudioImportFailure] = []
+    private var pendingImportAudioFiles: [AudioFile] = []
+    private var pendingImportImageURLs: [URL] = []
+    private var pendingImportArtwork: Data?
+    private var pendingImportWarnings: [String] = []
+    private var pendingImportFailures: [AudioImportFailure] = []
+    private var pendingImportWasCancelled = false
+    private var pendingImportFolderURL: URL?
+    private var pendingImportCanRepresentFolder = false
     private var cliSourceFolderURL: URL?
     private var cliRepresentedFileIDs = Set<UUID>()
     private var cliRepresentedChapterTitles: [UUID: String] = [:]
@@ -396,11 +472,38 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// Führt einen Vorbereitungsschritt als registrierten Swift-Task aus. Der
     /// Signalpfad kann dessen Handle synchron canceln; der Aufrufer wartet
     /// trotzdem auf das saubere Ende, bevor die CLI mit Exit 130 zurückkehrt.
-    nonisolated func runPreparationTask(
+    public nonisolated func runPreparationTask(
         _ operation: @escaping @MainActor @Sendable () async -> Void
     ) async {
         let context = currentPreparationContext()
         let task = Task { @MainActor in await operation() }
+        guard let context else {
+            await task.value
+            return
+        }
+        guard let registration = context.registerTaskCancellation({ task.cancel() }) else {
+            task.cancel()
+            await task.value
+            return
+        }
+        await task.value
+        context.unregisterTaskCancellation(registration)
+    }
+
+    /// GUI-Variante mit Importbindung. Ein verspätet liefernder Provider eines
+    /// alten Drops darf seine Analyse nicht im Prozess-Context des neueren Drops
+    /// starten. Der Token wird deshalb vor der Registrierung und nochmals im
+    /// eigentlichen Main-Actor-Task geprüft.
+    public func runImportTask(
+        _ token: ImportToken,
+        operation: @escaping @MainActor @Sendable () async -> Void
+    ) async {
+        guard isCurrentImport(token) else { return }
+        let context = currentPreparationContext()
+        let task = Task { @MainActor [weak self] in
+            guard let self, self.isCurrentImport(token) else { return }
+            await operation()
+        }
         guard let context else {
             await task.value
             return
@@ -424,43 +527,89 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// Liest Kapitel mit einem optional laufenden Vorbereitungs-Context. Das
     /// strukturierte Dateipaar verhindert, dass sichtbarer Pfad und Lese-URL
     /// an zwei gleich typisierten Parametern vertauscht werden.
-    public nonisolated func extractChapters(from file: FoundFile) async -> [AudioFile]? {
+    private nonisolated func extractChapterResult(
+        from file: FoundFile,
+        importToken: ImportToken? = nil
+    ) async -> ChapterExtractionResult {
         let context = currentPreparationContext()
         return await AudioFile.extractChaptersControlled(
             from: file,
             shouldCancel: { context?.isCancelled ?? false },
-            registerProcess: { context?.register($0) ?? true },
-            unregisterProcess: { context?.unregister($0) },
+            runProcess: { process in
+                if let context { return try context.run(process) }
+                try process.run()
+                ProcessTerminator.recordOwnedProcessGroup(process)
+                return true
+            },
+            unregisterProcess: { process in
+                if let context {
+                    context.unregister(process)
+                } else {
+                    ProcessTerminator.forgetOwnedProcessGroup(process)
+                }
+            },
             log: { [weak self] message in
-                Task { @MainActor in self?.addLog(message) }
+                Task { @MainActor in
+                    guard let self else { return }
+                    if let importToken {
+                        self.addImportLog(message, token: importToken)
+                    } else {
+                        self.addLog(message)
+                    }
+                }
             }
         )
     }
 
+    public nonisolated func extractChapters(from file: FoundFile) async -> [AudioFile]? {
+        guard file.isChapterContainer else { return nil }
+        switch await extractChapterResult(from: file) {
+        case .files(let files): return files
+        case .failed: return []
+        case .cancelled: return []
+        }
+    }
+
     /// Analysiert genau eine gefundene Audiodatei. Ordner- und Einzeldatei-
     /// Import benutzen damit dieselbe Typ-, Symlink- und Dauerlogik.
-    public nonisolated func loadAudioFiles(from file: FoundFile) async -> AudioLoadResult {
-        guard file.kind == .audio else { return AudioLoadResult(files: []) }
+    public nonisolated func loadAudioFiles(
+        from file: FoundFile,
+        importToken: ImportToken? = nil
+    ) async -> AudioLoadResult {
+        guard file.kind == .audio else { return .skipped }
         let candidates: [AudioFile]
         if file.isChapterContainer {
-            candidates = await extractChapters(from: file) ?? []
+            switch await extractChapterResult(from: file, importToken: importToken) {
+            case .files(let files): candidates = files
+            case .failed(let reason):
+                return .failure(AudioImportFailure(sourceURL: file.source, reason: reason))
+            case .cancelled:
+                return .cancelled
+            }
         } else {
             candidates = [await AudioFile(foundFile: file)]
         }
-        guard !preparationCancellationRequested() else { return AudioLoadResult(files: []) }
+        guard !preparationCancellationRequested() else { return .cancelled }
 
-        var valid: [AudioFile] = []
-        var warnings: [String] = []
+        switch await AudioFile.audioTrackAvailability(at: file.readURL) {
+        case .available:
+            break
+        case .missing:
+            return .failure(AudioImportFailure(sourceURL: file.source, reason: .noAudioTrack))
+        case .unreadable:
+            return .failure(AudioImportFailure(sourceURL: file.source, reason: .analysisFailed))
+        case .cancelled:
+            return .cancelled
+        }
+
         for candidate in candidates {
             guard candidate.duration.isFinite, candidate.duration > 0 else {
-                warnings.append(
-                    "⚠️ Überspringe \(file.source.lastPathComponent): keine positive Audiodauer lesbar."
+                return .failure(
+                    AudioImportFailure(sourceURL: file.source, reason: .unreadableDuration)
                 )
-                continue
             }
-            valid.append(candidate)
         }
-        return AudioLoadResult(files: valid, warnings: warnings)
+        return .success(files: candidates, warnings: [])
     }
 
     /// Startet einen neuen Lauf und macht einen eventuell noch auslaufenden
@@ -761,22 +910,24 @@ public final class ConversionSession: ObservableObject, Identifiable {
         guard let miURL = FFmpegWrapper.getBinaryURL(name: "mediainfo") else {
             return "❌ MediaInfo wurde auf diesem System nicht gefunden."
         }
-        let process = Process()
-        process.executableURL = miURL
-        process.arguments = [fileURL.path]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        do {
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
+        switch FFmpegWrapper.runCapturedProcess(
+            executableURL: miURL,
+            arguments: [fileURL.path],
+            timeout: 10
+        ) {
+        case .completed(let status, let data) where status == 0:
             guard !data.isEmpty else {
                 return "MediaInfo hat keine Informationen geliefert."
             }
             return decodeMediaInfoText(from: data) ?? "Dekodierung fehlgeschlagen."
-        } catch {
-            return "Fehler: \(error.localizedDescription)"
+        case .timedOut:
+            return "MediaInfo wurde nach 10 Sekunden beendet."
+        case .cancelled:
+            return "MediaInfo-Abfrage wurde abgebrochen."
+        case .completed(let status, _):
+            return "MediaInfo endete mit Exit-Code \(status)."
+        case .failed(let reason):
+            return "Fehler: \(reason)"
         }
     }
 
@@ -804,9 +955,22 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// Datei-/Ordner-Drops verlieren damit sofort ihre Schreibberechtigung.
     /// Nur auf dem Main Actor aufrufen.
     public func beginImport(expectedItemCount: Int = 1) -> ImportToken {
+        // Derselbe Context besitzt Swift-Tasks und externe Analyseprozesse. Ein
+        // neuer Drop beendet damit die noch laufende Arbeit seines Vorgängers.
+        preparationCoordinator.begin()
         importGeneration = UUID()
         pendingImportOperations = max(0, expectedItemCount)
         isImporting = pendingImportOperations > 0
+        importErrorMessage = nil
+        lastImportFailures = []
+        pendingImportAudioFiles = []
+        pendingImportImageURLs = []
+        pendingImportArtwork = nil
+        pendingImportWarnings = []
+        pendingImportFailures = []
+        pendingImportWasCancelled = false
+        pendingImportFolderURL = nil
+        pendingImportCanRepresentFolder = expectedItemCount == 1
         cliSourceFolderURL = nil
         cliRepresentedFileIDs = []
         cliRepresentedChapterTitles = [:]
@@ -820,6 +984,35 @@ public final class ConversionSession: ObservableObject, Identifiable {
         guard isCurrentImport(token), pendingImportOperations > 0 else { return }
         pendingImportOperations -= 1
         guard pendingImportOperations == 0 else { return }
+        if pendingImportWasCancelled {
+            isImporting = false
+            clearPendingImportBatch()
+            return
+        }
+        if !pendingImportFailures.isEmpty {
+            pendingImportWarnings.forEach { addLog($0) }
+            pendingImportFailures.forEach { addLog($0.logMessage, type: .highlight) }
+            lastImportFailures = pendingImportFailures
+            importErrorMessage = Self.importFailureMessage(pendingImportFailures)
+            isImporting = false
+            clearPendingImportBatch()
+            return
+        }
+
+        let stagedAudioFiles = pendingImportAudioFiles
+        let stagedImageURLs = pendingImportImageURLs
+        let stagedArtwork = pendingImportArtwork
+        let stagedWarnings = pendingImportWarnings
+        let sourceFolder = pendingImportCanRepresentFolder ? pendingImportFolderURL : nil
+        clearPendingImportBatch()
+        await applyScannedFolderContents(
+            audioFiles: stagedAudioFiles,
+            imageURLs: stagedImageURLs,
+            embeddedArtwork: stagedArtwork,
+            warnings: stagedWarnings,
+            importToken: token,
+            sourceFolderForCLI: sourceFolder
+        )
         if (title.isEmpty || author.isEmpty), let first = audioFiles.first {
             await importGlobalMetadata(from: first, importToken: token)
             await finishMetadataImport(token: token, sourceFileID: first.id)
@@ -843,13 +1036,33 @@ public final class ConversionSession: ObservableObject, Identifiable {
     }
 
     private func invalidateImportWork() {
+        _ = preparationCoordinator.cancel()
         importGeneration = UUID()
         pendingImportOperations = 0
         isImporting = false
         cliSourceFolderURL = nil
         cliRepresentedFileIDs = []
         cliRepresentedChapterTitles = [:]
+        clearPendingImportBatch()
         invalidateArtworkWork()
+    }
+
+    private func clearPendingImportBatch() {
+        pendingImportAudioFiles = []
+        pendingImportImageURLs = []
+        pendingImportArtwork = nil
+        pendingImportWarnings = []
+        pendingImportFailures = []
+        pendingImportWasCancelled = false
+        pendingImportFolderURL = nil
+        pendingImportCanRepresentFolder = false
+    }
+
+    private static func importFailureMessage(_ failures: [AudioImportFailure]) -> String {
+        let details = failures.map {
+            "• \($0.sourceURL.lastPathComponent): \($0.message)"
+        }.joined(separator: "\n")
+        return "Der Import wurde vollständig verworfen, damit kein Hörbuch mit fehlenden Kapiteln entsteht.\n\n\(details)"
     }
 
     private func invalidateArtworkWork() {
@@ -859,6 +1072,11 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
     private func isCurrentImport(_ token: ImportToken) -> Bool {
         token.generation == importGeneration
+    }
+
+    private func addImportLog(_ message: String, token: ImportToken) {
+        guard isCurrentImport(token) else { return }
+        addLog(message)
     }
 
     /// Der GUI→CLI-Handoff ist nur ehrlich, wenn die aktuelle Dateiliste exakt
@@ -1007,36 +1225,17 @@ public final class ConversionSession: ObservableObject, Identifiable {
             var result: (titles: [TagCandidate], authors: [TagCandidate])?
             if preparation?.isCancelled != true,
                let miURL = FFmpegWrapper.getBinaryURL(name: "mediainfo") {
-                let process = Process()
-                process.executableURL = miURL
-                process.arguments = ["--Output=JSON", fileURL.path]
-                let pipe = Pipe()
-                process.standardOutput = pipe
-                process.standardError = pipe
-
-                if preparation?.register(process) ?? true {
-                    defer { preparation?.unregister(process) }
-                    do {
-                        guard preparation?.isCancelled != true else { throw CancellationError() }
-                        try process.run()
-                        // Dasselbe Start-Race wie bei Encoding-Prozessen: Ein
-                        // Cancel unmittelbar vor `run()` sah den Process noch
-                        // nicht laufen. Nach dem Start sofort erneut prüfen.
-                        if preparation?.isCancelled == true {
-                            ProcessTerminator.requestTermination(process)
-                        }
-                        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                        process.waitUntilExit()
-                        guard process.terminationStatus == 0,
-                              preparation?.isCancelled != true,
-                              let general = Self.decodeMediaInfoGeneralTrack(from: data) else {
-                            throw CocoaError(.fileReadCorruptFile)
-                        }
-                        result = Self.metadataCandidates(from: general)
-                    } catch {
-                        // Ein fehlender/kaputter Tag-Lauf fällt unten auf die
-                        // manuelle Auswahl zurück. Abbruch zeigt keine neue UI.
-                    }
+                let processResult = FFmpegWrapper.runCapturedProcess(
+                    executableURL: miURL,
+                    arguments: ["--Output=JSON", fileURL.path],
+                    context: preparation,
+                    timeout: 10
+                )
+                if case .completed(let status, let data) = processResult,
+                   status == 0,
+                   preparation?.isCancelled != true,
+                   let general = Self.decodeMediaInfoGeneralTrack(from: data) {
+                    result = Self.metadataCandidates(from: general)
                 }
             }
             return result
@@ -1163,19 +1362,25 @@ public final class ConversionSession: ObservableObject, Identifiable {
         public var imageURLs: [URL]
         public var embeddedArtwork: Data?
         public var warnings: [String]
+        public var failures: [AudioImportFailure]
+        public var wasCancelled: Bool
 
         public init(
             folderURL: URL,
             audioFiles: [AudioFile],
             imageURLs: [URL],
             embeddedArtwork: Data?,
-            warnings: [String] = []
+            warnings: [String] = [],
+            failures: [AudioImportFailure] = [],
+            wasCancelled: Bool = false
         ) {
             self.folderURL = folderURL
             self.audioFiles = audioFiles
             self.imageURLs = imageURLs
             self.embeddedArtwork = embeddedArtwork
             self.warnings = warnings
+            self.failures = failures
+            self.wasCancelled = wasCancelled
         }
     }
 
@@ -1183,10 +1388,14 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// extrahieren, Dauern/eingebettetes Artwork lesen. Rührt **keinen**
     /// `@Published`-State an. Die AVFoundation-Aufrufe suspendieren asynchron;
     /// der Dateisystem- und ffmpeg-Anteil läuft außerhalb des Main Actors.
-    public nonisolated func scanFolder(_ url: URL) async -> ScannedFolder {
+    public nonisolated func scanFolder(
+        _ url: URL,
+        importToken: ImportToken? = nil
+    ) async -> ScannedFolder {
         var foundAudio: [AudioFile] = []
         var foundImages: [URL] = []
         var warnings: [String] = []
+        var analysisFailures: [AudioImportFailure] = []
         let discovery = Self.discoverFileURLs(
             in: url,
             cancellationRequested: { preparationCancellationRequested() }
@@ -1197,7 +1406,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
                 audioFiles: [],
                 imageURLs: [],
                 embeddedArtwork: nil,
-                warnings: ["❌ Ordnerimport abgebrochen, weil nicht alle Einträge gelesen werden konnten: \(failure)"]
+                warnings: ["❌ Ordner konnte nicht vollständig gelesen werden: \(failure)"],
+                failures: [AudioImportFailure(sourceURL: url, reason: .analysisFailed)]
             )
         }
         let discovered = discovery.files
@@ -1220,9 +1430,24 @@ public final class ConversionSession: ObservableObject, Identifiable {
             if preparationCancellationRequested() { break }
             switch found.kind {
             case .audio:
-                let loaded = await loadAudioFiles(from: found)
+                let loaded = await loadAudioFiles(from: found, importToken: importToken)
                 foundAudio.append(contentsOf: loaded.files)
                 warnings.append(contentsOf: loaded.warnings)
+                if loaded.wasCancelled {
+                    return ScannedFolder(
+                        folderURL: url,
+                        audioFiles: [],
+                        imageURLs: [],
+                        embeddedArtwork: nil,
+                        warnings: warnings,
+                        wasCancelled: true
+                    )
+                }
+                if let failure = loaded.failures.first {
+                    // Alle weiteren Dateien trotzdem analysieren, damit GUI und
+                    // CLI in einem Lauf die vollständige Fehlerliste nennen.
+                    analysisFailures.append(failure)
+                }
             case .image:
                 foundImages.append(found.readURL)
             case .unsupported:
@@ -1245,7 +1470,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
             audioFiles: foundAudio,
             imageURLs: foundImages,
             embeddedArtwork: embedded,
-            warnings: warnings
+            warnings: warnings,
+            failures: analysisFailures
         )
     }
 
@@ -1313,17 +1539,32 @@ public final class ConversionSession: ObservableObject, Identifiable {
         }
 
         var reportedDiscardedSources = Set<String>()
+        var seenSegments = Set<String>()
         var discardedSources: [(discarded: URL, kept: URL)] = []
         let kept = files.filter { file in
             let target = file.url.standardizedFileURL.path
             guard let selected = selectedSourceByTarget[target] else { return false }
             let source = file.sourceURL.standardizedFileURL
-            guard source != selected else { return true }
-            let reportKey = "\(target)\u{0}\(source.path)"
-            if reportedDiscardedSources.insert(reportKey).inserted {
-                discardedSources.append((discarded: source, kept: selected))
+            if source != selected {
+                let reportKey = "\(target)\u{0}\(source.path)"
+                if reportedDiscardedSources.insert(reportKey).inserted {
+                    discardedSources.append((discarded: source, kept: selected))
+                }
+                return false
             }
-            return false
+            // Derselbe Provider darf dasselbe Kapitel nicht mehrfach liefern.
+            // Start und Dauer gehören zum Schlüssel, damit unterschiedliche
+            // Kapitel desselben m4b/mp4-Containers erhalten bleiben.
+            let segmentKey = "\(target)\u{0}\(source.path)\u{0}"
+                + "\(file.startTime.bitPattern)\u{0}\(file.duration.bitPattern)"
+            guard seenSegments.insert(segmentKey).inserted else {
+                let reportKey = "duplicate\u{0}\(segmentKey)"
+                if reportedDiscardedSources.insert(reportKey).inserted {
+                    discardedSources.append((discarded: source, kept: selected))
+                }
+                return false
+            }
+            return true
         }
         return (kept, discardedSources)
     }
@@ -1406,6 +1647,43 @@ public final class ConversionSession: ObservableObject, Identifiable {
         discoverFileURLs(in: url, cancellationRequested: cancellationRequested).files
     }
 
+    /// Stellt einen Provider-Beitrag bis zum Abschluss des gesamten Drops
+    /// zurück. Erst `finishImport` übernimmt die gemeinsame Liste oder verwirft
+    /// sie bei einem einzigen Analysefehler vollständig.
+    public func stageAudioLoadResult(
+        _ result: AudioLoadResult,
+        importToken: ImportToken
+    ) {
+        guard isCurrentImport(importToken) else { return }
+        switch result {
+        case .success(let files, let warnings):
+            pendingImportAudioFiles.append(contentsOf: files)
+            pendingImportWarnings.append(contentsOf: warnings)
+        case .failure(let failure):
+            pendingImportFailures.append(failure)
+        case .cancelled:
+            pendingImportWasCancelled = true
+        case .skipped:
+            break
+        }
+    }
+
+    public func stageScannedFolder(
+        _ scanned: ScannedFolder,
+        importToken: ImportToken
+    ) {
+        guard isCurrentImport(importToken) else { return }
+        pendingImportAudioFiles.append(contentsOf: scanned.audioFiles)
+        pendingImportImageURLs.append(contentsOf: scanned.imageURLs)
+        if pendingImportArtwork == nil { pendingImportArtwork = scanned.embeddedArtwork }
+        pendingImportWarnings.append(contentsOf: scanned.warnings)
+        pendingImportFailures.append(contentsOf: scanned.failures)
+        pendingImportWasCancelled = pendingImportWasCancelled || scanned.wasCancelled
+        if pendingImportCanRepresentFolder {
+            pendingImportFolderURL = scanned.folderURL
+        }
+    }
+
     /// Leichter Teil: das Scan-Ergebnis in den Main-Actor-isolierten
     /// `@Published`-State übernehmen.
     public func applyScannedFolder(
@@ -1414,11 +1692,37 @@ public final class ConversionSession: ObservableObject, Identifiable {
     ) async {
         if AudioFile.taskCancellationRequested() { return }
         if let importToken, !isCurrentImport(importToken) { return }
-        for warning in scanned.warnings { addLog(warning) }
+        guard !scanned.wasCancelled else { return }
+        guard scanned.failures.isEmpty else {
+            scanned.warnings.forEach { addLog($0) }
+            scanned.failures.forEach { addLog($0.logMessage, type: .highlight) }
+            lastImportFailures = scanned.failures
+            importErrorMessage = Self.importFailureMessage(scanned.failures)
+            return
+        }
+        await applyScannedFolderContents(
+            audioFiles: scanned.audioFiles,
+            imageURLs: scanned.imageURLs,
+            embeddedArtwork: scanned.embeddedArtwork,
+            warnings: scanned.warnings,
+            importToken: importToken,
+            sourceFolderForCLI: scanned.folderURL
+        )
+    }
+
+    private func applyScannedFolderContents(
+        audioFiles: [AudioFile],
+        imageURLs: [URL],
+        embeddedArtwork: Data?,
+        warnings: [String],
+        importToken: ImportToken?,
+        sourceFolderForCLI: URL?
+    ) async {
+        for warning in warnings { addLog(warning) }
         let expectedCoverRevision = importToken?.coverRevision ?? coverRevision
         if coverRevision == expectedCoverRevision, !isCoverSuppressed,
            coverImage == nil, coverPath == nil,
-           let artworkData = scanned.embeddedArtwork,
+           let artworkData = embeddedArtwork,
            let image = NSImage(data: artworkData) {
             coverImage = image
             coverPath = nil
@@ -1430,15 +1734,15 @@ public final class ConversionSession: ObservableObject, Identifiable {
         // Cover-Suche nicht erneut (schon im Scan erledigt) — sonst liefe sie hier
         // auf dem Main-Thread über alle Dateien.
         await processIncomingFiles(
-            scanned.audioFiles,
+            audioFiles,
             skipCoverExtraction: true,
             importToken: importToken,
-            sourceFolderForCLI: scanned.folderURL
+            sourceFolderForCLI: sourceFolderForCLI
         )
         if coverRevision == expectedCoverRevision,
            !isCoverSuppressed,
-           !scanned.imageURLs.isEmpty,
-           let url = findLargestImage(from: scanned.imageURLs) {
+           !imageURLs.isEmpty,
+           let url = findLargestImage(from: imageURLs) {
             selectCover(url: url)
         }
     }
@@ -1504,6 +1808,12 @@ public final class ConversionSession: ObservableObject, Identifiable {
 }
 
 public struct AudioFile: Identifiable, Sendable {
+    enum AudioTrackAvailability: Sendable {
+        case available
+        case missing
+        case unreadable
+        case cancelled
+    }
     public let id = UUID()
     /// Physische Lese-URL: die reguläre Datei, aus der AVFoundation und ffmpeg
     /// lesen. Bei einem Symlink ist das dessen aufgelöstes Ziel.
@@ -1578,6 +1888,20 @@ public struct AudioFile: Identifiable, Sendable {
         guard !taskCancellationRequested() else { return (duration, fallbackTitle) }
         let title = await findRobustTag(for: "title", in: metadata) ?? fallbackTitle
         return (duration, title)
+    }
+
+    /// Prüft den Stream-Typ getrennt von der Gesamtdauer des Containers. Eine
+    /// reine Videodatei kann eine positive Dauer haben, ist für `-map 0:a` aber
+    /// keine gültige Hörbuchquelle.
+    static func audioTrackAvailability(at url: URL) async -> AudioTrackAvailability {
+        guard !taskCancellationRequested() else { return .cancelled }
+        do {
+            let tracks = try await AVAsset(url: url).loadTracks(withMediaType: .audio)
+            guard !taskCancellationRequested() else { return .cancelled }
+            return tracks.isEmpty ? .missing : .available
+        } catch {
+            return taskCancellationRequested() ? .cancelled : .unreadable
+        }
     }
 
     /// Macht eine Sekundenangabe für Berechnungen sicher: NaN/Infinity/negativ → 0.

@@ -1264,6 +1264,62 @@ struct ImportLifecycleTests {
         #expect(session.eventLogs.contains { $0.message.contains("lesen dieselbe Audiodatei") })
     }
 
+    @Test("Doppelte Provider-Ergebnisse behalten jedes Containerkapitel genau einmal")
+    func identicalProviderResultsAreDeduplicatedBySegment() {
+        let container = URL(fileURLWithPath: "/tmp/Buch.m4b")
+        let chapters = [
+            AudioFile(url: container, startTime: 0, duration: 1, chapterTitle: "Eins"),
+            AudioFile(url: container, startTime: 1, duration: 2, chapterTitle: "Zwei")
+        ]
+
+        let result = ConversionSession.deduplicateAudioFiles(chapters + chapters)
+
+        #expect(result.files.count == 2)
+        #expect(result.files.map(\.chapterTitle) == ["Eins", "Zwei"])
+        #expect(result.discardedSources.count == 2)
+    }
+
+    @Test("Ein Analysefehler verwirft den gesamten Mehrfach-Drop")
+    func failedProviderRejectsWholeBatch() async {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        let existing = AudioFile(
+            url: URL(fileURLWithPath: "/tmp/vorher.mp3"),
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Vorher"
+        )
+        await session.processIncomingFiles([existing], skipCoverExtraction: true)
+
+        let token = session.beginImport(expectedItemCount: 2)
+        let staged = AudioFile(
+            url: URL(fileURLWithPath: "/tmp/neu.mp3"),
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Neu"
+        )
+        session.stageAudioLoadResult(
+            .success(files: [staged], warnings: []),
+            importToken: token
+        )
+        await session.finishImport(token)
+        #expect(session.audioFiles.map(\.id) == [existing.id])
+
+        let brokenURL = URL(fileURLWithPath: "/tmp/kaputt.mp3")
+        session.stageAudioLoadResult(
+            .failure(AudioImportFailure(sourceURL: brokenURL, reason: .analysisFailed)),
+            importToken: token
+        )
+        await session.finishImport(token)
+
+        #expect(session.audioFiles.map(\.id) == [existing.id])
+        #expect(session.lastImportFailures == [
+            AudioImportFailure(sourceURL: brokenURL, reason: .analysisFailed)
+        ])
+        #expect(session.importErrorMessage?.contains("vollständig verworfen") == true)
+        #expect(!session.isImporting)
+    }
+
     @Test("Artwork-Kandidaten enthalten jede physische Datei nur einmal")
     func artworkCandidatesDeduplicateContainerChapters() {
         let source = URL(fileURLWithPath: "/tmp/Buch.m4b")
@@ -1362,6 +1418,20 @@ struct ImportLifecycleTests {
         #expect(session.isImporting)
         await session.finishImport(token)
         #expect(!session.isImporting)
+    }
+
+    @Test("Verspäteter Provider startet keine Analyse im neuen Importlauf")
+    func staleProviderDoesNotEnterReplacementContext() async {
+        let session = ConversionSession(settings: AudioSettings())
+        let staleToken = session.beginImport()
+        _ = session.beginImport()
+        var executed = false
+
+        await session.runImportTask(staleToken) {
+            executed = true
+        }
+
+        #expect(!executed)
     }
 
     @Test("Leerer Provider entwertet gültigen Teil eines Mehrfach-Drops nicht")
@@ -1571,7 +1641,33 @@ struct ReviewFixes20260817Tests {
         let loaded = await session.loadAudioFiles(from: found)
 
         #expect(loaded.files.isEmpty)
-        #expect(loaded.warnings.contains { $0.contains("keine positive Audiodauer") })
+        #expect(loaded.failures.count == 1)
+        #expect(loaded.failures.first?.sourceURL == link)
+        #expect(loaded.failures.first?.reason == .analysisFailed)
+    }
+
+    @Test("Video-only-MP4 wird bereits bei der Audioanalyse abgewiesen")
+    func videoOnlyMP4IsRejectedBeforeConversion() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let video = directory.appendingPathComponent("nur-video.mp4")
+        let ffmpeg = try #require(FFmpegWrapper.getBinaryURL(name: "ffmpeg"))
+        let process = Process()
+        process.executableURL = ffmpeg
+        process.arguments = [
+            "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+            "color=c=black:s=16x16:d=0.2", "-an", "-c:v", "mpeg4", video.path
+        ]
+        try process.run()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+
+        let session = ConversionSession(settings: AudioSettings())
+        let found = try #require(ConversionSession.foundFile(at: video))
+        let loaded = await session.loadAudioFiles(from: found)
+
+        #expect(loaded.files.isEmpty)
+        #expect(loaded.failures.first?.reason == .noAudioTrack)
     }
 
     @Test("Kapitelcontainer und Bilder dürfen nur am Ziel eine Endung tragen")

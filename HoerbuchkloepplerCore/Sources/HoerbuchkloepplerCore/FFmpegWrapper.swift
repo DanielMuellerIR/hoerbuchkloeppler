@@ -13,33 +13,83 @@ enum ProcessTerminator {
         attributes: .concurrent
     )
     static let defaultGraceInterval: TimeInterval = 0.5
+    private static let groupLock = NSLock()
+    private nonisolated(unsafe) static var ownedGroups: [ObjectIdentifier: pid_t] = [:]
+
+    /// `Process` startet sein Kind auf macOS als Leiter einer neuen Prozessgruppe.
+    /// Die Gruppen-ID wird direkt nach `run()` festgehalten, solange der direkte
+    /// Prozess sicher noch existiert. So bleibt sie auch nach dessen frühem Ende
+    /// verfügbar, wenn ein Nachkomme noch eine geerbte Pipe offen hält.
+    static func recordOwnedProcessGroup(_ process: Process) {
+        let pid = process.processIdentifier
+        guard pid > 0, Darwin.getpgid(pid) == pid else { return }
+        groupLock.lock()
+        ownedGroups[ObjectIdentifier(process)] = pid
+        groupLock.unlock()
+    }
+
+    static func forgetOwnedProcessGroup(_ process: Process) {
+        groupLock.lock()
+        ownedGroups.removeValue(forKey: ObjectIdentifier(process))
+        groupLock.unlock()
+    }
+
+    private static func ownedGroup(for process: Process) -> pid_t? {
+        groupLock.lock()
+        defer { groupLock.unlock() }
+        return ownedGroups[ObjectIdentifier(process)]
+    }
+
+    private static func groupIsRunning(_ group: pid_t) -> Bool {
+        if Darwin.kill(-group, 0) == 0 { return true }
+        return errno != ESRCH
+    }
 
     static func terminateAndWait(
         _ processes: [Process],
         graceInterval: TimeInterval = defaultGraceInterval
     ) {
-        let running = processes.filter(\.isRunning)
-        guard !running.isEmpty else { return }
+        let targets = processes.compactMap { process -> (Process, pid_t?)? in
+            let group = ownedGroup(for: process)
+            guard process.isRunning || group.map(groupIsRunning) == true else { return nil }
+            return (process, group)
+        }
+        guard !targets.isEmpty else { return }
 
         // Allen Prozessen dieselbe Schonfrist geben, statt sie nacheinander um
         // je eine volle Frist zu verlängern.
-        running.forEach { $0.terminate() }
+        for (process, group) in targets {
+            if let group {
+                _ = Darwin.kill(-group, SIGTERM)
+            } else if process.isRunning {
+                process.terminate()
+            }
+        }
         let grace = graceInterval.isFinite
             ? max(0, graceInterval)
             : defaultGraceInterval
         let deadline = DispatchTime.now().uptimeNanoseconds
             + UInt64(grace * 1_000_000_000)
-        while running.contains(where: \.isRunning),
+        while targets.contains(where: { process, group in
+                  process.isRunning || group.map(groupIsRunning) == true
+              }),
               DispatchTime.now().uptimeNanoseconds < deadline {
             Thread.sleep(forTimeInterval: 0.01)
         }
-        for process in running where process.isRunning {
-            Darwin.kill(process.processIdentifier, SIGKILL)
+        for (process, group) in targets {
+            if let group, groupIsRunning(group) {
+                _ = Darwin.kill(-group, SIGKILL)
+            } else if process.isRunning {
+                _ = Darwin.kill(process.processIdentifier, SIGKILL)
+            }
         }
         // Genau der besitzende Worker ruft `waitUntilExit()` auf. Der Terminator
         // beobachtet nur den Status, damit nie zwei Threads dieselbe
         // Process-Instanz gleichzeitig reap-en.
-        while running.contains(where: \.isRunning) {
+        let killDeadline = DispatchTime.now().uptimeNanoseconds + 1_000_000_000
+        while targets.contains(where: { process, group in
+                  process.isRunning || group.map(groupIsRunning) == true
+              }), DispatchTime.now().uptimeNanoseconds < killDeadline {
             Thread.sleep(forTimeInterval: 0.01)
         }
     }
@@ -48,7 +98,9 @@ enum ProcessTerminator {
         _ process: Process,
         graceInterval: TimeInterval = defaultGraceInterval
     ) {
-        guard process.isRunning else { return }
+        guard process.isRunning || ownedGroup(for: process).map(groupIsRunning) == true else {
+            return
+        }
         queue.async {
             terminateAndWait([process], graceInterval: graceInterval)
         }
@@ -63,6 +115,15 @@ enum ProcessTerminator {
             completion()
         }
     }
+}
+
+/// Gemeinsamer Besitzvertrag für Konvertierungs- und Importprozesse. Beide
+/// Kontexte starten einen Prozess atomar gegenüber ihrem jeweiligen Abbruch und
+/// entfernen ihn nach dem begrenzten Pipe-Join wieder aus ihrer Besitzliste.
+protocol ToolProcessContext: AnyObject, Sendable {
+    var isCancelled: Bool { get }
+    func run(_ process: Process) throws -> Bool
+    func unregister(_ process: Process)
 }
 
 public struct ConversionPlan: Sendable {
@@ -295,11 +356,16 @@ public enum ConversionCancellationOutcome: Sendable {
     case rejected
 }
 
+public enum ConversionStartResult: Equatable, Sendable {
+    case started
+    case rejected(String)
+}
+
 /// Laufbezogener Besitz aller Prozesse und temporären Dateien. Dadurch kann ein
 /// Fenster nur seinen eigenen Lauf abbrechen; ein zweites Fenster bleibt
 /// unangetastet. Die Sperre schließt außerdem das Rennen zwischen Start und
 /// Abbruch eines Prozesses.
-final class ConversionContext: @unchecked Sendable {
+final class ConversionContext: ToolProcessContext, @unchecked Sendable {
     private struct DisplacedOutputResource {
         let identity: FileSystemIdentity
         let stagingOwnership: StagingOwnership?
@@ -339,6 +405,7 @@ final class ConversionContext: @unchecked Sendable {
         processes.insert(process)
         do {
             try process.run()
+            ProcessTerminator.recordOwnedProcessGroup(process)
             lock.unlock()
             return true
         } catch {
@@ -352,6 +419,7 @@ final class ConversionContext: @unchecked Sendable {
         lock.lock()
         processes.remove(process)
         lock.unlock()
+        ProcessTerminator.forgetOwnedProcessGroup(process)
     }
 
     func registerTempDirectory(_ url: URL) {
@@ -772,7 +840,10 @@ final class ProcessPipeReader: @unchecked Sendable {
     /// Wartet normalerweise bis EOF. Bei einem begrenzten Join beendet die
     /// Leser-Queue ihre `poll`-Schleife selbst; dadurch kann ein fremdes Kind,
     /// das den Pipe-Schreibdeskriptor geerbt hat, den Aufrufer nicht festhalten.
-    func waitUntilEOF(timeout: TimeInterval? = nil) -> Data {
+    func waitUntilEOF(
+        timeout: TimeInterval? = nil,
+        onTimeout: () -> Void = {}
+    ) -> Data {
         stateLock.lock()
         let hasStarted = started
         stateLock.unlock()
@@ -780,6 +851,7 @@ final class ProcessPipeReader: @unchecked Sendable {
         if let timeout {
             let bounded = timeout.isFinite ? max(0, timeout) : 1
             if completion.wait(timeout: .now() + bounded) == .timedOut {
+                onTimeout()
                 stateLock.lock()
                 stopRequested = true
                 stateLock.unlock()
@@ -1110,7 +1182,7 @@ public struct FFmpegWrapper {
     static func runCapturedProcess(
         executableURL: URL,
         arguments: [String],
-        context: ConversionContext? = nil,
+        context: ToolProcessContext? = nil,
         timeout: TimeInterval
     ) -> CapturedProcessResult {
         let process = Process()
@@ -1126,10 +1198,17 @@ public struct FFmpegWrapper {
                 started = try context.run(process)
             } else {
                 try process.run()
+                ProcessTerminator.recordOwnedProcessGroup(process)
                 started = true
             }
             guard started else { return .cancelled(output: Data()) }
-            defer { context?.unregister(process) }
+            defer {
+                if let context {
+                    context.unregister(process)
+                } else {
+                    ProcessTerminator.forgetOwnedProcessGroup(process)
+                }
+            }
             try? pipe.fileHandleForWriting.close()
             reader.start()
 
@@ -1148,7 +1227,12 @@ public struct FFmpegWrapper {
             // Ein bereits beendeter direkter Prozess kann einen Nachkommen mit
             // geerbtem stdout hinterlassen. Dessen offener Schreibdeskriptor darf
             // den informativen Versions-/MediaInfo-Aufruf nicht endlos blockieren.
-            let output = reader.waitUntilEOF(timeout: 0.25)
+            let output = reader.waitUntilEOF(timeout: 0.25) {
+                // Der direkte Prozess kann bereits beendet sein, während ein
+                // Nachkomme seine Pipe geerbt hat. Dann gehört auch dieser Rest
+                // zur aufgezeichneten Werkzeug-Prozessgruppe.
+                ProcessTerminator.terminateAndWait([process])
+            }
             if context?.isCancelled == true { return .cancelled(output: output) }
             if timedOut { return .timedOut(output: output) }
             return .completed(status: process.terminationStatus, output: output)
@@ -1345,7 +1429,16 @@ public struct FFmpegWrapper {
     }
 
     @MainActor
-    public static func convert(session: ConversionSession, outputURL: URL) {
+    static func coverSnapshotForConversion(_ session: ConversionSession) -> Data? {
+        session.embeddedCoverData
+    }
+
+    @MainActor
+    @discardableResult
+    public static func convert(
+        session: ConversionSession,
+        outputURL: URL
+    ) -> ConversionStartResult {
         convert(
             session: session,
             plan: makeConversionPlan(
@@ -1357,7 +1450,11 @@ public struct FFmpegWrapper {
     }
 
     @MainActor
-    public static func convert(session: ConversionSession, plan: ConversionPlan) {
+    @discardableResult
+    public static func convert(
+        session: ConversionSession,
+        plan: ConversionPlan
+    ) -> ConversionStartResult {
         // Ohne Eingabedateien gar nicht erst starten — sonst leere ffmpeg-Liste
         // und Division durch die Gruppengröße bei der Fortschrittsberechnung.
         guard !plan.groups.isEmpty, !plan.groups.flatMap({ $0 }).isEmpty,
@@ -1369,7 +1466,7 @@ public struct FFmpegWrapper {
                 "❌ Keine Audiodateien zum Konvertieren vorhanden.",
                 type: .highlight
             )
-            return
+            return .rejected("Keine Audiodateien zum Konvertieren vorhanden.")
         }
         let outputLeases: OutputLeaseSet
         do {
@@ -1380,13 +1477,9 @@ public struct FFmpegWrapper {
             session.lastConversionSucceeded = false
             session.conversionStatus = "Ausgabe nicht sicher verfügbar"
             session.addLog("❌ \(error.localizedDescription)", type: .highlight)
-            return
+            return .rejected(error.localizedDescription)
         }
         let plannedFiles = plan.groups.flatMap { $0 }
-        let coverURL = session.coverPath.map { URL(fileURLWithPath: $0) }
-        let coverIdentity = coverURL.flatMap {
-            fileSystemIdentity(at: $0, followSymlink: true)
-        }
         let context = session.beginConversionRun()
         let job = ConversionJob(
             plan: plan,
@@ -1395,15 +1488,17 @@ public struct FFmpegWrapper {
             title: session.title,
             author: session.author,
             genre: session.genre,
-            coverURL: coverURL,
-            coverIdentity: coverIdentity,
-            // `selectCover` hält bereits den beim Auswählen gelesenen Inhalt.
-            // Der Pfad-Snapshot bleibt eine Aktualitätsprüfung; bei Austausch
-            // fällt der Lauf auf den unveränderlichen Inhalt zurück.
-            coverData: session.embeddedCoverData
+            // Ein manuell gewähltes Cover wird ausschließlich aus dem beim
+            // Auswählen gelesenen Snapshot kodiert. Der sichtbare Pfad bleibt
+            // nur UI-Metadatum und darf den Inhalt später nicht austauschen.
+            coverURL: nil,
+            coverIdentity: nil,
+            coverData: coverSnapshotForConversion(session)
         )
         let plannedTotalDuration = plannedFiles.reduce(0) { $0 + $1.duration }
-        guard session.isCurrentConversion(context.id) else { return }
+        guard session.isCurrentConversion(context.id) else {
+            return .rejected("Ein neuer Konvertierungslauf hat diesen Start ersetzt.")
+        }
         session.showOverlay = true
         session.isConverting = true
         session.lastConversionSucceeded = nil
@@ -1698,6 +1793,7 @@ public struct FFmpegWrapper {
                 )
             }
         }
+        return .started
     }
 
     private static func runParallelTasks(group: [AudioFile], tempDir: URL, session: ConversionSession, context: ConversionContext,
@@ -1812,7 +1908,9 @@ public struct FFmpegWrapper {
                     process.waitUntilExit()
                     // Join des Lesers vor Status/Phasenwechsel: Kein Callback aus
                     // diesem Segment darf danach noch Fortschritt einreihen.
-                    let stderrData = outputReader.waitUntilEOF()
+                    let stderrData = outputReader.waitUntilEOF(timeout: 0.25) {
+                        ProcessTerminator.terminateAndWait([process])
+                    }
                     if context.isCancelled { return }
                     do {
                         // ffmpeg öffnet die URL selbst. Eine während des Lesens
@@ -2211,7 +2309,9 @@ public struct FFmpegWrapper {
             }
             
             process.waitUntilExit()
-            let stderrData = outputReader.waitUntilEOF()
+            let stderrData = outputReader.waitUntilEOF(timeout: 0.25) {
+                ProcessTerminator.terminateAndWait([process])
+            }
             if context.isCancelled { return false }
             if process.terminationStatus == 0 {
                 session.enqueueProgress(
@@ -3166,10 +3266,6 @@ public struct FFmpegWrapper {
 
     static func mappedProgress(base: Double, weight: Double, phaseProgress: Double) -> Double {
         min(1, max(0, base + weight * min(1, max(0, phaseProgress))))
-    }
-
-    static func isNonEmptyRegularFile(_ url: URL) -> Bool {
-        regularFileSize(url) != nil
     }
 
     /// Setzt ein zuvor fehlendes Ziel mit `RENAME_EXCL` ein. Ein bestätigtes

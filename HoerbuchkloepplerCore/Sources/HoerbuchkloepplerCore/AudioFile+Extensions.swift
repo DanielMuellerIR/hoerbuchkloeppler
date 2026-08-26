@@ -3,6 +3,12 @@ import AVFoundation
 import ImageIO
 import Darwin
 
+enum ChapterExtractionResult: Sendable {
+    case files([AudioFile])
+    case failed(AudioImportFailure.Reason)
+    case cancelled
+}
+
 extension AudioFile {
     /// Selbst eine beschädigte Datei darf die Kapitelanalyse nicht mit einer
     /// beliebig großen ffmetadata-Ausgabe im Speicher wachsen lassen. Acht MiB
@@ -65,7 +71,12 @@ extension AudioFile {
     /// in der verteilten App verloren gingen. `ffmpeg -f ffmetadata -` schreibt
     /// die Metadaten (inkl. `[CHAPTER]`-Blöcke) nach stdout.
     public static func extractChapters(from file: FoundFile) async -> [AudioFile]? {
-        await extractChaptersControlled(from: file)
+        guard file.isChapterContainer else { return nil }
+        switch await extractChaptersControlled(from: file) {
+        case .files(let files): return files
+        case .failed: return []
+        case .cancelled: return []
+        }
     }
 
     /// Variante für `ConversionSession`: Sie registriert den gestarteten
@@ -74,18 +85,24 @@ extension AudioFile {
     static func extractChaptersControlled(
         from file: FoundFile,
         shouldCancel: @Sendable () -> Bool = { false },
-        registerProcess: @Sendable (Process) -> Bool = { _ in true },
-        unregisterProcess: @Sendable (Process) -> Void = { _ in },
+        runProcess: @Sendable (Process) throws -> Bool = { process in
+            try process.run()
+            ProcessTerminator.recordOwnedProcessGroup(process)
+            return true
+        },
+        unregisterProcess: @Sendable (Process) -> Void = {
+            ProcessTerminator.forgetOwnedProcessGroup($0)
+        },
         log: @Sendable (String) -> Void = { _ in }
-    ) async -> [AudioFile]? {
+    ) async -> ChapterExtractionResult {
         let url = file.readURL
         let visibleURL = file.source
-        guard file.isChapterContainer else { return nil }
-        guard !shouldCancel(), !taskCancellationRequested() else { return [] }
+        guard file.isChapterContainer else { return .files([]) }
+        guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
 
         guard let ffmpegURL = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else {
             log("⚠️ ffmpeg wurde nicht gefunden. Kapitel-Extraktion übersprungen.")
-            return [await AudioFile(foundFile: file)]
+            return .files([await AudioFile(foundFile: file)])
         }
 
         let process = Process()
@@ -97,13 +114,12 @@ extension AudioFile {
         // stderr getrennt verwerfen, damit es weder die Metadaten-Ausgabe stört
         // noch in einer ungelesenen Pipe den Kindprozess blockieren kann.
         process.standardError = FileHandle.nullDevice
-        guard registerProcess(process) else { return [] }
-        defer { unregisterProcess(process) }
 
         return await withTaskCancellationHandler {
             do {
-                guard !shouldCancel(), !taskCancellationRequested() else { return [] }
-                try process.run()
+                guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
+                guard try runProcess(process) else { return .cancelled }
+                defer { unregisterProcess(process) }
                 try? pipe.fileHandleForWriting.close()
                 // Cancel kann genau zwischen dem letzten Check und `run()` liegen.
                 // Der Context hat den damals noch nicht laufenden Process dann nicht
@@ -136,36 +152,36 @@ extension AudioFile {
                 }
                 process.waitUntilExit()
                 try? pipe.fileHandleForReading.close()
-                guard !shouldCancel(), !taskCancellationRequested() else { return [] }
+                guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
                 guard !output.timedOut, processExited else {
                     log("⚠️ Kapitelanalyse für \(visibleURL.lastPathComponent) nach \(Int(chapterExtractionTimeout)) Sekunden abgebrochen. Datei wird übersprungen.")
-                    return []
+                    return .failed(.chapterAnalysisTimedOut)
                 }
                 guard !output.readFailed else {
                     log("⚠️ Kapitelmetadaten aus \(visibleURL.lastPathComponent) konnten nicht vollständig gelesen werden. Nutze die Datei als ein Kapitel.")
-                    return [await AudioFile(foundFile: file)]
+                    return .files([await AudioFile(foundFile: file)])
                 }
                 guard !output.exceededLimit else {
                     log("⚠️ Kapitelmetadaten in \(visibleURL.lastPathComponent) überschreiten 8 MiB. Nutze die Datei als ein Kapitel.")
-                    return [await AudioFile(foundFile: file)]
+                    return .files([await AudioFile(foundFile: file)])
                 }
                 guard process.terminationStatus == 0 else {
                     log("⚠️ ffmpeg konnte Kapitel aus \(visibleURL.lastPathComponent) nicht vollständig lesen. Nutze die Datei als ein Kapitel.")
-                    return [await AudioFile(foundFile: file)]
+                    return .files([await AudioFile(foundFile: file)])
                 }
 
                 guard let text = String(data: output.data, encoding: .utf8) else {
                     log("⚠️ FFMETADATA von \(visibleURL.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
-                    return [await AudioFile(foundFile: file)]
+                    return .files([await AudioFile(foundFile: file)])
                 }
                 var chapters = parseFFMetadataChapters(text)
                 guard !chapters.isEmpty else {
                     log("⚠️ Keine Kapitel in \(visibleURL.lastPathComponent) gefunden. Nutze die Datei als ein Kapitel.")
-                    return [await AudioFile(foundFile: file)]
+                    return .files([await AudioFile(foundFile: file)])
                 }
 
                 let loadedDuration = try? await AVURLAsset(url: url).load(.duration)
-                guard !shouldCancel(), !taskCancellationRequested() else { return [] }
+                guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
                 let totalDuration = sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
                 // Das LETZTE Kapitel hat in FFMETADATA oft keine END-Zeit — es gibt kein
                 // Folgekapitel, aus dem sie (wie in parseFFMetadataChapters) abgeleitet
@@ -183,7 +199,7 @@ extension AudioFile {
                 // komplette Datei als ein Kapitel; so scheitert nicht das ganze Buch.
                 guard chaptersAreValid(chapters, totalDuration: totalDuration) else {
                     log("⚠️ Unvollständige Kapitelzeiten in \(visibleURL.lastPathComponent). Nutze die Datei als ein Kapitel.")
-                    return [await AudioFile(foundFile: file)]
+                    return .files([await AudioFile(foundFile: file)])
                 }
                 // Rundungsdifferenzen im FFMETADATA-Container lückenlos an die
                 // tatsächliche Dateidauer anlegen.
@@ -205,11 +221,11 @@ extension AudioFile {
                     ))
                 }
                 log("✅ \(audioFiles.count) Kapitel aus \(visibleURL.lastPathComponent) extrahiert.")
-                return audioFiles
+                return .files(audioFiles)
             } catch {
-                if shouldCancel() || taskCancellationRequested() { return [] }
+                if shouldCancel() || taskCancellationRequested() { return .cancelled }
                 log("⚠️ Kapitel aus \(visibleURL.lastPathComponent) konnten nicht gelesen werden: \(error.localizedDescription)")
-                return [await AudioFile(foundFile: file)]
+                return .files([await AudioFile(foundFile: file)])
             }
         } onCancel: {
             ProcessTerminator.requestTermination(process)
