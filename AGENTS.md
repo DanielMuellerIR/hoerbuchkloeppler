@@ -43,6 +43,14 @@ gezielt das passende Dokument greppen/lesen statt alles laden.
   `ffmpeg` auslösen. Deshalb hat `release.sh` bewusst keinen `--publish`-Pfad,
   keinen GitHub-Upload und keinen Tag — bitte auch keinen nachrüsten.
 
+- **Temp-Verzeichnisse nur über Gerät und Inode wiedererkennen.** Die
+  Besitzerprüfung eines von `ffmpeg` befüllten Staging-Ordners darf weder
+  Verzeichnisgröße noch Zeitstempel vergleichen — beide ändern sich während der
+  regulären Verarbeitung, und die Bereinigung verweigerte daraufhin den **eigenen**
+  Ordner. Stabil sind allein Gerät und Inode. Vor dem rekursiven Löschen wird der
+  Ordner atomar unter einen eindeutigen Quarantänenamen verschoben (belegt
+  2026-08-25).
+
 ## Vorgänger-Versionen (Archiv-Tags)
 
 Frühere Stände liegen als annotierte Tags in **diesem** Repo, nicht als separate
