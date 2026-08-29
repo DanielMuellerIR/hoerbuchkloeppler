@@ -324,7 +324,7 @@
       "risk": "low",
       "priority": 11,
       "reason": "App-Ziel, Build-Einstellungen und Paket-Verknüpfung im Xcode-Projekt",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260815T134633974092+0200",
         "completed_at": "2026-08-15T14:25:11+02:00",
@@ -339,6 +339,13 @@
           "xcodebuild Debug macOS arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED mit -warnings-as-errors im App-Compiler",
           "xcodebuild Release macOS arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED mit -warnings-as-errors im App-Compiler"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:14:21+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     }
   ],
