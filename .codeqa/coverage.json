@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 1175299
+    "tokens_spent": 1178823
   },
   "campaign_history": [
     {
@@ -264,26 +264,19 @@
       "risk": "medium",
       "priority": 9,
       "reason": "Breite Querschnittstests für Laufzeit, Import, Einstellungen und Tool-Auflösung",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:35:26+02:00",
-        "observed_head": "864448ea36b02fdcd3f1695a922ca4b3023f367f",
-        "content_sha256": "2fd6ca60d1c36ccbbcb8b2a03d91d61747a0da253ba9d679cdbd92df0650bfe3",
+        "completed_at": "2026-08-29T21:39:19+02:00",
+        "observed_head": "6b3ba080c679e045fa5cdb9bf07a0723897e00e3",
+        "content_sha256": "11b07b51b49a246b41c885fe19255c3c9872abd8fc24145f031103794dbdfa7e",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Den neuen Skip-/Abbruch-Policytest und seine Batch-Grenze nachgeprüft; keine weitere Abweichung gefunden.",
+        "summary": "Den echten MediaInfo-Prozessgruppentest mit Fristen, Cleanup und PID-Nachweis nachgeprüft; keine weitere Abweichung gefunden.",
         "tests": [
-          "Gezielter Policy-Test und swift test mit 194 Tests grün"
+          "Gezielter Test fünfmal und swift test mit 195 Tests grün"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:39:12+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
