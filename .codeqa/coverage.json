@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 1000871
+    "tokens_spent": 1020947
   },
   "campaign_history": [
     {
@@ -65,26 +65,19 @@
       "risk": "critical",
       "priority": 1,
       "reason": "Bekannte SIGINT-Lücke in der Vorbereitungsphase sowie zentraler Main-Actor-, Import- und Metadatenzustand",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T20:57:49+02:00",
-        "observed_head": "2bdf8d7161569a57d97318d778625df438aae259",
-        "content_sha256": "423a0ae58155b5d270f8c1c8dda25f6b862262032d98c9e28da4a4749802e499",
+        "completed_at": "2026-08-29T21:31:17+02:00",
+        "observed_head": "aef301b2e6f0fea63748ba78f01d03cef2b5f67c",
+        "content_sha256": "7dec3b2b0677cd3e2275733f38fc17a9b0ce3a62478e5d97fc0edb6e79a889cd",
         "file_count": 1,
         "review": "delta-plus-boundaries",
-        "outcome": "improved",
-        "summary": "Vorbereitungsabbruch linearisiert: Prozessgruppen-Snapshot entsteht unter der Besitzsperre, Coordinator-Auswahl und Abbruch sind atomar, und ein abgebrochener Ordnerscan liefert nie ein anwendbares Teilergebnis.",
+        "outcome": "reviewed-clean",
+        "summary": "Die bereits verifizierten Artwork-Batch- und Audio-Track-Deltas samt Importzustandsgrenzen nachgeprüft; keine weitere Abweichung gefunden.",
         "tests": [
-          "Red/Green: cancelledFolderScanIsMarkedAsCancelled; swift test -Xswiftc -warnings-as-errors dreimal vollständig: je 187 Tests in 22 Suites; swift build -c release -Xswiftc -warnings-as-errors; xcodebuild Release arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED."
+          "swift test: 192 Tests grün; reale CLI-Konvertierung grün; Delta-Diff und git diff --check geprüft"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:31:05+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
