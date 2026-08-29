@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 1031800
+    "tokens_spent": 1035518
   },
   "campaign_history": [
     {
@@ -264,27 +264,19 @@
       "risk": "medium",
       "priority": 9,
       "reason": "Breite Querschnittstests für Laufzeit, Import, Einstellungen und Tool-Auflösung",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:10:56+02:00",
-        "observed_head": "b0b8dbf977162f8f7be6fa173430737cc88a53e5",
-        "content_sha256": "6da56df7e4b24a2af616850ae602705a89f6b10e312145278b7e9fe627678593",
+        "completed_at": "2026-08-29T21:32:00+02:00",
+        "observed_head": "5cd3bab994ecb40904efc6f96b591fd3517ad9f0",
+        "content_sha256": "37e541460e949c6670c12aca73f4d1c10e74f36244dc30e401c7e36634fa109f",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Die 113 geänderten Zeilen decken die in den Fachbereichen korrigierten Abbruch-, Import-, Deduplizierungs- und Audio-Track-Grenzen mit beobachtbaren Ergebnissen ab. Fixtures sind laufbezogen temporär, Assertions prüfen typisierte Fehler und Zustandsgrenzen; kein Zuverlässigkeits- oder Aussagekraftbefund.",
+        "summary": "Die bereits verifizierten Video-only-Importassertionen auf direkte und Ordnerpfade nachgeprüft; keine weitere Testlücke im Delta gefunden.",
         "tests": [
-          "6 geänderte Grenztests fünfmal: je 6 Tests in 3 Suites bestanden",
-          "swift test -Xswiftc -warnings-as-errors: 187 Tests in 22 Suites bestanden"
+          "swift test: 192 Tests grün; Test-Delta vollständig geprüft"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:31:52+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
