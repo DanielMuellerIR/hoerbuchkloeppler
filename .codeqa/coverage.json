@@ -445,9 +445,15 @@
         "Hörbuchklöppler/ContentView.swift"
       ],
       "priority": 2,
-      "state": "pending",
+      "state": "in_progress",
       "noted_at": "2026-08-25T16:46:05+02:00",
-      "campaign_id": "20260825T162949635422+0200"
+      "campaign_id": "20260825T162949635422+0200",
+      "started_at": "2026-08-29T21:17:00+02:00",
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:17:00+02:00",
+        "observed_head": "f9b7f7108c27956be2c99cb1fbaf0088232de986"
+      }
     },
     {
       "id": "audio-track-validation",
