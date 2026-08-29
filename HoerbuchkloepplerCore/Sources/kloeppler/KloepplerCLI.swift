@@ -408,7 +408,13 @@ struct KloepplerCLI: AsyncParsableCommand {
         do {
             session.beginPreparation()
             try throwIfInterrupted()
-            await session.prepareFolder(url)
+            // Ein ausdrückliches Cover oder --no-cover gewinnt ohnehin. In
+            // diesen Fällen weder eingebettete Bilder noch Ordnerbilder vorab
+            // dekodieren.
+            await session.prepareFolder(
+                url,
+                analyzeArtwork: cover == nil && !noCover
+            )
 
             try throwIfInterrupted()
 

@@ -426,6 +426,11 @@ public final class ConversionSession: ObservableObject, Identifiable {
     private var importGeneration = UUID()
     private var artworkRequest = UUID()
     private var coverRevision: UInt = 0
+    /// Austauschpunkt für deterministische Race-Tests; produktiv liest immer
+    /// die AVFoundation-Implementierung aus `AudioFile`.
+    var embeddedArtworkLoader: @Sendable (URL) async -> Data? = { url in
+        await AudioFile.extractEmbeddedArtwork(from: url)
+    }
     public private(set) var isCoverSuppressed = false
     private var pendingImportOperations = 0
     @Published public private(set) var isImporting = false
@@ -437,6 +442,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     private var pendingImportWarnings: [String] = []
     private var pendingImportFailures: [AudioImportFailure] = []
     private var pendingImportWasCancelled = false
+    private var pendingImportRequiresArtworkSearch = false
     private var pendingImportFolderURL: URL?
     private var pendingImportCanRepresentFolder = false
     private var cliSourceFolderURL: URL?
@@ -530,9 +536,14 @@ public final class ConversionSession: ObservableObject, Identifiable {
     }
 
     /// Vollständiger CLI-Ordnerimport als abbrechbarer Vorbereitungstask.
-    public nonisolated func prepareFolder(_ url: URL) async {
+    /// Bei explizitem Cover oder `--no-cover` spart `analyzeArtwork == false`
+    /// die sonst wirkungslose Analyse eingebetteter und separater Bilder.
+    public nonisolated func prepareFolder(
+        _ url: URL,
+        analyzeArtwork: Bool = true
+    ) async {
         await runPreparationTask { @MainActor [weak self] in
-            await self?.addFolder(url)
+            await self?.addFolder(url, analyzeArtwork: analyzeArtwork)
         }
     }
 
@@ -981,6 +992,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         pendingImportWarnings = []
         pendingImportFailures = []
         pendingImportWasCancelled = false
+        pendingImportRequiresArtworkSearch = false
         pendingImportFolderURL = nil
         pendingImportCanRepresentFolder = expectedItemCount == 1
         cliSourceFolderURL = nil
@@ -1015,6 +1027,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         let stagedImageURLs = pendingImportImageURLs
         let stagedArtwork = pendingImportArtwork
         let stagedWarnings = pendingImportWarnings
+        let requiresArtworkSearch = pendingImportRequiresArtworkSearch
         let sourceFolder = pendingImportCanRepresentFolder ? pendingImportFolderURL : nil
         clearPendingImportBatch()
         await applyScannedFolderContents(
@@ -1023,7 +1036,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
             embeddedArtwork: stagedArtwork,
             warnings: stagedWarnings,
             importToken: token,
-            sourceFolderForCLI: sourceFolder
+            sourceFolderForCLI: sourceFolder,
+            skipCoverExtraction: !requiresArtworkSearch
         )
         if (title.isEmpty || author.isEmpty), let first = audioFiles.first {
             await importGlobalMetadata(from: first, importToken: token)
@@ -1066,6 +1080,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         pendingImportWarnings = []
         pendingImportFailures = []
         pendingImportWasCancelled = false
+        pendingImportRequiresArtworkSearch = false
         pendingImportFolderURL = nil
         pendingImportCanRepresentFolder = false
     }
@@ -1153,24 +1168,33 @@ public final class ConversionSession: ObservableObject, Identifiable {
             let request = UUID()
             artworkRequest = request
             let expectedCoverRevision = coverRevision
-            // Bei einem Multi-Datei-Drop können mehrere Provider kurz
-            // nacheinander ankommen. Die jeweils neueste Suche umfasst deshalb
-            // die komplette aktuelle Liste und kann Artwork aus einem früher
-            // gelieferten Provider weiterhin finden.
+            // GUI-Provider werden bis `finishImport` gesammelt. Danach umfasst
+            // genau eine Suche die vollständige aktuelle Liste.
             let filesToSearch = audioFiles
-            let importedFileIDs = Set(filesToSearch.map(\.id))
+            let artworkLoader = embeddedArtworkLoader
             isPreparingArtwork = true
             Task { [weak self] in
                 var foundArtwork: (image: NSImage, data: Data)?
                 for file in Self.uniqueArtworkCandidates(filesToSearch) {
-                    if let artworkData = await AudioFile.extractEmbeddedArtwork(from: file.url) {
+                    if let artworkData = await artworkLoader(file.url) {
                         // Manche Container deklarieren beliebige Binärdaten als
                         // Artwork. Nur tatsächlich dekodierbare Bilder dürfen in
                         // den späteren ffmpeg-Auftrag gelangen.
-                        if let image = NSImage(data: artworkData) {
-                            foundArtwork = (image, artworkData)
-                            break
+                        guard let image = NSImage(data: artworkData) else { continue }
+                        guard let self, self.artworkRequest == request else { return }
+                        guard self.coverRevision == expectedCoverRevision,
+                              !self.isCoverSuppressed,
+                              importToken.map(self.isCurrentImport) ?? true,
+                              self.coverImage == nil,
+                              self.coverPath == nil else { return }
+                        // Wurde genau diese Datei während ihrer Analyse entfernt,
+                        // sucht derselbe Lauf bei den verbleibenden Kandidaten
+                        // weiter, statt sein Ergebnis nur zu verwerfen.
+                        guard self.audioFiles.contains(where: { $0.id == file.id }) else {
+                            continue
                         }
+                        foundArtwork = (image, artworkData)
+                        break
                     }
                 }
                 guard let self,
@@ -1181,8 +1205,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
                 guard
                       self.coverRevision == expectedCoverRevision,
                       !self.isCoverSuppressed,
-                      importToken.map(self.isCurrentImport) ?? true,
-                      importedFileIDs.isSubset(of: Set(self.audioFiles.map(\.id))) else { return }
+                      importToken.map(self.isCurrentImport) ?? true else { return }
                 // Ein zwischenzeitlich manuell gesetztes Cover gewinnt.
                 guard self.coverImage == nil, self.coverPath == nil,
                       let foundArtwork else { return }
@@ -1400,9 +1423,12 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// extrahieren, Dauern/eingebettetes Artwork lesen. Rührt **keinen**
     /// `@Published`-State an. Die AVFoundation-Aufrufe suspendieren asynchron;
     /// der Dateisystem- und ffmpeg-Anteil läuft außerhalb des Main Actors.
+    /// `analyzeArtwork == false` überspringt sowohl Ordnerbilder als auch
+    /// eingebettete Bilder, wenn der Aufrufer sie danach ohnehin ersetzt.
     public nonisolated func scanFolder(
         _ url: URL,
-        importToken: ImportToken? = nil
+        importToken: ImportToken? = nil,
+        analyzeArtwork: Bool = true
     ) async -> ScannedFolder {
         var foundAudio: [AudioFile] = []
         var foundImages: [URL] = []
@@ -1469,20 +1495,22 @@ public final class ConversionSession: ObservableObject, Identifiable {
                     analysisFailures.append(failure)
                 }
             case .image:
-                foundImages.append(found.readURL)
+                if analyzeArtwork { foundImages.append(found.readURL) }
             case .unsupported:
                 break
             }
         }
         if preparationCancellationRequested() { return cancelledResult() }
-        var embedded: Data? = nil
-        for audioFile in Self.uniqueArtworkCandidates(foundAudio) {
-            if preparationCancellationRequested() { return cancelledResult() }
-            if let artworkData = await AudioFile.extractEmbeddedArtwork(from: audioFile.url) {
+        var embedded: Data?
+        if analyzeArtwork {
+            for audioFile in Self.uniqueArtworkCandidates(foundAudio) {
                 if preparationCancellationRequested() { return cancelledResult() }
-                if NSImage(data: artworkData) != nil {
-                    embedded = artworkData
-                    break
+                if let artworkData = await AudioFile.extractEmbeddedArtwork(from: audioFile.url) {
+                    if preparationCancellationRequested() { return cancelledResult() }
+                    if NSImage(data: artworkData) != nil {
+                        embedded = artworkData
+                        break
+                    }
                 }
             }
         }
@@ -1681,6 +1709,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
         case .success(let files, let warnings):
             pendingImportAudioFiles.append(contentsOf: files)
             pendingImportWarnings.append(contentsOf: warnings)
+            pendingImportRequiresArtworkSearch = pendingImportRequiresArtworkSearch
+                || !files.isEmpty
         case .failure(let failure):
             pendingImportFailures.append(failure)
         case .cancelled:
@@ -1728,7 +1758,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
             embeddedArtwork: scanned.embeddedArtwork,
             warnings: scanned.warnings,
             importToken: importToken,
-            sourceFolderForCLI: scanned.folderURL
+            sourceFolderForCLI: scanned.folderURL,
+            skipCoverExtraction: true
         )
     }
 
@@ -1738,7 +1769,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
         embeddedArtwork: Data?,
         warnings: [String],
         importToken: ImportToken?,
-        sourceFolderForCLI: URL?
+        sourceFolderForCLI: URL?,
+        skipCoverExtraction: Bool
     ) async {
         for warning in warnings { addLog(warning) }
         let expectedCoverRevision = importToken?.coverRevision ?? coverRevision
@@ -1753,11 +1785,11 @@ public final class ConversionSession: ObservableObject, Identifiable {
             embeddedCoverData = artworkData
             isCoverSuppressed = false
         }
-        // Cover-Suche nicht erneut (schon im Scan erledigt) — sonst liefe sie hier
-        // auf dem Main-Thread über alle Dateien.
+        // Ordnerscans haben Artwork bereits analysiert; direkte Datei-Provider
+        // werden dagegen erst als gemeinsamer Batch hier einmal durchsucht.
         await processIncomingFiles(
             audioFiles,
-            skipCoverExtraction: true,
+            skipCoverExtraction: skipCoverExtraction,
             importToken: importToken,
             sourceFolderForCLI: sourceFolderForCLI
         )
@@ -1771,8 +1803,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
     /// Vollständiger Ordner-Import für die CLI: Audioanalyse außerhalb des Main
     /// Actors, anschließend Übernahme und Metadatenauflösung auf Main.
-    public func addFolder(_ url: URL) async {
-        let scanned = await scanFolder(url)
+    public func addFolder(_ url: URL, analyzeArtwork: Bool = true) async {
+        let scanned = await scanFolder(url, analyzeArtwork: analyzeArtwork)
         guard !preparationCancellationRequested() else { return }
         await applyScannedFolder(scanned)
     }
