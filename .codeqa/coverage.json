@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 514027
+    "tokens_spent": 556993
   },
   "campaign_history": [
     {
@@ -163,30 +163,19 @@
       "risk": "high",
       "priority": 5,
       "reason": "AVFoundation-Analyse, Kapitelimport und externe ffmpeg-Prozessgrenze",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260825T162949635422+0200",
-        "completed_at": "2026-08-25T20:32:10+02:00",
-        "observed_head": "cb953d32a8d606f22c8910a24d8e00ddea6f05a6",
-        "content_sha256": "daa7a4470ebbe10e16605b1883099f88a955672d0c614e48c9f823ed2fb41e2f",
+        "campaign_id": "20260829T204240680364+0200",
+        "completed_at": "2026-08-29T21:04:04+02:00",
+        "observed_head": "170e529d411ccb18abbfc8bc1720ee5a6d29ce8a",
+        "content_sha256": "6276c9d78af2592b76fa2d505588ca5f4e38db6655ea692c991e6cc6877a93a8",
         "file_count": 1,
         "review": "delta-plus-boundaries",
-        "outcome": "improved",
-        "summary": "Kapitelanalyse lehnt kaputte Pflichtzahlen und ffmpeg-Fehlercodes ab, begrenzt stdout auf 8 MiB sowie den gesamten Prozess auf 30 Sekunden und verwirft stderr ohne blockierende Pipe. Eingebettete Cover müssen dekodierbar und höchstens 32 MiB groß sein; ein kaputter früher Tag verhindert keinen späteren gültigen Treffer.",
+        "outcome": "reviewed-clean",
+        "summary": "Delta und Grenzen der Kapitel- und Artwork-Analyse geprüft. ChapterExtractionResult unterscheidet sichere Ganzdatei-Fallbacks, atomaren Analysefehler und Abbruch; Prozessregistrierung, Pipe-Limit, Gesamtfrist, Exit-Status, Kapitelarithmetik und AVFoundation-Cancellation bleiben konsistent. Kein weiterer Codeeingriff nötig.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 180 Tests in 21 Suites bestanden",
-          "swift build -c release -Xswiftc -warnings-as-errors: bestanden",
-          "xcodebuild Release mit Swift-/Clang-Warnungen als Fehler: BUILD SUCCEEDED",
-          "CLI-E2E mit echtem 2-Kapitel-M4B: 2 Kapitel erkannt und 2 Kapitel ausgegeben",
-          "drei read-only Subreviews plus abschließender Diff-Review: Prozessfrist nachgebessert, danach reviewed-clean"
+          "swift test -Xswiftc -warnings-as-errors: 187 Tests in 22 Suites; install.sh --no-notarize baute den Release-Core und die App; reales E2E: zwei WAV-Kapitel zu 4.985-Byte-M4B, Reimport zu 5.206-Byte-M4B, ffmetadata wies erneut genau zwei Kapitel (0–700 ms, 700–1.504 ms) nach."
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:02:51+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
