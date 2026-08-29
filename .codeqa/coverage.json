@@ -112,7 +112,7 @@
       "risk": "high",
       "priority": 3,
       "reason": "Signalbehandlung, Fehler-Exit-Codes, Eingabevalidierung und skriptfähige Ausgabe",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
         "completed_at": "2026-08-29T20:59:49+02:00",
@@ -125,6 +125,13 @@
         "tests": [
           "swift test -Xswiftc -warnings-as-errors: 187 Tests in 22 Suites; swift build -c release -Xswiftc -warnings-as-errors; echter WAV-CLI-Lauf erzeugte und dekodierte eine 1.580-Byte-m4b; video-only MP4 wurde mit Exit 1 vollständig verworfen und erzeugte keine Ausgabe."
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:31:39+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
