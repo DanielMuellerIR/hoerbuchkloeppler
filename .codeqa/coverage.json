@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 679242
+    "tokens_spent": 744832
   },
   "campaign_history": [
     {
@@ -296,28 +296,23 @@
       "risk": "medium",
       "priority": 10,
       "reason": "Dünne SwiftUI-Schicht, Datei-Drop, Exportplanung und Sitzungsdarstellung",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134633974092+0200",
-        "completed_at": "2026-08-15T14:22:58+02:00",
-        "observed_head": "fead895ac17772523a83ecbe3e4e7bf1a2d22cc5",
-        "content_sha256": "7dd73301a2eaeadceb032d52a578fc1d52239eb64273f796706b23d9cb0f36d7",
-        "file_count": 6,
-        "review": "full",
-        "outcome": "improved",
-        "summary": "Alle fünf SwiftUI-Dateien und das App-Plist vollständig geprüft: Drop-/Importabschluss, Preview-Besitz, Exportkollisionen, CLI-Handoff, Overlay, Einstellungen und Metadatenauswahl bleiben dünne Core-Adapter. Die seit v1.2.0 ungenutzte lokale Netzwerkfreigabe wurde entfernt und der öffentliche Dokumentenzugriffstext sprachlich korrigiert.",
-        "tests": [
-          "plutil -lint info.plist und Prüfung auf fehlendes NSAppTransportSecurity: passed",
-          "xcodebuild Debug, macOS arm64, CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED",
-          "swift test -Xswiftc -warnings-as-errors: 90 Tests in 17 Suites passed; GUI nicht gestartet, um keinen Fokus zu übernehmen"
-        ]
-      },
-      "active_run": {
         "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:11:04+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
+        "completed_at": "2026-08-29T21:14:14+02:00",
+        "observed_head": "f46ff7da5cf58e6691ea1309e73db74232a80e14",
+        "content_sha256": "ebb1134c2db17b6b0f1548deb8f06df717b248e0b6ffb05caaef0a6ed9076bf3",
+        "file_count": 6,
+        "review": "delta-plus-boundaries",
+        "outcome": "improved",
+        "summary": "ContentView-Drop, Importfehler, Kollisionsbestätigung und Konvertierungsstart geprüft. Der CLI-Handoff wertete nur den synchronen Start von /usr/bin/open aus; ein späterer Exit ungleich null blieb unsichtbar. Er wartet nun außerhalb des Main Actors auf den Prozessstatus und zeigt/loggt den Fehler.",
+        "tests": [
+          "plutil -lint info.plist: OK",
+          "xcodebuild Debug macOS arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED",
+          "swift test -Xswiftc -warnings-as-errors: 187 Tests in 22 Suites bestanden",
+          "/usr/bin/open mit fehlender App: Exit 1; neuer Statuspfad kompiliert",
+          "./build.sh und codesign --verify --deep --strict: Release-App 1.3.0 erfolgreich"
+        ]
       }
     },
     {
