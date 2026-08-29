@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 1178823
+    "tokens_spent": 1182070
   },
   "campaign_history": [
     {
@@ -292,30 +292,19 @@
       "risk": "medium",
       "priority": 10,
       "reason": "Dünne SwiftUI-Schicht, Datei-Drop, Exportplanung und Sitzungsdarstellung",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:14:14+02:00",
-        "observed_head": "f46ff7da5cf58e6691ea1309e73db74232a80e14",
-        "content_sha256": "ebb1134c2db17b6b0f1548deb8f06df717b248e0b6ffb05caaef0a6ed9076bf3",
+        "completed_at": "2026-08-29T21:39:38+02:00",
+        "observed_head": "98ca008ed4a7d7cb1771ace45817267cb590a31d",
+        "content_sha256": "77eea2b9a7e9c0e9c4456abc99f017ad4d2876b75e7c84713aed52e96c8e80c5",
         "file_count": 6,
         "review": "delta-plus-boundaries",
-        "outcome": "improved",
-        "summary": "ContentView-Drop, Importfehler, Kollisionsbestätigung und Konvertierungsstart geprüft. Der CLI-Handoff wertete nur den synchronen Start von /usr/bin/open aus; ein späterer Exit ungleich null blieb unsichtbar. Er wartet nun außerhalb des Main Actors auf den Prozessstatus und zeigt/loggt den Fehler.",
+        "outcome": "reviewed-clean",
+        "summary": "Den Sheet-Schließpfad und onDisappear-Abbruch samt Zustandsbindung nachgeprüft; keine weitere Abweichung gefunden.",
         "tests": [
-          "plutil -lint info.plist: OK",
-          "xcodebuild Debug macOS arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED",
-          "swift test -Xswiftc -warnings-as-errors: 187 Tests in 22 Suites bestanden",
-          "/usr/bin/open mit fehlender App: Exit 1; neuer Statuspfad kompiliert",
-          "./build.sh und codesign --verify --deep --strict: Release-App 1.3.0 erfolgreich"
+          "Xcode-Debug-Build mit warnings-as-errors grün; Prozessgruppentest und 195 Swift-Tests grün"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:39:26+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
