@@ -3218,7 +3218,10 @@ public struct FFmpegWrapper {
     /// 0700-Cleanup-Verzeichnis. Die anschließende rekursive Entfernung ist an
     /// dessen offenen Deskriptor gebunden; ein Austausch des sichtbaren
     /// Quarantänepfads kann daher keine fremde Datei außerhalb dieses eigens
-    /// angelegten Bereichs treffen.
+    /// angelegten Bereichs treffen. Ein absichtlicher Prozess derselben
+    /// Unix-Benutzer-ID bleibt außerhalb dieser Schutzgrenze, weil `unlinkat`
+    /// keinen erwarteten Inode als atomare Bedingung annimmt; Details stehen in
+    /// `docs/operations.md`.
     @discardableResult
     private static func quarantineAndRemoveRegularFile(
         _ url: URL,
