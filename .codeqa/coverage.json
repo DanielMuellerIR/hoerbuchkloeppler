@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 1225074
+    "tokens_spent": 1275445
   },
   "campaign_history": [
     {
@@ -552,14 +552,18 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift"
       ],
       "priority": 3,
-      "state": "in_progress",
+      "state": "completed",
       "noted_at": "2026-08-25T17:25:01+02:00",
       "campaign_id": "20260825T162949635422+0200",
       "started_at": "2026-08-29T21:42:32+02:00",
-      "active_run": {
+      "completed": {
         "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:42:32+02:00",
-        "observed_head": "641a8169a7eeda04ef0c8bb8e99409c000bd2bdc"
+        "completed_at": "2026-08-29T21:45:11+02:00",
+        "observed_head": "8a4a22dd2f695a3daad9a863b7cceba49a9b448e",
+        "summary": "Verbessert: extractChaptersControlled erlaubt ausschließlich für Tests die kontrollierte Prozesskonfiguration; ein echter Ersatzprozess belegt, dass Task.cancel() den öffentlichen Kapitelextraktionspfad über den gemeinsamen TERM/KILL-Helfer beendet. Der vorhandene MediaInfo-PID-Test deckt PreparationContext über ToolProcessCoordinator ab.",
+        "tests": [
+          "Neuer Kapitelextraktions-PID-Test fünfmal einzeln stabil; vollständiger Core-Lauf: 196 Tests in 22 Suites; Swift-Release-Build; git diff --check."
+        ]
       }
     },
     {
