@@ -89,7 +89,7 @@
       "risk": "critical",
       "priority": 2,
       "reason": "Datenintegrität, externe Prozesse, Parallelität, Abbruch und atomare Ausgabedateien",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
         "completed_at": "2026-08-29T21:31:34+02:00",
@@ -102,6 +102,13 @@
         "tests": [
           "swift test: 192 Tests grün; Swift-Release- und Xcode-Debug-Build grün; reale CLI-Konvertierung grün; Aufrufer- und Delta-Suche geprüft"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:41:45+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
