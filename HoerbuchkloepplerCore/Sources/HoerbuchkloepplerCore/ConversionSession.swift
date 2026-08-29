@@ -269,20 +269,22 @@ private final class PreparationContext: ToolProcessContext, @unchecked Sendable 
     }
 }
 
-/// Verwaltet den jeweils aktuellen Vorbereitungslauf außerhalb des Main Actors.
-/// Der Signal-Handler der CLI muss Prozesse synchron abbrechen können, während
-/// der sichtbare Sitzungszustand konsequent auf dem Main Actor bleibt.
-private final class PreparationCoordinator: @unchecked Sendable {
+/// Verwaltet genau einen Lauf mit Swift-Tasks und Werkzeugprozessen außerhalb
+/// des Main Actors. Import und Dateiinfo verwenden getrennte Instanzen, damit
+/// ihr jeweiliger Neustart nur die eigene Arbeit beendet.
+private final class ToolProcessCoordinator: @unchecked Sendable {
     private let lock = NSLock()
     private var current: PreparationContext?
 
-    func begin() {
+    @discardableResult
+    func begin() -> PreparationContext {
         let next = PreparationContext()
         lock.lock()
         let previous = current
         current = next
         lock.unlock()
         previous?.cancel()
+        return next
     }
 
     func context() -> PreparationContext? {
@@ -448,7 +450,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
     private var cliSourceFolderURL: URL?
     private var cliRepresentedFileIDs = Set<UUID>()
     private var cliRepresentedChapterTitles: [UUID: String] = [:]
-    private nonisolated let preparationCoordinator = PreparationCoordinator()
+    private nonisolated let preparationCoordinator = ToolProcessCoordinator()
+    private nonisolated let mediaInfoCoordinator = ToolProcessCoordinator()
     @Published public var title: String = ""
     @Published public var author: String = ""
     @Published public var genre: String = "Hörbuch"
@@ -897,32 +900,52 @@ public final class ConversionSession: ObservableObject, Identifiable {
         self.segmentProgress = [:]
     }
 
-    /// Kennung der zuletzt gestarteten Info-Abfrage. Klickt der Nutzer schnell
-    /// nacheinander auf mehrere Dateien, laufen mehrere mediainfo-Prozesse
-    /// parallel — ohne diese Kennung könnte ein langsamer, veralteter Lauf das
-    /// Ergebnis der zuletzt angefragten Datei überschreiben.
+    /// Kennung der zuletzt gestarteten Info-Abfrage. Der neue Werkzeugkontext
+    /// beendet zwar den Vorgänger; dessen bereits eingereihte Completion darf
+    /// das Ergebnis der zuletzt angefragten Datei trotzdem nicht überschreiben.
     /// Nur auf dem Main Actor lesen/schreiben.
     private var infoRequestToken = UUID()
+    /// Austauschpunkt für einen echten, kontrollierbaren Werkzeugprozess im
+    /// Regressionstest. Produktiv wird weiterhin das aufgelöste MediaInfo
+    /// verwendet.
+    var mediaInfoExecutableProvider: @Sendable () -> URL? = {
+        FFmpegWrapper.getBinaryURL(name: "mediainfo")
+    }
 
     /// Nur auf dem Main Actor aufrufen (setzt @Published-State).
     public func fetchRawMediaInfo(for file: AudioFile) {
         let token = UUID()
         self.infoRequestToken = token
+        let context = mediaInfoCoordinator.begin()
         self.isFetchingInfo = true
         self.selectedFileInfoText = "Lade Informationen..."
         self.showInfoSheet = true
 
         let fileURL = file.url
+        let executableProvider = mediaInfoExecutableProvider
         Task { [weak self] in
             // Gebündeltes mediainfo bevorzugen (getBinaryURL: Bundle -> PATH ->
             // Homebrew-Fallback). Vorher fest verdrahtete Homebrew-Pfade ließen
             // den Info-Dialog in der verteilten App ohne Homebrew scheitern,
             // obwohl mediainfo mitgeliefert wird.
             let text = await Task.detached {
-                Self.readRawMediaInfo(for: fileURL)
+                Self.readRawMediaInfo(
+                    for: fileURL,
+                    executableURL: executableProvider(),
+                    context: context
+                )
             }.value
             self?.updateInfoText(text, token: token)
         }
+    }
+
+    /// Schließen und ein neuer Dateiklick entziehen der alten Abfrage zuerst
+    /// die Schreibberechtigung und beenden dann deren gesamte Prozessgruppe.
+    public func cancelRawMediaInfo() {
+        infoRequestToken = UUID()
+        _ = mediaInfoCoordinator.cancel()
+        isFetchingInfo = false
+        showInfoSheet = false
     }
 
     private func updateInfoText(_ text: String, token: UUID) {
@@ -933,13 +956,18 @@ public final class ConversionSession: ObservableObject, Identifiable {
         isFetchingInfo = false
     }
 
-    private nonisolated static func readRawMediaInfo(for fileURL: URL) -> String {
-        guard let miURL = FFmpegWrapper.getBinaryURL(name: "mediainfo") else {
+    private nonisolated static func readRawMediaInfo(
+        for fileURL: URL,
+        executableURL: URL?,
+        context: ToolProcessContext
+    ) -> String {
+        guard let executableURL else {
             return "❌ MediaInfo wurde auf diesem System nicht gefunden."
         }
         switch FFmpegWrapper.runCapturedProcess(
-            executableURL: miURL,
+            executableURL: executableURL,
             arguments: [fileURL.path],
+            context: context,
             timeout: 10
         ) {
         case .completed(let status, let data) where status == 0:

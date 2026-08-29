@@ -1258,6 +1258,68 @@ struct MetadataAndCLITests {
 
         #expect(ConversionSession.decodeMediaInfoText(from: data) == text)
     }
+
+    @Test("Eine neue Dateiinfo beendet den alten MediaInfo-Prozess")
+    func newerMediaInfoRequestTerminatesPreviousProcess() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pidFile = directory.appendingPathComponent("media-info.pid")
+        let slowTool = directory.appendingPathComponent("langsam")
+        let fastTool = directory.appendingPathComponent("schnell")
+        try makeExecutable(slowTool, contents: """
+        #!/bin/sh
+        printf '%s' "$$" > "$1"
+        trap 'exit 0' TERM INT
+        while :; do /bin/sleep 1; done
+        """)
+        try makeExecutable(fastTool, contents: """
+        #!/bin/sh
+        printf 'Neue Datei\\n'
+        """)
+
+        let session = ConversionSession(settings: AudioSettings())
+        session.mediaInfoExecutableProvider = { slowTool }
+        session.fetchRawMediaInfo(for: AudioFile(
+            url: pidFile,
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Alt"
+        ))
+
+        let startDeadline = Date().addingTimeInterval(2)
+        while !FileManager.default.fileExists(atPath: pidFile.path),
+              Date() < startDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let oldPID = try #require(
+            pid_t(String(contentsOf: pidFile, encoding: .utf8))
+        )
+        defer {
+            if Darwin.kill(oldPID, 0) == 0 {
+                _ = Darwin.kill(oldPID, SIGKILL)
+            }
+        }
+
+        session.mediaInfoExecutableProvider = { fastTool }
+        session.fetchRawMediaInfo(for: AudioFile(
+            url: directory.appendingPathComponent("neu.m4b"),
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Neu"
+        ))
+
+        let resultDeadline = Date().addingTimeInterval(2)
+        while session.isFetchingInfo, Date() < resultDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(session.selectedFileInfoText.contains("Neue Datei"))
+
+        let exitDeadline = Date().addingTimeInterval(2)
+        while Darwin.kill(oldPID, 0) == 0, Date() < exitDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(Darwin.kill(oldPID, 0) == -1 && errno == ESRCH)
+    }
 }
 
 @Suite("Review-Fixes – Import-Lebenszyklus")

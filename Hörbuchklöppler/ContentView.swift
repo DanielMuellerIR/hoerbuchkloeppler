@@ -303,12 +303,14 @@ struct ContentView: View {
         .sheet(isPresented: $session.showSelectionUI) { MetadataSelectionView(session: session) }
         .sheet(isPresented: $session.showInfoSheet) {
             VStack(spacing: 0) {
-                HStack { Text("Datei-Details").font(.headline).padding(.leading); Spacer(); Button("Schließen") { session.showInfoSheet = false }.padding(.trailing) }.frame(height: 40).background(Color(NSColor.windowBackgroundColor))
+                HStack { Text("Datei-Details").font(.headline).padding(.leading); Spacer(); Button("Schließen") { session.cancelRawMediaInfo() }.padding(.trailing) }.frame(height: 40).background(Color(NSColor.windowBackgroundColor))
                 Divider()
                 ZStack {
                     if session.isFetchingInfo { ProgressView() } else { ScrollView { Text(session.selectedFileInfoText).font(.system(size: 12, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading).padding() } }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            }.frame(width: 700, height: 500)
+            }
+            .frame(width: 700, height: 500)
+            .onDisappear { session.cancelRawMediaInfo() }
         }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in handleDroppedProviders(providers); return true }
     }
