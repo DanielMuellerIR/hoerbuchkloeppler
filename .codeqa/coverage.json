@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 1086645
+    "tokens_spent": 1112965
   },
   "campaign_history": [
     {
@@ -582,14 +582,18 @@
         "Hörbuchklöppler/ContentView.swift"
       ],
       "priority": 2,
-      "state": "in_progress",
+      "state": "completed",
       "noted_at": "2026-08-25T20:31:17+02:00",
       "campaign_id": "20260825T162949635422+0200",
       "started_at": "2026-08-29T21:33:43+02:00",
-      "active_run": {
+      "completed": {
         "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:33:43+02:00",
-        "observed_head": "386d0abce3253af13ef321c985575b2fd0937581"
+        "completed_at": "2026-08-29T21:35:10+02:00",
+        "observed_head": "61359a814f126ba5aa6707d4c812121a04103c74",
+        "summary": "Bestätigt und testseitig verbessert: AudioLoadResult trennt Skip, typisierten Analysefehler und Abbruch. GUI-Batches werden bei einem Fehler atomar verworfen; die CLI verwendet dieselbe Fehlerliste. Ein neuer Test belegt, dass Skip akzeptierte Dateien erhält, Abbruch den Batch ohne falsche Fehlermeldung verwirft.",
+        "tests": [
+          "Policy-Test für Fehler sowie neuer Skip-/Abbruchtest grün; swift test: 194 Tests grün; realer CLI-Mischordner: Exit 1 und keine Ausgabe"
+        ]
       }
     }
   ]
