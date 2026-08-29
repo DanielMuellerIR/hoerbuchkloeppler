@@ -471,9 +471,15 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift"
       ],
       "priority": 2,
-      "state": "pending",
+      "state": "in_progress",
       "noted_at": "2026-08-25T16:46:05+02:00",
-      "campaign_id": "20260825T162949635422+0200"
+      "campaign_id": "20260825T162949635422+0200",
+      "started_at": "2026-08-29T21:22:01+02:00",
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:22:01+02:00",
+        "observed_head": "3acde8b8e504b9a04216833f1f8d21e32591d5d2"
+      }
     },
     {
       "id": "cancellable-media-process-runner",
