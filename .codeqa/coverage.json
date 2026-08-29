@@ -163,7 +163,7 @@
       "risk": "high",
       "priority": 5,
       "reason": "AVFoundation-Analyse, Kapitelimport und externe ffmpeg-Prozessgrenze",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260825T162949635422+0200",
         "completed_at": "2026-08-25T20:32:10+02:00",
@@ -180,6 +180,13 @@
           "CLI-E2E mit echtem 2-Kapitel-M4B: 2 Kapitel erkannt und 2 Kapitel ausgegeben",
           "drei read-only Subreviews plus abschließender Diff-Review: Prozessfrist nachgebessert, danach reviewed-clean"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:02:51+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
