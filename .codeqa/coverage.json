@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 1035518
+    "tokens_spent": 1082706
   },
   "campaign_history": [
     {
@@ -429,14 +429,18 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift"
       ],
       "priority": 2,
-      "state": "in_progress",
+      "state": "completed",
       "noted_at": "2026-08-25T16:46:05+02:00",
       "campaign_id": "20260825T162949635422+0200",
       "started_at": "2026-08-29T21:32:04+02:00",
-      "active_run": {
+      "completed": {
         "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:32:04+02:00",
-        "observed_head": "280786d5f96e8a172c5a9748f154fe7ad8db6dcd"
+        "completed_at": "2026-08-29T21:33:24+02:00",
+        "observed_head": "f5d0046cef976bb295f67dbeeeedf848bb0a019e",
+        "summary": "Verbessert: Der bereits vorhandene gemeinsame Vorbereitungskontext cancelt bei beginImport den laufenden GUI-Importtask und dessen Werkzeug-Prozessgruppe; ein neuer direkter Regressionstest belegt den laufenden, nicht nur den verspätet startenden Providerfall.",
+        "tests": [
+          "Gezielter GUI-Import-Cancellation-Test fünfmal grün; swift test: 193 Tests grün; git diff --check"
+        ]
       }
     },
     {
