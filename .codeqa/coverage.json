@@ -429,9 +429,15 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift"
       ],
       "priority": 2,
-      "state": "pending",
+      "state": "in_progress",
       "noted_at": "2026-08-25T16:46:05+02:00",
-      "campaign_id": "20260825T162949635422+0200"
+      "campaign_id": "20260825T162949635422+0200",
+      "started_at": "2026-08-29T21:32:04+02:00",
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:32:04+02:00",
+        "observed_head": "280786d5f96e8a172c5a9748f154fe7ad8db6dcd"
+      }
     },
     {
       "id": "artwork-analysis-pipeline",
