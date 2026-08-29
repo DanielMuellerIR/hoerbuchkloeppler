@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 862925
+    "tokens_spent": 1000871
   },
   "campaign_history": [
     {
@@ -553,14 +553,18 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift"
       ],
       "priority": 2,
-      "state": "in_progress",
+      "state": "completed",
       "noted_at": "2026-08-25T19:53:56+02:00",
       "campaign_id": "20260825T162949635422+0200",
       "started_at": "2026-08-29T21:24:10+02:00",
-      "active_run": {
+      "completed": {
         "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:24:10+02:00",
-        "observed_head": "0f0a5c09c42835f268833c2038df45b0767fef22"
+        "completed_at": "2026-08-29T21:30:18+02:00",
+        "observed_head": "4d12e3093fa568176cde03326b559095eac518d4",
+        "summary": "Verbessert: ConversionPlan speichert Volume und Inode jedes Ausgabeordners und prüft sie beim Start, vor jedem Split-Teil sowie unmittelbar vor dem Rename. Die vorhandenen dateibezogenen Inode-Snapshots vor jedem Werkzeugstart machen einen descriptorgebundenen rekursiven Quellscan für die lokale Integritätsgrenze unnötig; ein absichtlich bösartiger Prozess derselben Benutzer-ID ist keine belastbare Sicherheitsgrenze.",
+        "tests": [
+          "Roter Regressionstest für ersetzten Ausgabeordner; zwei gezielte Tests grün; swift test (192 Tests); Swift-Release-Build; Xcode-Debug-Build ohne Signierung; reale CLI-Konvertierung mit AAC-, Kapitel- und Zieldateiprüfung; git diff --check"
+        ]
       }
     },
     {
