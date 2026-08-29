@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 1117328
+    "tokens_spent": 1169183
   },
   "campaign_history": [
     {
@@ -502,14 +502,18 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift"
       ],
       "priority": 3,
-      "state": "in_progress",
+      "state": "completed",
       "noted_at": "2026-08-25T16:46:05+02:00",
       "campaign_id": "20260825T162949635422+0200",
       "started_at": "2026-08-29T21:36:15+02:00",
-      "active_run": {
+      "completed": {
         "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:36:15+02:00",
-        "observed_head": "db847aedc181431add84baea44173098987eccfd"
+        "completed_at": "2026-08-29T21:38:50+02:00",
+        "observed_head": "993502573a80e223f537f63acb2dbef7a9e94f24",
+        "summary": "Verbessert: Import und Dateiinfo nutzen getrennte Instanzen des gemeinsamen Werkzeugkontexts. Eine neue Dateiinfo oder das Schließen des Sheets beendet den alten MediaInfo-Prozess samt Prozessgruppe; der Request-Token verhindert weiterhin späte UI-Updates.",
+        "tests": [
+          "Echter Prozessgruppentest fünfmal grün und alter PID jeweils ESRCH; swift test: 195 Tests; Swift-Release-Build; Xcode-Debug-Build ohne Signierung; git diff --check"
+        ]
       }
     },
     {
