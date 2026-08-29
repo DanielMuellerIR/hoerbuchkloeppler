@@ -1373,6 +1373,50 @@ struct ImportLifecycleTests {
         #expect(!session.isImporting)
     }
 
+    @Test("Skip und Abbruch bleiben vom Analysefehler getrennt")
+    func skippedAndCancelledProvidersUseDistinctPolicies() async {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        let accepted = AudioFile(
+            url: URL(fileURLWithPath: "/tmp/akzeptiert.mp3"),
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Akzeptiert"
+        )
+        let skippedToken = session.beginImport(expectedItemCount: 2)
+        session.stageAudioLoadResult(
+            .success(files: [accepted], warnings: []),
+            importToken: skippedToken
+        )
+        await session.finishImport(skippedToken)
+        session.stageAudioLoadResult(.skipped, importToken: skippedToken)
+        await session.finishImport(skippedToken)
+
+        #expect(session.audioFiles.map(\.id) == [accepted.id])
+        #expect(session.lastImportFailures.isEmpty)
+        #expect(session.importErrorMessage == nil)
+
+        let discarded = AudioFile(
+            url: URL(fileURLWithPath: "/tmp/verworfen.mp3"),
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Verworfen"
+        )
+        let cancelledToken = session.beginImport(expectedItemCount: 2)
+        session.stageAudioLoadResult(
+            .success(files: [discarded], warnings: []),
+            importToken: cancelledToken
+        )
+        await session.finishImport(cancelledToken)
+        session.stageAudioLoadResult(.cancelled, importToken: cancelledToken)
+        await session.finishImport(cancelledToken)
+
+        #expect(session.audioFiles.map(\.id) == [accepted.id])
+        #expect(session.lastImportFailures.isEmpty)
+        #expect(session.importErrorMessage == nil)
+        #expect(!session.isImporting)
+    }
+
     @Test("Artwork-Kandidaten enthalten jede physische Datei nur einmal")
     func artworkCandidatesDeduplicateContainerChapters() {
         let source = URL(fileURLWithPath: "/tmp/Buch.m4b")
