@@ -632,7 +632,10 @@ struct ProcessPipeReaderTests {
         let failed = FFmpegWrapper.runCapturedProcess(
             executableURL: failing,
             arguments: [],
-            timeout: 1
+            // Dieser Teil prüft Exit-Code und Ausgabe, nicht eine knappe
+            // Zeitgrenze. Im parallelen Gesamtlauf kann selbst der kurze
+            // Prozess unter Last länger als eine Sekunde bis zum Exit brauchen.
+            timeout: 5
         )
         guard case .completed(let status, let output) = failed else {
             Issue.record("Beendeter Prozess lieferte kein Ergebnis")
@@ -667,6 +670,59 @@ struct ProcessPipeReaderTests {
         }
         #expect(status == 0)
         #expect(Date().timeIntervalSince(start) < 2)
+        #expect(Darwin.kill(childPID, 0) == -1 && errno == ESRCH)
+    }
+}
+
+@Suite("FFmpegWrapper – Prozessgruppen-Besitz")
+struct ProcessGroupOwnershipTests {
+    @Test("Abbruch beendet Nachkommen auch nach Ende des direkten Prozesses")
+    func cancellationWaitsForDescendantsAfterLeaderExit() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let childPIDFile = directory.appendingPathComponent("child.pid")
+        let script = """
+        import os, subprocess, sys, time
+        child = subprocess.Popen(["/bin/sleep", "30"])
+        with open(sys.argv[1], "w", encoding="utf-8") as handle:
+            handle.write(str(child.pid))
+            handle.flush()
+            os.fsync(handle.fileno())
+        time.sleep(0.2)
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        process.arguments = ["-c", script, childPIDFile.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        let context = ConversionContext()
+
+        #expect(try context.run(process))
+        process.waitUntilExit()
+        let childPID = try #require(
+            pid_t(String(contentsOf: childPIDFile, encoding: .utf8))
+        )
+        defer {
+            if Darwin.kill(childPID, 0) == 0 {
+                _ = Darwin.kill(childPID, SIGKILL)
+            }
+            context.unregister(process)
+        }
+        #expect(!process.isRunning)
+        #expect(Darwin.kill(childPID, 0) == 0)
+
+        #expect(context.cancel())
+        let cleanupFinished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            context.finishAfterCancellationCleanup { _ in }
+            cleanupFinished.signal()
+        }
+        #expect(cleanupFinished.wait(timeout: .now() + 5) == .success)
+
+        let childExitDeadline = Date().addingTimeInterval(2)
+        while Darwin.kill(childPID, 0) == 0, Date() < childExitDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
         #expect(Darwin.kill(childPID, 0) == -1 && errno == ESRCH)
     }
 }

@@ -8,6 +8,15 @@ import Darwin
 /// ffmpeg, MediaInfo oder ein Ersatzprogramm aus PATH darf den Abbruch dadurch
 /// nicht unbegrenzt in `waitUntilExit()` festhalten.
 enum ProcessTerminator {
+    fileprivate struct TerminationTarget: @unchecked Sendable {
+        let process: Process
+        let group: pid_t?
+    }
+
+    struct TerminationRequest: @unchecked Sendable {
+        fileprivate let targets: [TerminationTarget]
+    }
+
     private static let queue = DispatchQueue(
         label: "com.hoerbuchkloeppler.process-termination",
         attributes: .concurrent
@@ -22,7 +31,14 @@ enum ProcessTerminator {
     /// verfügbar, wenn ein Nachkomme noch eine geerbte Pipe offen hält.
     static func recordOwnedProcessGroup(_ process: Process) {
         let pid = process.processIdentifier
-        guard pid > 0, Darwin.getpgid(pid) == pid else { return }
+        guard pid > 0 else { return }
+        let liveGroup = Darwin.getpgid(pid)
+        // Ein sehr kurzer Wrapper kann zwischen `run()` und `getpgid()` schon
+        // beendet sein, während ein Nachkomme seine Prozessgruppe weiterführt.
+        // Die negative kill-Probe adressiert genau diese weiterhin eigene Gruppe.
+        guard liveGroup == pid || (liveGroup == -1 && Darwin.kill(-pid, 0) == 0) else {
+            return
+        }
         groupLock.lock()
         ownedGroups[ObjectIdentifier(process)] = pid
         groupLock.unlock()
@@ -45,20 +61,41 @@ enum ProcessTerminator {
         return errno != ESRCH
     }
 
+    static func makeTerminationRequest(
+        for processes: [Process]
+    ) -> TerminationRequest {
+        let targets = processes.compactMap { process -> TerminationTarget? in
+            let group = ownedGroup(for: process)
+            guard process.isRunning || group.map(groupIsRunning) == true else {
+                return nil
+            }
+            return TerminationTarget(process: process, group: group)
+        }
+        return TerminationRequest(targets: targets)
+    }
+
     static func terminateAndWait(
         _ processes: [Process],
         graceInterval: TimeInterval = defaultGraceInterval
     ) {
-        let targets = processes.compactMap { process -> (Process, pid_t?)? in
-            let group = ownedGroup(for: process)
-            guard process.isRunning || group.map(groupIsRunning) == true else { return nil }
-            return (process, group)
-        }
+        terminateAndWait(
+            makeTerminationRequest(for: processes),
+            graceInterval: graceInterval
+        )
+    }
+
+    static func terminateAndWait(
+        _ request: TerminationRequest,
+        graceInterval: TimeInterval = defaultGraceInterval
+    ) {
+        let targets = request.targets
         guard !targets.isEmpty else { return }
 
         // Allen Prozessen dieselbe Schonfrist geben, statt sie nacheinander um
         // je eine volle Frist zu verlängern.
-        for (process, group) in targets {
+        for target in targets {
+            let process = target.process
+            let group = target.group
             if let group {
                 _ = Darwin.kill(-group, SIGTERM)
             } else if process.isRunning {
@@ -70,13 +107,16 @@ enum ProcessTerminator {
             : defaultGraceInterval
         let deadline = DispatchTime.now().uptimeNanoseconds
             + UInt64(grace * 1_000_000_000)
-        while targets.contains(where: { process, group in
-                  process.isRunning || group.map(groupIsRunning) == true
+        while targets.contains(where: { target in
+                  target.process.isRunning
+                    || target.group.map(groupIsRunning) == true
               }),
               DispatchTime.now().uptimeNanoseconds < deadline {
             Thread.sleep(forTimeInterval: 0.01)
         }
-        for (process, group) in targets {
+        for target in targets {
+            let process = target.process
+            let group = target.group
             if let group, groupIsRunning(group) {
                 _ = Darwin.kill(-group, SIGKILL)
             } else if process.isRunning {
@@ -87,8 +127,9 @@ enum ProcessTerminator {
         // beobachtet nur den Status, damit nie zwei Threads dieselbe
         // Process-Instanz gleichzeitig reap-en.
         let killDeadline = DispatchTime.now().uptimeNanoseconds + 1_000_000_000
-        while targets.contains(where: { process, group in
-                  process.isRunning || group.map(groupIsRunning) == true
+        while targets.contains(where: { target in
+                  target.process.isRunning
+                    || target.group.map(groupIsRunning) == true
               }), DispatchTime.now().uptimeNanoseconds < killDeadline {
             Thread.sleep(forTimeInterval: 0.01)
         }
@@ -98,11 +139,10 @@ enum ProcessTerminator {
         _ process: Process,
         graceInterval: TimeInterval = defaultGraceInterval
     ) {
-        guard process.isRunning || ownedGroup(for: process).map(groupIsRunning) == true else {
-            return
-        }
+        let request = makeTerminationRequest(for: [process])
+        guard !request.targets.isEmpty else { return }
         queue.async {
-            terminateAndWait([process], graceInterval: graceInterval)
+            terminateAndWait(request, graceInterval: graceInterval)
         }
     }
 
@@ -110,8 +150,18 @@ enum ProcessTerminator {
         _ processes: [Process],
         completion: @escaping @Sendable () -> Void
     ) {
+        terminateInBackground(
+            makeTerminationRequest(for: processes),
+            completion: completion
+        )
+    }
+
+    static func terminateInBackground(
+        _ request: TerminationRequest,
+        completion: @escaping @Sendable () -> Void
+    ) {
         queue.async {
-            terminateAndWait(processes)
+            terminateAndWait(request)
             completion()
         }
     }
@@ -658,6 +708,12 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
         // Worker keinen Abschluss zwischen Statuswechsel und Meldung einreihen.
         onAccepted()
         let ownedProcesses = processes
+        // Den Prozessgruppen-Besitz unter derselben Sperre festhalten wie die
+        // Prozessliste. Ein Worker darf danach `unregister` ausführen, ohne dem
+        // bereits angenommenen Abbruch seine Nachkommen wieder zu entziehen.
+        let terminationRequest = ProcessTerminator.makeTerminationRequest(
+            for: Array(ownedProcesses)
+        )
         let ownedDirectories = tempDirectories
         let ownedStagedOutputs = stagedOutputs.merging(
             residualStagedOutputs,
@@ -719,9 +775,9 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
             lock.broadcast()
             lock.unlock()
         }
-        if ownedProcesses.contains(where: \.isRunning) {
+        if !ownedProcesses.isEmpty {
             ProcessTerminator.terminateInBackground(
-                Array(ownedProcesses),
+                terminationRequest,
                 completion: finishCleanup
             )
         } else {

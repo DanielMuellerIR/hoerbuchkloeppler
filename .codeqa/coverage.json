@@ -1,14 +1,11 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "project": "Hoerbuchkloeppler",
   "campaign": {
-    "id": "20260825T162949635422+0200",
-    "token_budget": 3000000,
-    "status": "paused",
-    "started_at": "2026-08-25T16:29:49+02:00",
-    "tokens_spent": 2487965,
-    "finished_at": "2026-08-25T20:32:24+02:00",
-    "finish_reason": "budget-reached"
+    "id": "20260829T204240680364+0200",
+    "token_budget": 8000000,
+    "status": "active",
+    "started_at": "2026-08-29T20:42:40+02:00"
   },
   "campaign_history": [
     {
@@ -19,6 +16,15 @@
       "tokens_spent": 599452,
       "finished_at": "2026-08-15T14:26:45+02:00",
       "finish_reason": "all-current"
+    },
+    {
+      "id": "20260825T162949635422+0200",
+      "token_budget": 3000000,
+      "status": "paused",
+      "started_at": "2026-08-25T16:29:49+02:00",
+      "tokens_spent": 2487965,
+      "finished_at": "2026-08-25T20:32:24+02:00",
+      "finish_reason": "budget-reached"
     }
   ],
   "scope": {
@@ -82,7 +88,7 @@
       "risk": "critical",
       "priority": 2,
       "reason": "Datenintegrität, externe Prozesse, Parallelität, Abbruch und atomare Ausgabedateien",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260825T162949635422+0200",
         "completed_at": "2026-08-25T20:02:21+02:00",
@@ -96,6 +102,13 @@
           "swift test: 175 Tests inklusive neuem Cover-Snapshot-Test bestanden",
           "Realer CLI-Cover-Export: Exit 0 und ein eingebetteter Video-/Cover-Stream"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T20:44:45+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
@@ -340,13 +353,13 @@
     }
   ],
   "architecture": {
-    "campaign_id": "20260825T162949635422+0200",
-    "recorded_at": "2026-08-25T16:29:55+02:00",
-    "observed_head": "a0f310ec408f0e15c188878a8481e56e31075f7b",
-    "summary": "Das Paradigma passt weiterhin zu zwei Frontends. ConversionSession bündelt jedoch Zustandsmodell, Import und Metadatenanalyse; FFmpegWrapper bündelt Planung, Prozesssteuerung, Encoding, Fortschritt und atomare Ausgabe.",
+    "campaign_id": "20260829T204240680364+0200",
+    "recorded_at": "2026-08-29T20:44:45+02:00",
+    "observed_head": "118b1ad53cae3373ec0e8b565fbf0d33cb62f264",
+    "summary": "Das Paradigma passt weiterhin zu den zwei Frontends. Der gemeinsame Core hält Konvertierung und Import konsistent; ConversionSession (1.947 Zeilen) bündelt jedoch Zustandsmodell, Import und Metadatenanalyse, FFmpegWrapper (3.900 Zeilen) Prozess-, Dateibesitz-, Kodier- und Commit-Mechanik.",
     "paradigm": "Schichtenmodell mit gemeinsamem Core; SwiftUI-Frontend MVVM-artig über ConversionSession und CLI als separater Adapter",
     "fit": "gespannt",
-    "recommendation": "Verantwortungsgrenzen und testbare Hilfsfunktionen nur bereichsweise schärfen. Ein Paradigmenwechsel lohnt sich derzeit nicht: Der gemeinsame Core verhindert weiterhin doppelte Konvertierungslogik in GUI und CLI."
+    "recommendation": "Verantwortungsgrenzen und testbare Hilfstypen nur in den jeweils geprüften Bereichen schärfen. Ein Paradigmenwechsel lohnt sich nicht: Er würde hohen Umbauaufwand verursachen, ohne die bereits gemeinsame Fachlogik von GUI und CLI besser zu teilen."
   },
   "themes": [
     {
