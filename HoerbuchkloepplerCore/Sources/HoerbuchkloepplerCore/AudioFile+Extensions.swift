@@ -85,6 +85,7 @@ extension AudioFile {
     static func extractChaptersControlled(
         from file: FoundFile,
         shouldCancel: @Sendable () -> Bool = { false },
+        configureProcess: @Sendable (Process) -> Void = { _ in },
         runProcess: @Sendable (Process) throws -> Bool = { process in
             try process.run()
             ProcessTerminator.recordOwnedProcessGroup(process)
@@ -108,6 +109,10 @@ extension AudioFile {
         let process = Process()
         process.executableURL = ffmpegURL
         process.arguments = ["-nostdin", "-v", "quiet", "-i", url.path, "-f", "ffmetadata", "-"]
+        // Der Test kann hier einen kontrollierten Ersatzprozess einsetzen. Die
+        // Produktionsaufrufer lassen die vorbereitete ffmpeg-Konfiguration
+        // unverändert.
+        configureProcess(process)
 
         let pipe = Pipe()
         process.standardOutput = pipe

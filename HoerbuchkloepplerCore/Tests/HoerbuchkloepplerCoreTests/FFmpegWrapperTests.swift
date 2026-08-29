@@ -886,6 +886,58 @@ struct ProcessGroupOwnershipTests {
         }
         #expect(Darwin.kill(childPID, 0) == -1 && errno == ESRCH)
     }
+
+    @Test("Task-Abbruch beendet den laufenden Kapitelextraktionsprozess")
+    func chapterExtractionTaskCancellationTerminatesProcess() async throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pidFile = directory.appendingPathComponent("chapter.pid")
+        let slowTool = directory.appendingPathComponent("chapter-tool")
+        try writeExecutable(slowTool, """
+        #!/bin/sh
+        printf '%s' "$$" > "$1"
+        trap 'exit 0' TERM INT
+        while :; do /bin/sleep 1; done
+        """)
+        let source = directory.appendingPathComponent("Buch.m4b")
+        let found = FoundFile(source: source, resolved: source)
+
+        let extraction = Task {
+            await AudioFile.extractChaptersControlled(
+                from: found,
+                configureProcess: { process in
+                    process.executableURL = slowTool
+                    process.arguments = [pidFile.path]
+                }
+            )
+        }
+        let startDeadline = Date().addingTimeInterval(2)
+        while !FileManager.default.fileExists(atPath: pidFile.path),
+              Date() < startDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let processPID = try #require(
+            pid_t(String(contentsOf: pidFile, encoding: .utf8))
+        )
+        defer {
+            if Darwin.kill(processPID, 0) == 0 {
+                _ = Darwin.kill(processPID, SIGKILL)
+            }
+        }
+
+        extraction.cancel()
+        let result = await extraction.value
+        guard case .cancelled = result else {
+            Issue.record("Kapitelextraktion meldete nach Task-Abbruch nicht cancelled")
+            return
+        }
+
+        let exitDeadline = Date().addingTimeInterval(2)
+        while Darwin.kill(processPID, 0) == 0, Date() < exitDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(Darwin.kill(processPID, 0) == -1 && errno == ESRCH)
+    }
 }
 
 // MARK: - I) Ausgabe-, Eingabe- und Temp-Besitz
