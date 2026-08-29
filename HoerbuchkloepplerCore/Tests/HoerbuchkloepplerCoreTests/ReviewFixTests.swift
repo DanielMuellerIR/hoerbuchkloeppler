@@ -679,6 +679,43 @@ struct CancellationIsolationTests {
         #expect(!session.cancelPreparation())
     }
 
+    @Test("Ein neuer GUI-Drop cancelt den laufenden Import-Task")
+    func replacementImportCancelsRunningTask() async throws {
+        let session = ConversionSession(settings: AudioSettings())
+        let probe = PreparationCancellationProbe()
+        let staleToken = session.beginImport()
+        let work = Task {
+            await session.runImportTask(staleToken) {
+                await probe.markStarted()
+                do {
+                    try await Task.sleep(for: .seconds(30))
+                } catch {
+                    // CancellationError ist beim ersetzenden Drop erwartet.
+                }
+                await probe.markFinished(cancelled: Task.isCancelled)
+            }
+        }
+
+        var state = await probe.snapshot()
+        var attempts = 0
+        while !state.started, attempts < 1_000 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(1))
+            state = await probe.snapshot()
+        }
+        guard state.started else {
+            work.cancel()
+            await work.value
+            Issue.record("GUI-Import-Task startete nicht innerhalb einer Sekunde")
+            return
+        }
+
+        _ = session.beginImport()
+        await work.value
+        state = await probe.snapshot()
+        #expect(state.observedCancellation)
+    }
+
     @Test("Abbruch räumt nur Ressourcen seines Laufs auf")
     func contextsAreIsolated() throws {
         let firstDirectory = FileManager.default.temporaryDirectory
