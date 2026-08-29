@@ -264,7 +264,7 @@
       "risk": "medium",
       "priority": 9,
       "reason": "Breite Querschnittstests für Laufzeit, Import, Einstellungen und Tool-Auflösung",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
         "completed_at": "2026-08-29T21:10:56+02:00",
@@ -278,6 +278,13 @@
           "6 geänderte Grenztests fünfmal: je 6 Tests in 3 Suites bestanden",
           "swift test -Xswiftc -warnings-as-errors: 187 Tests in 22 Suites bestanden"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:31:52+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
