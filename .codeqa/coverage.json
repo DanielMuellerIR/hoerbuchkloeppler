@@ -89,7 +89,7 @@
       "risk": "critical",
       "priority": 2,
       "reason": "Datenintegrität, externe Prozesse, Parallelität, Abbruch und atomare Ausgabedateien",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
         "completed_at": "2026-08-29T20:51:55+02:00",
@@ -105,6 +105,13 @@
           "swift build -c release -Xswiftc -warnings-as-errors: bestanden",
           "xcodebuild Release macOS arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:31:22+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
