@@ -140,7 +140,7 @@
       "risk": "critical",
       "priority": 4,
       "reason": "Notarisierung, Signaturprüfung und einziger mutierender Pfad nach /Applications",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260825T162949635422+0200",
         "completed_at": "2026-08-25T20:16:23+02:00",
@@ -157,6 +157,13 @@
           "verdeckte Kopie der lokal notarisierten App: codesign, stapler, spctl, ffmpeg und mediainfo erfolgreich",
           "Foundation-Austausch: Backup bleibt erhalten; Rollback mit bestehendem und fehlendem Ziel erfolgreich"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T20:59:59+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
