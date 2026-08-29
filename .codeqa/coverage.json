@@ -5,7 +5,8 @@
     "id": "20260829T204240680364+0200",
     "token_budget": 8000000,
     "status": "active",
-    "started_at": "2026-08-29T20:42:40+02:00"
+    "started_at": "2026-08-29T20:42:40+02:00",
+    "tokens_spent": 254338
   },
   "campaign_history": [
     {
@@ -88,27 +89,22 @@
       "risk": "critical",
       "priority": 2,
       "reason": "Datenintegrität, externe Prozesse, Parallelität, Abbruch und atomare Ausgabedateien",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260825T162949635422+0200",
-        "completed_at": "2026-08-25T20:02:21+02:00",
-        "observed_head": "dca94d9231c761e93e9f2274029b47fcc39b0ba1",
-        "content_sha256": "6abbe7d93f9b02d5586eb77745e47f9067f6ebf7d671f102bb69ff34ddb419d2",
+        "campaign_id": "20260829T204240680364+0200",
+        "completed_at": "2026-08-29T20:51:55+02:00",
+        "observed_head": "537a707ccfce7674d8b596839735197de856ac47",
+        "content_sha256": "7173d67c29f2cf3834089ca9dff924bcdf31766413ac1fd03f0b56cda1639287",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Manuell gewählte Cover werden bei der Auswahl sicher und größenbegrenzt als unveränderliche Daten gelesen; ein später gelöschter oder ausgetauschter Pfad fällt beim Worker auf diesen Snapshot zurück.",
+        "summary": "Prozessgruppen-Besitz wird beim angenommenen Abbruch unter derselben Sperre wie die laufenden Prozesse festgehalten. Auch wenn der direkte Wrapper bereits beendet ist oder ein Worker parallel deregistriert, werden dessen Nachkommen vor Temp-/Staging-Cleanup mit TERM und anschließend KILL beendet; der unter Last flackernde Exit-Code-Test nutzt eine sachgerechte Frist.",
         "tests": [
-          "swift test: 175 Tests inklusive neuem Cover-Snapshot-Test bestanden",
-          "Realer CLI-Cover-Export: Exit 0 und ein eingebetteter Video-/Cover-Stream"
+          "Regression Gegenprobe: neuer Nachkommen-Test vor Fix rot, nach Fix grün",
+          "swift test -Xswiftc -warnings-as-errors: fünf vollständige Läufe mit je 186 Tests in 22 Suites bestanden",
+          "swift build -c release -Xswiftc -warnings-as-errors: bestanden",
+          "xcodebuild Release macOS arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T20:44:45+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
