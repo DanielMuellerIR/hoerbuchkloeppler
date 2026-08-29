@@ -296,7 +296,7 @@
       "risk": "medium",
       "priority": 10,
       "reason": "Dünne SwiftUI-Schicht, Datei-Drop, Exportplanung und Sitzungsdarstellung",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260815T134633974092+0200",
         "completed_at": "2026-08-15T14:22:58+02:00",
@@ -311,6 +311,13 @@
           "xcodebuild Debug, macOS arm64, CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED",
           "swift test -Xswiftc -warnings-as-errors: 90 Tests in 17 Suites passed; GUI nicht gestartet, um keinen Fokus zu übernehmen"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:11:04+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
