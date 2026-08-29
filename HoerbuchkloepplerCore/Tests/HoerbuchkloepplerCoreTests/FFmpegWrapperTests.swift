@@ -952,6 +952,49 @@ struct ConversionFileOwnershipTests {
         #expect(try String(contentsOf: staged, encoding: .utf8) == "neu")
     }
 
+    @Test("Der Ausgabeordner wird direkt vor dem Commit erneut geprüft")
+    func outputDirectoryIsRecheckedImmediatelyBeforeCommit() throws {
+        let root = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let outputDirectory = root.appendingPathComponent("Ausgabe")
+        let parkedDirectory = root.appendingPathComponent("Ausgabe-alt")
+        try FileManager.default.createDirectory(
+            at: outputDirectory,
+            withIntermediateDirectories: false
+        )
+        let final = outputDirectory.appendingPathComponent("Buch.m4b")
+        let staged = outputDirectory.appendingPathComponent(".staged.m4b")
+        try Data("neu".utf8).write(to: staged)
+        let expectedDirectory = FFmpegWrapper.captureSnapshot(
+            of: outputDirectory,
+            followSymlink: true
+        )
+
+        #expect(throws: ConversionOutputError.self) {
+            try FFmpegWrapper.commitStagedOutput(
+                staged,
+                to: final,
+                expectedDestination: .missing,
+                expectedDestinationDirectory: expectedDirectory,
+                beforeRename: {
+                    try? FileManager.default.moveItem(
+                        at: outputDirectory,
+                        to: parkedDirectory
+                    )
+                    try? FileManager.default.createDirectory(
+                        at: outputDirectory,
+                        withIntermediateDirectories: false
+                    )
+                }
+            )
+        }
+        #expect(!FileManager.default.fileExists(atPath: final.path))
+        #expect(try String(
+            contentsOf: parkedDirectory.appendingPathComponent(".staged.m4b"),
+            encoding: .utf8
+        ) == "neu")
+    }
+
     @Test("Ein nach Bestätigung ausgetauschtes Ziel wird zurückbehalten")
     func changedDestinationIsNotReplaced() throws {
         let directory = try conversionTestDirectory()
@@ -2133,6 +2176,37 @@ struct ConversionFileOwnershipTests {
             maxDurationHours: nil
         )
         try Data("anderer und längerer Inhalt".utf8).write(to: source)
+
+        #expect(throws: ConversionOutputError.self) {
+            try FFmpegWrapper.validateConversionPlan(plan)
+        }
+    }
+
+    @Test("Ein nach der Planung ersetzter Ausgabeordner wird abgewiesen")
+    func changedOutputDirectoryIsRejected() throws {
+        let root = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Quelle.wav")
+        let outputDirectory = root.appendingPathComponent("Ausgabe")
+        let parkedDirectory = root.appendingPathComponent("Ausgabe-alt")
+        try Data("audio".utf8).write(to: source)
+        try FileManager.default.createDirectory(
+            at: outputDirectory,
+            withIntermediateDirectories: false
+        )
+        let plan = FFmpegWrapper.makeConversionPlan(
+            files: [audio(source)],
+            outputURL: outputDirectory.appendingPathComponent("Buch.m4b"),
+            maxDurationHours: nil
+        )
+        try FileManager.default.moveItem(
+            at: outputDirectory,
+            to: parkedDirectory
+        )
+        try FileManager.default.createDirectory(
+            at: outputDirectory,
+            withIntermediateDirectories: false
+        )
 
         #expect(throws: ConversionOutputError.self) {
             try FFmpegWrapper.validateConversionPlan(plan)

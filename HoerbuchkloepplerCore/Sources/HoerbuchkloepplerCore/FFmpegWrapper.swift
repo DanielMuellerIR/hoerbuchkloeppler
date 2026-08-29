@@ -180,6 +180,7 @@ public struct ConversionPlan: Sendable {
     public let groups: [[AudioFile]]
     public let outputURLs: [URL]
     let outputSnapshots: [OutputDestinationSnapshot]
+    let outputDirectorySnapshots: [OutputDestinationSnapshot]
     let inputSnapshots: [String: OutputDestinationSnapshot]
 
     /// Ziele, deren Verzeichniseintrag bei der Planung bereits existierte.
@@ -333,6 +334,8 @@ enum OutputDestinationSnapshot: Equatable, Sendable {
 enum ConversionOutputError: LocalizedError {
     case destinationChanged(URL)
     case destinationInaccessible(URL, Int32)
+    case destinationDirectoryChanged(URL)
+    case destinationDirectoryInaccessible(URL, Int32)
     case destinationIsDirectory(URL)
     case destinationAliasesInput(URL, URL)
     case destinationBusy(URL)
@@ -348,6 +351,10 @@ enum ConversionOutputError: LocalizedError {
             return "Die Zieldatei wurde seit der Bestätigung verändert: \(url.path)"
         case .destinationInaccessible(let url, let number):
             return "Die Zieldatei kann nicht sicher geprüft werden: \(url.path) (\(Self.reason(number)))"
+        case .destinationDirectoryChanged(let url):
+            return "Der Ausgabeordner wurde seit der Planung ersetzt: \(url.path)"
+        case .destinationDirectoryInaccessible(let url, let number):
+            return "Der Ausgabeordner kann nicht sicher geprüft werden: \(url.path) (\(Self.reason(number)))"
         case .destinationIsDirectory(let url):
             return "Der Zielpfad ist ein Ordner und wird nicht ersetzt: \(url.path)"
         case .destinationAliasesInput(let output, let input):
@@ -1313,8 +1320,43 @@ public struct FFmpegWrapper {
             groups: groups,
             outputURLs: outputs,
             outputSnapshots: outputs.map { captureSnapshot(of: $0) },
+            outputDirectorySnapshots: outputs.map {
+                captureSnapshot(
+                    of: $0.deletingLastPathComponent(),
+                    followSymlink: true
+                )
+            },
             inputSnapshots: inputSnapshots
         )
+    }
+
+    /// Der Zielname allein reicht bei einer anfangs fehlenden Ausgabedatei
+    /// nicht: Ein Dateisynchronisierer kann den Elternordner zwischen Planung
+    /// und Konvertierung austauschen. Verzeichnisgröße und Zeitstempel ändern
+    /// sich regulär; Volume und Inode binden dagegen den ausgewählten Ordner.
+    static func validateOutputDirectorySnapshot(
+        for output: URL,
+        expected: OutputDestinationSnapshot
+    ) throws {
+        let directory = output.deletingLastPathComponent()
+        let current = captureSnapshot(of: directory, followSymlink: true)
+        switch (expected, current) {
+        case (.existing(let old), .existing(let new))
+            where old.matchesDirectoryEntry(new):
+            return
+        case (_, .inaccessible(let number)):
+            throw ConversionOutputError.destinationDirectoryInaccessible(
+                directory,
+                number
+            )
+        case (.inaccessible(let number), _):
+            throw ConversionOutputError.destinationDirectoryInaccessible(
+                directory,
+                number
+            )
+        default:
+            throw ConversionOutputError.destinationDirectoryChanged(directory)
+        }
     }
 
     static func validateInputSnapshots(
@@ -1343,6 +1385,7 @@ public struct FFmpegWrapper {
     static func validateConversionPlan(_ plan: ConversionPlan) throws {
         guard plan.groups.count == plan.outputURLs.count,
               plan.outputURLs.count == plan.outputSnapshots.count,
+              plan.outputURLs.count == plan.outputDirectorySnapshots.count,
               !plan.groups.isEmpty,
               plan.groups.allSatisfy({ !$0.isEmpty }) else {
             throw ConversionOutputError.destinationChanged(
@@ -1365,6 +1408,10 @@ public struct FFmpegWrapper {
         var seenOutputs = Set<String>()
 
         for (index, output) in plan.outputURLs.enumerated() {
+            try validateOutputDirectorySnapshot(
+                for: output,
+                expected: plan.outputDirectorySnapshots[index]
+            )
             let outputPath = canonicalPath(output)
             guard seenOutputs.insert(outputPath).inserted else {
                 throw ConversionOutputError.destinationChanged(output)
@@ -1652,6 +1699,21 @@ public struct FFmpegWrapper {
                 context.registerTempDirectory(tempDir)
 
                 let finalURL = job.plan.outputURLs[groupIndex]
+                do {
+                    try validateOutputDirectorySnapshot(
+                        for: finalURL,
+                        expected: job.plan.outputDirectorySnapshots[groupIndex]
+                    )
+                } catch {
+                    session.enqueueLog(
+                        "❌ \(error.localizedDescription)",
+                        type: .highlight,
+                        runID: context.id
+                    )
+                    context.removeTempDirectory(tempDir)
+                    overallSuccess = false
+                    break
+                }
                 // Leichen abgestürzter früherer Läufe (SIGKILL/Stromausfall)
                 // für dieses Ziel zuerst wegräumen — sie sind versteckt, oft
                 // mehrere GB groß und sonst für immer unsichtbar.
@@ -1785,6 +1847,8 @@ public struct FFmpegWrapper {
                             stagedURL,
                             to: finalURL,
                             expectedDestination: job.plan.outputSnapshots[groupIndex],
+                            expectedDestinationDirectory:
+                                job.plan.outputDirectorySnapshots[groupIndex],
                             expectedStagingOwnership: stagingOwnership
                         )
                     }
@@ -3333,6 +3397,7 @@ public struct FFmpegWrapper {
         _ stagedURL: URL,
         to finalURL: URL,
         expectedDestination: OutputDestinationSnapshot,
+        expectedDestinationDirectory: OutputDestinationSnapshot? = nil,
         expectedStagingOwnership: StagingOwnership? = nil,
         beforeRename: (() -> Void)? = nil,
         renameOperation: (URL, URL, UInt32) -> Int32 = {
@@ -3355,6 +3420,12 @@ public struct FFmpegWrapper {
             }
         }
         beforeRename?()
+        if let expectedDestinationDirectory {
+            try validateOutputDirectorySnapshot(
+                for: finalURL,
+                expected: expectedDestinationDirectory
+            )
+        }
 
         switch expectedDestination {
         case .missing:
