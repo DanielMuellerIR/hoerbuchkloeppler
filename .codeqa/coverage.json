@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 840501
+    "tokens_spent": 862925
   },
   "campaign_history": [
     {
@@ -471,14 +471,21 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift"
       ],
       "priority": 2,
-      "state": "in_progress",
+      "state": "completed",
       "noted_at": "2026-08-25T16:46:05+02:00",
       "campaign_id": "20260825T162949635422+0200",
       "started_at": "2026-08-29T21:22:01+02:00",
-      "active_run": {
+      "completed": {
         "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:22:01+02:00",
-        "observed_head": "3acde8b8e504b9a04216833f1f8d21e32591d5d2"
+        "completed_at": "2026-08-29T21:23:57+02:00",
+        "observed_head": "7feb0eae2e85fca08b622141dc41b55fea5d2d42",
+        "summary": "Gemeinsame AudioLoadResult-Prüfung schützt direkten GUI-Drop, Ordnerscan und CLI. Die Audio-Track-Prüfung wurde vor Dauer- und ffmpeg-Kapitelanalyse gezogen; Video-only-MP4 erzeugt damit keine irreführende Kapitel-Fallbackmeldung und erreicht weder Batch-Übernahme noch Konvertierung.",
+        "tests": [
+          "roter Regressionstest: Video-only-MP4 protokollierte vor dem Fix zuerst Keine Kapitel",
+          "direkter und vollständiger Ordnerimport im selben Test: .noAudioTrack, leere Dateiliste, atomarer Fehler",
+          "gezielter Test fünfmal stabil; vollständige Suite 190 Tests in 22 Suites bestanden",
+          "reale Release-CLI mit Video-only-MP4: Exit 1, keine Ausgabe, kein Kapitel-Fallback, präziser Audio-Stream-Fehler"
+        ]
       }
     },
     {
