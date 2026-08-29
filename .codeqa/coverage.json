@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 760872
+    "tokens_spent": 840501
   },
   "campaign_history": [
     {
@@ -445,14 +445,22 @@
         "Hörbuchklöppler/ContentView.swift"
       ],
       "priority": 2,
-      "state": "in_progress",
+      "state": "completed",
       "noted_at": "2026-08-25T16:46:05+02:00",
       "campaign_id": "20260825T162949635422+0200",
       "started_at": "2026-08-29T21:17:00+02:00",
-      "active_run": {
+      "completed": {
         "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:17:00+02:00",
-        "observed_head": "f9b7f7108c27956be2c99cb1fbaf0088232de986"
+        "completed_at": "2026-08-29T21:21:51+02:00",
+        "observed_head": "ffd605cc7ae2df9f1c8371e167817b1974225209",
+        "summary": "Direkte GUI-Dateiprovider werden nun bis zum letzten Provider gesammelt und starten genau eine Artwork-Suche; der vorherige Batch-Pfad hatte direkte eingebettete Cover versehentlich vollständig übersprungen. Entfernte Kandidaten lassen die laufende Suche bei verbleibenden Dateien weiterlaufen. CLI --no-cover und --cover überspringen eingebettete sowie separate Bildanalyse vor dem ausdrücklich gewünschten Ergebnis.",
+        "tests": [
+          "roter Regressionstest: direkter m4a-Drop mit eingebettetem PNG verlor Cover vor der Korrektur",
+          "3 Artwork-Grenztests fünfmal plus Abschlusslauf: jeweils bestanden",
+          "swift test -Xswiftc -warnings-as-errors: 190 Tests in 22 Suites bestanden",
+          "Release-Core/CLI und Xcode-Debug-App: erfolgreich gebaut",
+          "reale CLI --no-cover mit eingebettetem und separatem Bild: Exit 0, m4b ohne Video-/Cover-Stream"
+        ]
       }
     },
     {
