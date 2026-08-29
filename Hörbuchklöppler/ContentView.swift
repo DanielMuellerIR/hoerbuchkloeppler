@@ -57,6 +57,7 @@ struct ContentView: View {
     @State private var miStatus = "Prüfe..."
     @State private var showingToolErrorAlert = false
     @State private var conversionStartError: String?
+    @State private var cliHandoffError: String?
 
     func checkTools() {
         session.logCurrentSettings()
@@ -280,6 +281,14 @@ struct ContentView: View {
         } message: {
             Text(conversionStartError ?? "Unbekannter Startfehler")
         }
+        .alert("CLI-Handoff fehlgeschlagen", isPresented: Binding(
+            get: { cliHandoffError != nil },
+            set: { if !$0 { cliHandoffError = nil } }
+        )) {
+            Button("OK", role: .cancel) { cliHandoffError = nil }
+        } message: {
+            Text(cliHandoffError ?? "Das Terminal konnte nicht geöffnet werden.")
+        }
         .onAppear { checkTools() }
         .frame(minWidth: 850, minHeight: 650) // Fenster etwas höher gemacht (650 statt 550)
         .sheet(isPresented: $showingSettings) { SettingsView(session: session, isPresented: $showingSettings) }
@@ -395,14 +404,33 @@ struct ContentView: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(invocation.shellCommand, forType: .string)
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-a", "Terminal", kloepplerURL.deletingLastPathComponent().path]
-        do {
-            try process.run()
-        } catch {
-            session.addLog("⚠️ Terminal konnte nicht geöffnet werden: \(error.localizedDescription)")
+        let terminalDirectory = kloepplerURL.deletingLastPathComponent()
+        Task {
+            guard let message = await Self.openTerminal(at: terminalDirectory) else { return }
+            session.addLog("⚠️ \(message)")
+            cliHandoffError = message
         }
+    }
+
+    /// `Process.run()` bestätigt nur den Start von `/usr/bin/open`. Dessen
+    /// eigentlicher Fehler kommt als späterer Exit-Code und wird deshalb auf
+    /// einem Hintergrund-Task bis zum Prozessende ausgewertet.
+    private static func openTerminal(at directory: URL) async -> String? {
+        await Task.detached {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            process.arguments = ["-a", "Terminal", directory.path]
+            do {
+                try process.run()
+            } catch {
+                return "Terminal konnte nicht geöffnet werden: \(error.localizedDescription)"
+            }
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else {
+                return "Terminal konnte nicht geöffnet werden (Exit-Code \(process.terminationStatus))."
+            }
+            return nil
+        }.value
     }
 
     private func resolveKloepplerURL() -> URL? {
