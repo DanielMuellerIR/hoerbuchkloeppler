@@ -535,9 +535,14 @@
         "Hörbuchklöppler/ContentView.swift"
       ],
       "priority": 3,
-      "state": "pending",
+      "state": "dismissed",
       "noted_at": "2026-08-25T17:19:14+02:00",
-      "campaign_id": "20260825T162949635422+0200"
+      "campaign_id": "20260825T162949635422+0200",
+      "dismissed": {
+        "campaign_id": "20260829T204240680364+0200",
+        "dismissed_at": "2026-08-29T21:39:50+02:00",
+        "reason": "Bereits in der aktuellen Kampagne im Bereich gui-frontend durch Commit f46ff7d behoben: /usr/bin/open wird außerhalb des Main Actors bis zum Exit ausgewertet und Fehler erscheinen in Log und Alert; Xcode-Build verifiziert."
+      }
     },
     {
       "id": "process-cancellation-boundary-tests",
