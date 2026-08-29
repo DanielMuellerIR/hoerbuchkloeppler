@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 1169183
+    "tokens_spent": 1175299
   },
   "campaign_history": [
     {
@@ -65,26 +65,19 @@
       "risk": "critical",
       "priority": 1,
       "reason": "Bekannte SIGINT-Lücke in der Vorbereitungsphase sowie zentraler Main-Actor-, Import- und Metadatenzustand",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:31:17+02:00",
-        "observed_head": "aef301b2e6f0fea63748ba78f01d03cef2b5f67c",
-        "content_sha256": "7dec3b2b0677cd3e2275733f38fc17a9b0ce3a62478e5d97fc0edb6e79a889cd",
+        "completed_at": "2026-08-29T21:39:08+02:00",
+        "observed_head": "a2899ae8895ef1a398db187e480b10c34981e9ee",
+        "content_sha256": "db90056a25348073a692a891d8d868621b7965fb25e221e56f7b4549e2673a17",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Die bereits verifizierten Artwork-Batch- und Audio-Track-Deltas samt Importzustandsgrenzen nachgeprüft; keine weitere Abweichung gefunden.",
+        "summary": "Den verifizierten ToolProcessCoordinator- und MediaInfo-Kontext-Diff samt Importisolation nachgeprüft; keine weitere Abweichung gefunden.",
         "tests": [
-          "swift test: 192 Tests grün; reale CLI-Konvertierung grün; Delta-Diff und git diff --check geprüft"
+          "Prozessgruppentest fünfmal und swift test mit 195 Tests grün"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:39:00+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
