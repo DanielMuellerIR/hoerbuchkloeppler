@@ -1679,11 +1679,22 @@ struct ReviewFixes20260817Tests {
         #expect(process.terminationStatus == 0)
 
         let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
         let found = try #require(ConversionSession.foundFile(at: video))
         let loaded = await session.loadAudioFiles(from: found)
+        await Task.yield()
 
         #expect(loaded.files.isEmpty)
         #expect(loaded.failures.first?.reason == .noAudioTrack)
+        #expect(!session.eventLogs.contains { $0.message.contains("Keine Kapitel") })
+
+        let folderSession = ConversionSession(settings: AudioSettings())
+        folderSession.logSink = { _ in }
+        folderSession.beginPreparation()
+        await folderSession.prepareFolder(directory, analyzeArtwork: false)
+        #expect(folderSession.audioFiles.isEmpty)
+        #expect(folderSession.lastImportFailures.first?.reason == .noAudioTrack)
+        #expect(folderSession.importErrorMessage?.contains("vollständig verworfen") == true)
     }
 
     @Test("Kapitelcontainer und Bilder dürfen nur am Ziel eine Endung tragen")

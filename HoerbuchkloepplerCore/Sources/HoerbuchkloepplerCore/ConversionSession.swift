@@ -600,6 +600,21 @@ public final class ConversionSession: ObservableObject, Identifiable {
         importToken: ImportToken? = nil
     ) async -> AudioLoadResult {
         guard file.kind == .audio else { return .skipped }
+
+        // Den Stream-Typ vor Dauer- und Kapitelanalyse prüfen. Eine
+        // Video-only-MP4 darf weder einen ffmpeg-Kapitellauf starten noch die
+        // irreführende Fallback-Meldung „Keine Kapitel“ erzeugen.
+        switch await AudioFile.audioTrackAvailability(at: file.readURL) {
+        case .available:
+            break
+        case .missing:
+            return .failure(AudioImportFailure(sourceURL: file.source, reason: .noAudioTrack))
+        case .unreadable:
+            return .failure(AudioImportFailure(sourceURL: file.source, reason: .analysisFailed))
+        case .cancelled:
+            return .cancelled
+        }
+
         let candidates: [AudioFile]
         if file.isChapterContainer {
             switch await extractChapterResult(from: file, importToken: importToken) {
@@ -613,17 +628,6 @@ public final class ConversionSession: ObservableObject, Identifiable {
             candidates = [await AudioFile(foundFile: file)]
         }
         guard !preparationCancellationRequested() else { return .cancelled }
-
-        switch await AudioFile.audioTrackAvailability(at: file.readURL) {
-        case .available:
-            break
-        case .missing:
-            return .failure(AudioImportFailure(sourceURL: file.source, reason: .noAudioTrack))
-        case .unreadable:
-            return .failure(AudioImportFailure(sourceURL: file.source, reason: .analysisFailed))
-        case .cancelled:
-            return .cancelled
-        }
 
         for candidate in candidates {
             guard candidate.duration.isFinite, candidate.duration > 0 else {
