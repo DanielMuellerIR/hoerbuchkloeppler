@@ -502,9 +502,15 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift"
       ],
       "priority": 3,
-      "state": "pending",
+      "state": "in_progress",
       "noted_at": "2026-08-25T16:46:05+02:00",
-      "campaign_id": "20260825T162949635422+0200"
+      "campaign_id": "20260825T162949635422+0200",
+      "started_at": "2026-08-29T21:36:15+02:00",
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:36:15+02:00",
+        "observed_head": "db847aedc181431add84baea44173098987eccfd"
+      }
     },
     {
       "id": "process-tree-termination",
