@@ -264,7 +264,7 @@
       "risk": "medium",
       "priority": 9,
       "reason": "Breite Querschnittstests für Laufzeit, Import, Einstellungen und Tool-Auflösung",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
         "completed_at": "2026-08-29T21:35:26+02:00",
@@ -277,6 +277,13 @@
         "tests": [
           "Gezielter Policy-Test und swift test mit 194 Tests grün"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:39:12+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
