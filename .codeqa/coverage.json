@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 1275445
+    "tokens_spent": 1285129
   },
   "campaign_history": [
     {
@@ -160,26 +160,19 @@
       "risk": "high",
       "priority": 5,
       "reason": "AVFoundation-Analyse, Kapitelimport und externe ffmpeg-Prozessgrenze",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:04:04+02:00",
-        "observed_head": "170e529d411ccb18abbfc8bc1720ee5a6d29ce8a",
-        "content_sha256": "6276c9d78af2592b76fa2d505588ca5f4e38db6655ea692c991e6cc6877a93a8",
+        "completed_at": "2026-08-29T21:45:38+02:00",
+        "observed_head": "4306795e724145d07569bcbdb89bd2e6c872ff76",
+        "content_sha256": "b1c2f56145b8d9d765b7fe8f5d9148ef6e16cb464c4d33d852d90e4fc346cecb",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Delta und Grenzen der Kapitel- und Artwork-Analyse geprüft. ChapterExtractionResult unterscheidet sichere Ganzdatei-Fallbacks, atomaren Analysefehler und Abbruch; Prozessregistrierung, Pipe-Limit, Gesamtfrist, Exit-Status, Kapitelarithmetik und AVFoundation-Cancellation bleiben konsistent. Kein weiterer Codeeingriff nötig.",
+        "summary": "Geänderten Kapitelextraktionspfad und seine Grenzen nachgeprüft: Der neue Hook läuft erst nach URL- und Abbruchprüfung, verändert ohne explizite Testinjektion weder ffmpeg-Pfad noch Argumente und lässt Start, Prozessgruppenregistrierung, Pipe-Leser und Cancellation-Handler unverändert.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 187 Tests in 22 Suites; install.sh --no-notarize baute den Release-Core und die App; reales E2E: zwei WAV-Kapitel zu 4.985-Byte-M4B, Reimport zu 5.206-Byte-M4B, ffmetadata wies erneut genau zwei Kapitel (0–700 ms, 700–1.504 ms) nach."
+          "Neuer echter Prozessabbruchtest fünfmal stabil; vollständiger Core-Lauf mit 196 Tests; Swift-Release-Build; git diff --check."
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:45:26+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
