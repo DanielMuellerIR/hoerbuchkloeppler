@@ -188,7 +188,7 @@
       "risk": "high",
       "priority": 6,
       "reason": "Persistierte Einstellungen, Normalisierung und vollständiger shell-sicherer GUI-zu-CLI-Vertrag",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260815T134633974092+0200",
         "completed_at": "2026-08-15T14:12:08+02:00",
@@ -203,6 +203,13 @@
           "swift test -Xswiftc -warnings-as-errors --filter CLI-Handoff-Tests: 2 Tests passed",
           "CLI-Grenzwerte für Bitrate, Samplerate und Maximaldauer: jeweils Exit 64"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:04:15+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
