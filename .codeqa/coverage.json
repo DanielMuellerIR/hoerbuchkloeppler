@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 648957
+    "tokens_spent": 679242
   },
   "campaign_history": [
     {
@@ -267,26 +267,20 @@
       "risk": "medium",
       "priority": 9,
       "reason": "Breite Querschnittstests für Laufzeit, Import, Einstellungen und Tool-Auflösung",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260825T162949635422+0200",
-        "completed_at": "2026-08-25T20:02:27+02:00",
-        "observed_head": "dca94d9231c761e93e9f2274029b47fcc39b0ba1",
-        "content_sha256": "231bedd37490316e23984b0af91eb9f0b1dd3bbea9771ca8005ec2a1dceb5a41",
+        "campaign_id": "20260829T204240680364+0200",
+        "completed_at": "2026-08-29T21:10:56+02:00",
+        "observed_head": "b0b8dbf977162f8f7be6fa173430737cc88a53e5",
+        "content_sha256": "6da56df7e4b24a2af616850ae602705a89f6b10e312145278b7e9fe627678593",
         "file_count": 1,
         "review": "delta-plus-boundaries",
-        "outcome": "improved",
-        "summary": "Regressionstest belegt, dass eine manuelle Cover-Auswahl den ursprünglichen Bildinhalt unabhängig von einem späteren Pfadaustausch hält.",
+        "outcome": "reviewed-clean",
+        "summary": "Die 113 geänderten Zeilen decken die in den Fachbereichen korrigierten Abbruch-, Import-, Deduplizierungs- und Audio-Track-Grenzen mit beobachtbaren Ergebnissen ab. Fixtures sind laufbezogen temporär, Assertions prüfen typisierte Fehler und Zustandsgrenzen; kein Zuverlässigkeits- oder Aussagekraftbefund.",
         "tests": [
-          "swift test: 175 Tests in 21 Suites bestanden"
+          "6 geänderte Grenztests fünfmal: je 6 Tests in 3 Suites bestanden",
+          "swift test -Xswiftc -warnings-as-errors: 187 Tests in 22 Suites bestanden"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:10:03+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
