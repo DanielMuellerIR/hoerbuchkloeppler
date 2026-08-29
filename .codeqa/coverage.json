@@ -89,7 +89,7 @@
       "risk": "critical",
       "priority": 2,
       "reason": "Datenintegrität, externe Prozesse, Parallelität, Abbruch und atomare Ausgabedateien",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
         "completed_at": "2026-08-29T21:41:53+02:00",
@@ -102,6 +102,13 @@
         "tests": [
           "Fünf gezielte Cleanup-Race-Tests grün; git diff --check"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:45:45+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
