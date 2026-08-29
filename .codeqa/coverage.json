@@ -65,7 +65,7 @@
       "risk": "critical",
       "priority": 1,
       "reason": "Bekannte SIGINT-Lücke in der Vorbereitungsphase sowie zentraler Main-Actor-, Import- und Metadatenzustand",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
         "completed_at": "2026-08-29T20:57:49+02:00",
@@ -78,6 +78,13 @@
         "tests": [
           "Red/Green: cancelledFolderScanIsMarkedAsCancelled; swift test -Xswiftc -warnings-as-errors dreimal vollständig: je 187 Tests in 22 Suites; swift build -c release -Xswiftc -warnings-as-errors; xcodebuild Release arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED."
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:31:05+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
