@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 556993
+    "tokens_spent": 604364
   },
   "campaign_history": [
     {
@@ -188,28 +188,21 @@
       "risk": "high",
       "priority": 6,
       "reason": "Persistierte Einstellungen, Normalisierung und vollständiger shell-sicherer GUI-zu-CLI-Vertrag",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134633974092+0200",
-        "completed_at": "2026-08-15T14:12:08+02:00",
-        "observed_head": "0fa952a4642c185fb0446253390bde6ce4201c7b",
-        "content_sha256": "554e6ffa4c78ae468be2a1e7a961f19c0c69e06ee46428af6345d74cf680e518",
-        "file_count": 3,
-        "review": "full",
-        "outcome": "reviewed-clean",
-        "summary": "AudioSettings, feldweises Codable-Fallback und Normalisierung, atomare SettingsManager-Persistenz samt Parallel-Mode-Regel sowie vollständige, POSIX-shell-sichere CLIInvocation geprüft. Die Zuständigkeiten sind klein und konsistent; keine Änderung erforderlich.",
-        "tests": [
-          "swift test -Xswiftc -warnings-as-errors --filter SettingsPersistenceTests: 4 Tests passed",
-          "swift test -Xswiftc -warnings-as-errors --filter CLI-Handoff-Tests: 2 Tests passed",
-          "CLI-Grenzwerte für Bitrate, Samplerate und Maximaldauer: jeweils Exit 64"
-        ]
-      },
-      "active_run": {
         "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:04:15+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
+        "completed_at": "2026-08-29T21:06:09+02:00",
+        "observed_head": "ff27aa5ed580e68da2aeb707bc6748beb492fc00",
+        "content_sha256": "0a60b24e87aeffeea0e9f889b8ce401c1fb7a2c5fd9facc7741d7b9f1c250472",
+        "file_count": 3,
+        "review": "delta-plus-boundaries",
+        "outcome": "reviewed-clean",
+        "summary": "AudioSettings begrenzt Bitrate und Abtastrate konsistent mit aac_at und CLI; SettingsManager normalisiert feldweise und speichert atomar; CLIInvocation übergibt sämtliche GUI-Optionen mit POSIX-sicherem Quoting. Delta und Persistenz-/CLI-Grenzen ohne Korrektheitsbefund.",
+        "tests": [
+          "swift test --filter SettingsPersistenceTests|completeShellSafeCLICommand|cliInvocationCanSuppressCover: 7 Tests bestanden",
+          "kloeppler --bitrate 7999 und --samplerate 48001: jeweils Exit 64 mit Validierungsfehler",
+          "swift test: 187 Tests in 22 Suites bestanden"
+        ]
       }
     },
     {
