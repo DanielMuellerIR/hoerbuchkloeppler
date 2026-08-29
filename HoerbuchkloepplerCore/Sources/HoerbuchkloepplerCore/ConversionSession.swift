@@ -252,12 +252,19 @@ private final class PreparationContext: ToolProcessContext, @unchecked Sendable 
         }
         cancelled = true
         let activeProcesses = Array(processes.values)
+        // Den unveränderlichen Prozessgruppen-Snapshot noch unter derselben
+        // Sperre bilden wie die Besitzliste. Andernfalls könnte ein Worker den
+        // inzwischen beendeten Wrapper abmelden und dessen noch laufende Kinder
+        // vergessen, bevor der Hintergrund-Terminierer die Gruppe erfasst.
+        let terminationRequest = ProcessTerminator.makeTerminationRequest(
+            for: activeProcesses
+        )
         let activeTaskCancellations = Array(taskCancellations.values)
         processes.removeAll()
         taskCancellations.removeAll()
         lock.unlock()
         activeTaskCancellations.forEach { $0() }
-        ProcessTerminator.terminateInBackground(activeProcesses) {}
+        ProcessTerminator.terminateInBackground(terminationRequest) {}
         return true
     }
 }
@@ -285,7 +292,12 @@ private final class PreparationCoordinator: @unchecked Sendable {
     }
 
     func cancel() -> Bool {
-        context()?.cancel() ?? false
+        // Auswahl und Abbruch desselben Contexts bilden eine atomare Aktion.
+        // `begin()` darf nicht zwischen beides treten und einen neuen Lauf
+        // einsetzen, den ein gleichzeitig eintreffendes Signal dann verfehlt.
+        lock.lock()
+        defer { lock.unlock() }
+        return current?.cancel() ?? false
     }
 }
 
@@ -1396,10 +1408,25 @@ public final class ConversionSession: ObservableObject, Identifiable {
         var foundImages: [URL] = []
         var warnings: [String] = []
         var analysisFailures: [AudioImportFailure] = []
+
+        func cancelledResult() -> ScannedFolder {
+            // Nie ein bis zum Abbruch aufgebautes Teilergebnis herausgeben: Ein
+            // direkter Aufrufer könnte es sonst als vollständigen Scan anwenden.
+            ScannedFolder(
+                folderURL: url,
+                audioFiles: [],
+                imageURLs: [],
+                embeddedArtwork: nil,
+                warnings: warnings,
+                wasCancelled: true
+            )
+        }
+
         let discovery = Self.discoverFileURLs(
             in: url,
             cancellationRequested: { preparationCancellationRequested() }
         )
+        if preparationCancellationRequested() { return cancelledResult() }
         if let failure = discovery.failureDescription {
             return ScannedFolder(
                 folderURL: url,
@@ -1427,21 +1454,14 @@ public final class ConversionSession: ObservableObject, Identifiable {
         }
 
         for found in deduplicated.files {
-            if preparationCancellationRequested() { break }
+            if preparationCancellationRequested() { return cancelledResult() }
             switch found.kind {
             case .audio:
                 let loaded = await loadAudioFiles(from: found, importToken: importToken)
                 foundAudio.append(contentsOf: loaded.files)
                 warnings.append(contentsOf: loaded.warnings)
                 if loaded.wasCancelled {
-                    return ScannedFolder(
-                        folderURL: url,
-                        audioFiles: [],
-                        imageURLs: [],
-                        embeddedArtwork: nil,
-                        warnings: warnings,
-                        wasCancelled: true
-                    )
+                    return cancelledResult()
                 }
                 if let failure = loaded.failures.first {
                     // Alle weiteren Dateien trotzdem analysieren, damit GUI und
@@ -1454,17 +1474,19 @@ public final class ConversionSession: ObservableObject, Identifiable {
                 break
             }
         }
+        if preparationCancellationRequested() { return cancelledResult() }
         var embedded: Data? = nil
         for audioFile in Self.uniqueArtworkCandidates(foundAudio) {
-            if preparationCancellationRequested() { break }
+            if preparationCancellationRequested() { return cancelledResult() }
             if let artworkData = await AudioFile.extractEmbeddedArtwork(from: audioFile.url) {
-                if preparationCancellationRequested() { break }
+                if preparationCancellationRequested() { return cancelledResult() }
                 if NSImage(data: artworkData) != nil {
                     embedded = artworkData
                     break
                 }
             }
         }
+        if preparationCancellationRequested() { return cancelledResult() }
         return ScannedFolder(
             folderURL: url,
             audioFiles: foundAudio,

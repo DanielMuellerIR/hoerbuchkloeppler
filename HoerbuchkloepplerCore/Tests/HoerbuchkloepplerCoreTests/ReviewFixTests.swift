@@ -625,6 +625,22 @@ struct ToolResolutionTests {
 @Suite("Review-Fixes – laufbezogener Abbruch")
 @MainActor
 struct CancellationIsolationTests {
+    @Test("Ein vor dem Ordnerscan abgebrochener Lauf bleibt als Abbruch erkennbar")
+    func cancelledFolderScanIsMarkedAsCancelled() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let session = ConversionSession(settings: AudioSettings())
+
+        session.beginPreparation()
+        #expect(session.cancelPreparation())
+
+        let scanned = await session.scanFolder(directory)
+
+        #expect(scanned.wasCancelled)
+        #expect(scanned.audioFiles.isEmpty)
+        #expect(scanned.imageURLs.isEmpty)
+    }
+
     @Test("Vorbereitungsabbruch cancelt den registrierten Swift-Task")
     func preparationCancellationReachesTask() async throws {
         let session = ConversionSession(settings: AudioSettings())
