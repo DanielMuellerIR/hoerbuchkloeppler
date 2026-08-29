@@ -41,6 +41,20 @@ done
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
 
+read_app_version() {
+    local version_file="${1:-VERSION}" version
+    if [[ ! -r "$version_file" ]]; then
+        echo "Fehler: VERSION-Datei fehlt oder ist nicht lesbar: $version_file" >&2
+        return 1
+    fi
+    version="$(<"$version_file")"
+    if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
+        echo "Fehler: ungültige App-Version in $version_file: '$version'" >&2
+        return 1
+    fi
+    printf '%s\n' "$version"
+}
+
 verify_sha256() {
     local file="$1" expected="$2" label="$3" actual
     actual="$(shasum -a 256 "$file" | awk '{print $1}')"
@@ -141,7 +155,8 @@ build_cli() {
 
 build_app() {
     # VERSION-Datei ist die einzige Quelle der Wahrheit — stempelt die App-Version.
-    local version; version="$(cat VERSION 2>/dev/null || echo 1.0)"
+    local version
+    version="$(read_app_version)"
     log "Baue App (xcodebuild, Release, macOS) — Version ${version} …"
     # Festes App-Scheme (nicht das Library-Scheme 'HoerbuchkloepplerCore' oder das
     # CLI-Scheme 'kloeppler') + macOS-Destination, sonst rät xcodebuild iOS-Simulatoren.
