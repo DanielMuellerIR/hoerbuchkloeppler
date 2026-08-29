@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 1026867
+    "tokens_spent": 1031800
   },
   "campaign_history": [
     {
@@ -112,26 +112,19 @@
       "risk": "high",
       "priority": 3,
       "reason": "Signalbehandlung, Fehler-Exit-Codes, Eingabevalidierung und skriptfähige Ausgabe",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T20:59:49+02:00",
-        "observed_head": "22c51c76e47444651ddce6396436433bfcf62c63",
-        "content_sha256": "d657f3861f1b522c9051bf748b125ef74d85a1892dbb5d763aa66dc60662dbeb",
+        "completed_at": "2026-08-29T21:31:48+02:00",
+        "observed_head": "c47696359cd89493efe995e82b71425c1373a268",
+        "content_sha256": "d00377b38beced739a37ae764014f1694124969ea5478f3c316404e99e4d5ee1",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Den Delta seit dca94d und die Signal-, Import-, Ausgabeplan-, TTY- und Exit-Code-Grenzen geprüft. Die neuen Pfade melden atomare Importfehler vor der Planung und behandeln einen synchron abgelehnten Core-Start mit Exit 1; kein weiterer CLI-Codeeingriff nötig.",
+        "summary": "Die bereits verifizierte Weitergabe der Cover-Analyseoption und ihre CLI-Priorität gegen --cover/--no-cover nachgeprüft; keine weitere Abweichung gefunden.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 187 Tests in 22 Suites; swift build -c release -Xswiftc -warnings-as-errors; echter WAV-CLI-Lauf erzeugte und dekodierte eine 1.580-Byte-m4b; video-only MP4 wurde mit Exit 1 vollständig verworfen und erzeugte keine Ausgabe."
+          "swift test: 192 Tests grün; reale CLI-Konvertierung mit --no-cover grün; CLI-Delta vollständig geprüft"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:31:39+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
