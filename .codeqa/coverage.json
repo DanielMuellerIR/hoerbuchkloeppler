@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 604364
+    "tokens_spent": 648957
   },
   "campaign_history": [
     {
@@ -216,28 +216,22 @@
       "risk": "high",
       "priority": 7,
       "reason": "Download-Integrität externer Werkzeuge und reproduzierbarer Core-, CLI- und App-Build",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134633974092+0200",
-        "completed_at": "2026-08-15T14:14:29+02:00",
-        "observed_head": "05ba6218eeb0c8eee03b12864717467d230ae2c7",
-        "content_sha256": "06105b442b9fa60dd8b7134b022723b897e4da53c56bce5855bd617912a1369d",
-        "file_count": 2,
-        "review": "full",
-        "outcome": "improved",
-        "summary": "Package-Definition, Ressourcen-Einbettung und gesamtes Build-Skript geprüft. Die Hilfe blendet die Shebang nun korrekt aus; drei Einzeltreffersuchen verwenden find -print -quit statt unter pipefail unnötig über head zu leiten.",
-        "tests": [
-          "bash -n build.sh und --help-Vertrag: passed",
-          "./build.sh --deps-only: beide eingebetteten Binaries per SHA-256 und Versionsstart geprüft",
-          "./build.sh --cli-only: Release-Core und CLI erfolgreich gebaut"
-        ]
-      },
-      "active_run": {
         "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:06:20+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
+        "completed_at": "2026-08-29T21:09:44+02:00",
+        "observed_head": "354d278ea66bd9c7c869883c7a7aa0c1951a38a5",
+        "content_sha256": "8f5c7be50b182438c516076a76b71dbaa221937c799a20c4c8f91bb7d35d794c",
+        "file_count": 4,
+        "review": "delta-plus-boundaries",
+        "outcome": "improved",
+        "summary": "Build- und Paketgrenzen vollständig geprüft. build.sh vertraute trotz dokumentierter VERSION-Quelle bei fehlender Datei still auf 1.0; read_app_version verlangt nun eine lesbare zwei- oder dreiteilige numerische Version und bricht bei fehlender, leerer oder ungültiger Datei ab. Beide SwiftPM-Lockdateien binden semantisch dieselbe Revision.",
+        "tests": [
+          "bash -n, --help und unbekannte Option: Exit 0/0/64",
+          "read_app_version: 2.4 und 2.4.1 akzeptiert; fehlend, leer und 2.4.1-beta abgelehnt",
+          "./build.sh: SHA-geprüfte Werkzeuge, Release-CLI und ad-hoc-signierte App 1.3.0 erfolgreich gebaut",
+          "codesign --verify --deep --strict und swift build -c release -Xswiftc -warnings-as-errors: bestanden"
+        ]
       }
     },
     {
