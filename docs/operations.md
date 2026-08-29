@@ -21,6 +21,33 @@ oder nicht ausführbares Bundle-Tool verdeckt deshalb keinen funktionierenden
 `$PATH`-Fallback; der System-Check meldet „OK“ nur bei Exit 0 und nichtleerer
 Versionsausgabe.
 
+## Schutzgrenze der temporären Bereinigung
+
+Der Core löscht temporäre Ordner, Staging-Dateien und verdrängte alte Ausgaben
+nur mit einem zuvor erfassten Besitznachweis. Dazu gehören ein exklusiver
+0700-Ordner, Besitzer-Marker sowie Volume und Inode. Vor einer rekursiven
+Bereinigung verschiebt der Core den geprüften Ordner unter einen zufälligen
+Quarantänenamen, öffnet genau diesen Ordner und entfernt seine Einträge relativ
+zum offenen Verzeichnis-Deskriptor. Einzeldateien werden ebenfalls zuerst
+atomar quarantänisiert und danach erneut gegen den erwarteten Inode geprüft.
+
+Diese Prüfungen schützen gegen parallele Klöppler-Läufe, Dateisynchronisierer
+und versehentliche Pfadwechsel. Ein absichtlich eingreifender Prozess unter
+derselben Unix-Benutzer-ID ist dagegen keine Sicherheitsgrenze: `unlinkat`
+entfernt einen Namen relativ zu einem Ordner, nimmt aber keinen erwarteten
+Inode als Bedingung entgegen. Ein solcher Prozess kann deshalb noch nach der
+letzten Identitätsprüfung denselben Namen austauschen. `NSFileCoordinator` würde
+das nicht schließen, weil es nur kooperierende Teilnehmer koordiniert und rohe
+POSIX-Zugriffe nicht erzwingt. Eine harte Grenze bräuchte getrennte
+Systemkonten oder Rechte und passt nicht zum lokalen Ein-Benutzer-Werkzeug.
+
+Bei jeder erkennbaren Abweichung handelt der Core deshalb rest-erhaltend: Er
+lässt den Eintrag unangetastet, versucht einen atomaren Rollback oder bewahrt
+ihn unter einem Namen mit dem Präfix `.HB_RecoveryCleanup_` auf und schreibt
+eine Warnung ins Log. Der automatische Sweep entfernt einen solchen Rest erst,
+wenn Name, Besitzer-Marker und aufgezeichnete Identität wieder eindeutig
+zusammenpassen.
+
 ## Installation
 
 `./install.sh` mutiert `/Applications` erst, nachdem Notarisierungs-Ticket,
