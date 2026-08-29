@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 412200
+    "tokens_spent": 468577
   },
   "campaign_history": [
     {
@@ -115,28 +115,19 @@
       "risk": "high",
       "priority": 3,
       "reason": "Signalbehandlung, Fehler-Exit-Codes, Eingabevalidierung und skriptfähige Ausgabe",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260825T162949635422+0200",
-        "completed_at": "2026-08-25T20:02:13+02:00",
-        "observed_head": "dca94d9231c761e93e9f2274029b47fcc39b0ba1",
-        "content_sha256": "c7be728ad15fae206e2fd7b948798a183355978ac247d41024d304739b26d8d1",
+        "campaign_id": "20260829T204240680364+0200",
+        "completed_at": "2026-08-29T20:59:49+02:00",
+        "observed_head": "22c51c76e47444651ddce6396436433bfcf62c63",
+        "content_sha256": "d657f3861f1b522c9051bf748b125ef74d85a1892dbb5d763aa66dc60662dbeb",
         "file_count": 1,
         "review": "delta-plus-boundaries",
-        "outcome": "improved",
-        "summary": "SIGINT/SIGTERM werden über einen gemeinsamen synchronisierten Abschluss mit korrekten Exit-Codes behandelt; CLI begrenzt tatsächliche Zielnamen und ASCII-Art, fragt nur bei sichtbarem TTY, bindet sichtbare Symlink-Semantik korrekt und lehnt übergroße Cover früh ab.",
+        "outcome": "reviewed-clean",
+        "summary": "Den Delta seit dca94d und die Signal-, Import-, Ausgabeplan-, TTY- und Exit-Code-Grenzen geprüft. Die neuen Pfade melden atomare Importfehler vor der Planung und behandeln einen synchron abgelehnten Core-Start mit Exit 1; kein weiterer CLI-Codeeingriff nötig.",
         "tests": [
-          "swift test: 175 Tests in 21 Suites bestanden",
-          "Swift Release-Build und Xcode Release-Build mit Warnungen als Fehler bestanden",
-          "Reale CLI-E2E: lange UTF-8-Titel, explizit zu langer Output, Quell-Symlink, Cover, TTY-Umleitung sowie SIGINT 130/SIGTERM 143 ohne Ausgabe- oder Staging-Reste bestanden"
+          "swift test -Xswiftc -warnings-as-errors: 187 Tests in 22 Suites; swift build -c release -Xswiftc -warnings-as-errors; echter WAV-CLI-Lauf erzeugte und dekodierte eine 1.580-Byte-m4b; video-only MP4 wurde mit Exit 1 vollständig verworfen und erzeugte keine Ausgabe."
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T20:58:12+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
