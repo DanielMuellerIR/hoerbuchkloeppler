@@ -292,7 +292,7 @@
       "risk": "medium",
       "priority": 10,
       "reason": "Dünne SwiftUI-Schicht, Datei-Drop, Exportplanung und Sitzungsdarstellung",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
         "completed_at": "2026-08-29T21:14:14+02:00",
@@ -309,6 +309,13 @@
           "/usr/bin/open mit fehlender App: Exit 1; neuer Statuspfad kompiliert",
           "./build.sh und codesign --verify --deep --strict: Release-App 1.3.0 erfolgreich"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:39:26+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
