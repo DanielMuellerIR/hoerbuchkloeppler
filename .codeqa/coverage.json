@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 1221272
+    "tokens_spent": 1225074
   },
   "campaign_history": [
     {
@@ -89,26 +89,19 @@
       "risk": "critical",
       "priority": 2,
       "reason": "Datenintegrität, externe Prozesse, Parallelität, Abbruch und atomare Ausgabedateien",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:31:34+02:00",
-        "observed_head": "c354b2962bdf9d9e33ef648039e2a39be79dd938",
-        "content_sha256": "da261a9f460658456e390dfe5d96784c8c0c4970e6414ecfe31eb9bac78f3117",
+        "completed_at": "2026-08-29T21:41:53+02:00",
+        "observed_head": "550147422c55f7597499e133a13b3750778ca125",
+        "content_sha256": "a3669d056e249574716a3f9e6aa2f9a8071254cf311ad1bdb41b41f865887fff",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Die bereits verifizierten Artwork-Regressionstests und die Ausgabeordner-Bindung mit allen Plan- und Commit-Aufrufern nachgeprüft; keine weitere Abweichung gefunden.",
+        "summary": "Den reinen Schutzgrenzen-Kommentar gegen die tatsächliche Quarantäne- und unlinkat-Mechanik nachgeprüft; keine Codeänderung oder weitere Abweichung.",
         "tests": [
-          "swift test: 192 Tests grün; Swift-Release- und Xcode-Debug-Build grün; reale CLI-Konvertierung grün; Aufrufer- und Delta-Suche geprüft"
+          "Fünf gezielte Cleanup-Race-Tests grün; git diff --check"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:41:45+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
