@@ -6,7 +6,7 @@
     "token_budget": 8000000,
     "status": "active",
     "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 744832
+    "tokens_spent": 760872
   },
   "campaign_history": [
     {
@@ -324,28 +324,22 @@
       "risk": "low",
       "priority": 11,
       "reason": "App-Ziel, Build-Einstellungen und Paket-Verknüpfung im Xcode-Projekt",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134633974092+0200",
-        "completed_at": "2026-08-15T14:25:11+02:00",
-        "observed_head": "c473a547f123c4d8688fc07ee21230108bea271d",
-        "content_sha256": "70090189de52d1bfb661a3e4542987166b9a354ea9fb8bdc0f59d24bcbf95975",
-        "file_count": 1,
-        "review": "full",
-        "outcome": "improved",
-        "summary": "Gesamte Xcode-Projektdatei geprüft: synchronisierte Dateigruppe, App-Target, lokales Core-Paket, Swift 6/Main-Actor, macOS 13, Plist, Sandbox, Signing und Versionswerte sind konsistent. Swift-Warnungen werden nun zielgenau nur im App-Target für Debug und Release als Fehler behandelt, ohne Xcodes Paket-Warnungsunterdrückung zu widersprechen.",
-        "tests": [
-          "plutil -lint project.pbxproj und xcodebuild -list -json: passed",
-          "xcodebuild Debug macOS arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED mit -warnings-as-errors im App-Compiler",
-          "xcodebuild Release macOS arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED mit -warnings-as-errors im App-Compiler"
-        ]
-      },
-      "active_run": {
         "campaign_id": "20260829T204240680364+0200",
-        "started_at": "2026-08-29T21:14:21+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
+        "completed_at": "2026-08-29T21:15:39+02:00",
+        "observed_head": "148ccb063fccf96395ac2d0da36817c2b982c414",
+        "content_sha256": "e99af1af7bc5fab6d84a09779be95a5e66c283074344d447785cc0c0a15c6940",
+        "file_count": 2,
+        "review": "delta-plus-boundaries",
+        "outcome": "reviewed-clean",
+        "summary": "Projektdatei und neu inventarisierte Xcode-Lockdatei geprüft. App-Target, lokales Core-Paket, macOS-13-Ziel, Swift 6/MainActor, Plist, Signing-Übergabe und zielgenaue Warnungsfehler sind konsistent; Xcode und SwiftPM binden denselben Paket-Pin.",
+        "tests": [
+          "plutil -lint project.pbxproj und xcodebuild -list -json: bestanden",
+          "frischer xcodebuild Debug macOS arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED, App-Compiler mit -warnings-as-errors",
+          "frischer xcodebuild Release macOS arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED, App-Compiler mit -warnings-as-errors",
+          "semantischer Vergleich beider Package.resolved: identische Revision 626b5b7 und Version 1.7.1"
+        ]
       }
     }
   ],
