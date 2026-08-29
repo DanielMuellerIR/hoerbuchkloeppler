@@ -216,7 +216,7 @@
       "risk": "high",
       "priority": 7,
       "reason": "Download-Integrität externer Werkzeuge und reproduzierbarer Core-, CLI- und App-Build",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260815T134633974092+0200",
         "completed_at": "2026-08-15T14:14:29+02:00",
@@ -231,6 +231,13 @@
           "./build.sh --deps-only: beide eingebetteten Binaries per SHA-256 und Versionsstart geprüft",
           "./build.sh --cli-only: Release-Core und CLI erfolgreich gebaut"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T21:06:20+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
