@@ -115,7 +115,7 @@
       "risk": "high",
       "priority": 3,
       "reason": "Signalbehandlung, Fehler-Exit-Codes, Eingabevalidierung und skriptfähige Ausgabe",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260825T162949635422+0200",
         "completed_at": "2026-08-25T20:02:13+02:00",
@@ -130,6 +130,13 @@
           "Swift Release-Build und Xcode Release-Build mit Warnungen als Fehler bestanden",
           "Reale CLI-E2E: lange UTF-8-Titel, explizit zu langer Output, Quell-Symlink, Cover, TTY-Umleitung sowie SIGINT 130/SIGTERM 143 ohne Ausgabe- oder Staging-Reste bestanden"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260829T204240680364+0200",
+        "started_at": "2026-08-29T20:58:12+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
