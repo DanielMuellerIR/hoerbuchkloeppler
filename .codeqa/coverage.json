@@ -2,12 +2,11 @@
   "schema_version": 2,
   "project": "Hoerbuchkloeppler",
   "campaign": {
-    "id": "20260829T204240680364+0200",
-    "token_budget": 8000000,
+    "id": "20260830T095802250952+0200",
+    "token_budget": 3000000,
     "status": "complete",
-    "started_at": "2026-08-29T20:42:40+02:00",
-    "tokens_spent": 1296017,
-    "finished_at": "2026-08-29T21:46:14+02:00",
+    "started_at": "2026-08-30T09:58:02+02:00",
+    "finished_at": "2026-08-30T10:01:47+02:00",
     "finish_reason": "all-current"
   },
   "campaign_history": [
@@ -28,6 +27,15 @@
       "tokens_spent": 2487965,
       "finished_at": "2026-08-25T20:32:24+02:00",
       "finish_reason": "budget-reached"
+    },
+    {
+      "id": "20260829T204240680364+0200",
+      "token_budget": 8000000,
+      "status": "complete",
+      "started_at": "2026-08-29T20:42:40+02:00",
+      "tokens_spent": 1296017,
+      "finished_at": "2026-08-29T21:46:14+02:00",
+      "finish_reason": "all-current"
     }
   ],
   "scope": {
@@ -45,7 +53,9 @@
       "notary-profile.sh",
       "VERSION",
       "HoerbuchkloepplerCore/Package.resolved",
-      "Hörbuchklöppler.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+      "Hörbuchklöppler.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved",
+      "script-helpers.sh",
+      "test_scripts.sh"
     ],
     "exclusions": [
       {
@@ -69,16 +79,16 @@
       "reason": "Bekannte SIGINT-Lücke in der Vorbereitungsphase sowie zentraler Main-Actor-, Import- und Metadatenzustand",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:39:08+02:00",
-        "observed_head": "a2899ae8895ef1a398db187e480b10c34981e9ee",
-        "content_sha256": "db90056a25348073a692a891d8d868621b7965fb25e221e56f7b4549e2673a17",
+        "campaign_id": "20260830T095802250952+0200",
+        "completed_at": "2026-08-30T09:58:24+02:00",
+        "observed_head": "3fe4c82a4dbf3592d7d8d5d1d7e574d1fdbb794a",
+        "content_sha256": "c02f76df51268e7a95eb257180a2a2e9475270c7bd7f5d074d9dedff3f47dc12",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Den verifizierten ToolProcessCoordinator- und MediaInfo-Kontext-Diff samt Importisolation nachgeprüft; keine weitere Abweichung gefunden.",
+        "summary": "Import-Deltas und Lebenszyklusgrenzen geprüft: Providerfehler gelangen typisiert in denselben atomaren Batch wie Analysefehler; Fehler und Abbruch verändern die bestehende CLI-Abbildung nicht; nur eine tatsächlich laufende, durch beginImport entwertete Artwork-Suche wird auf dem unveränderten sichtbaren Bestand neu gestartet. Token-, Cover-Revision-, manuelle-Cover- und Alle-löschen-Grenzen bleiben wirksam.",
         "tests": [
-          "Prozessgruppentest fünfmal und swift test mit 195 Tests grün"
+          "Gezielte Provider-, CLI-Zustands- und Artwork-Neustarttests sowie vollständiger Lauf mit 199 Tests bestanden; Release-Core/App-Build 1.3.1 bestanden."
         ]
       }
     },
@@ -93,16 +103,16 @@
       "reason": "Datenintegrität, externe Prozesse, Parallelität, Abbruch und atomare Ausgabedateien",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:45:56+02:00",
-        "observed_head": "f24d019c3ee825905a24a3e86d17163d0a05936c",
-        "content_sha256": "da266b46b34e10d56734271b46a5622b350a2d488583d54f14438bf5f55b6e59",
+        "campaign_id": "20260830T095802250952+0200",
+        "completed_at": "2026-08-30T09:58:46+02:00",
+        "observed_head": "3fe4c82a4dbf3592d7d8d5d1d7e574d1fdbb794a",
+        "content_sha256": "9b6444dd5d21635d83de2d29f0551271b6d3b597b8e132de1d40edbf7cbbc5ae",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Geänderten Prozessgruppen-Test und seine Grenzen nachgeprüft: Der Test startet einen kontrollierten langlebigen Prozess, wartet begrenzt auf dessen PID, fordert Task-Abbruch an, verlangt das typisierte cancelled-Ergebnis und prüft ESRCH; ein defer beendet den Ersatzprozess bei vorzeitigem Testfehler.",
+        "summary": "Prozess-, Commit- und Cover-Deltas geprüft: Final- und Parallelsegmentpfad prüfen nach dem Leader-Exit dieselbe noch registrierte Prozessgruppe, beenden Reste vor Status-/Dateiprüfungen und verweigern die Übernahme. Der allgemeine Capture-Pfad räumt dieselbe Gruppe vor dem Pipe-Join auf. Der tote Cover-Pfad ist vollständig entfernt; der Worker besitzt nur noch den vor Start aufgenommenen Datensnapshot.",
         "tests": [
-          "Neuer echter Prozessabbruchtest fünfmal stabil; vollständiger Core-Lauf mit 196 Tests; Swift-Release-Build; git diff --check."
+          "Hintergrund-Encoder-Regression fünfmal stabil; vollständige 199-Test-Suite und Release-Build bestanden; tote Cover-Symbole fehlen im Produkt- und Testcode."
         ]
       }
     },
@@ -141,16 +151,16 @@
       "reason": "Notarisierung, Signaturprüfung und einziger mutierender Pfad nach /Applications",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:02:41+02:00",
-        "observed_head": "7f8d8289c3a98d83410caad0cfb059e016d5c413",
-        "content_sha256": "146cc594d5a6c20b192001b3c2e1715dd09202c7b2240455f1ca0dae179f2c55",
+        "campaign_id": "20260830T095802250952+0200",
+        "completed_at": "2026-08-30T09:59:12+02:00",
+        "observed_head": "3fe4c82a4dbf3592d7d8d5d1d7e574d1fdbb794a",
+        "content_sha256": "8bdbd1c8b93bf3f44809aab1ba24f637d195ffa1c4e297afb9c88e1f20c8a1f0",
         "file_count": 3,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Delta und Schutzgrenzen von install.sh, sign-bundle.sh und notary-profile.sh geprüft: Prozessidentität verhindert offensichtliche PID-Wiederverwendung, das vorige Bundle bleibt bis zur Zielprüfung rollback-fähig, Cleanup-Reste entwerten die verifizierte Installation nicht, und Zugangsdaten bleiben aus argv heraus.",
+        "summary": "Installationsdelta und Mutationsgrenzen geprüft: Die Registrierung liest Startzeit und Kommando atomar in einem ps-Aufruf; nur das kanonische Zielprogramm wird aufgenommen. Jede TERM-, Warte- und KILL-Probe verlangt weiterhin denselben vollständigen Snapshot und erneut das Zielkommando. Notary-, Signatur-, Staging-, atomarer Austausch- und Rollback-Grenzen bleiben unverändert vor der Mutation unter /Applications.",
         "tests": [
-          "bash -n für alle drei Skripte; install.sh --help; install.sh --no-notarize: Developer-ID-Build 1.3.0 signiert und verifiziert, TEST BUILD OK, keine Installation; Notary-Profil-Mocks: Erfolg im zweiten Versuch und Fehler nach fünf Versuchen, keine Credential-Argumente; Produktionsfunktion process_identity: lebender Prozess erkannt, beendeter verworfen."
+          "test_scripts.sh prüft Ein-Snapshot-Aufruf und Zielpräfix; Live-ps-Format auf macOS geprüft; bash -n für install.sh, sign-bundle.sh, notary-profile.sh und Helper; install.sh --help bestanden."
         ]
       }
     },
@@ -210,26 +220,24 @@
         "build.sh",
         "HoerbuchkloepplerCore/Package.swift",
         "VERSION",
-        "HoerbuchkloepplerCore/Package.resolved"
+        "HoerbuchkloepplerCore/Package.resolved",
+        "script-helpers.sh"
       ],
       "risk": "high",
       "priority": 7,
       "reason": "Download-Integrität externer Werkzeuge und reproduzierbarer Core-, CLI- und App-Build",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:09:44+02:00",
-        "observed_head": "354d278ea66bd9c7c869883c7a7aa0c1951a38a5",
-        "content_sha256": "8f5c7be50b182438c516076a76b71dbaa221937c799a20c4c8f91bb7d35d794c",
-        "file_count": 4,
+        "campaign_id": "20260830T095802250952+0200",
+        "completed_at": "2026-08-30T09:59:36+02:00",
+        "observed_head": "3fe4c82a4dbf3592d7d8d5d1d7e574d1fdbb794a",
+        "content_sha256": "dd3b754093e311514ca8c286bfbb6829df73d237be288132e961fe207d70845d",
+        "file_count": 5,
         "review": "delta-plus-boundaries",
-        "outcome": "improved",
-        "summary": "Build- und Paketgrenzen vollständig geprüft. build.sh vertraute trotz dokumentierter VERSION-Quelle bei fehlender Datei still auf 1.0; read_app_version verlangt nun eine lesbare zwei- oder dreiteilige numerische Version und bricht bei fehlender, leerer oder ungültiger Datei ab. Beide SwiftPM-Lockdateien binden semantisch dieselbe Revision.",
+        "outcome": "reviewed-clean",
+        "summary": "Build-, Version-, Helper- und Paketgrenzen geprüft: build.sh bezieht die App-Version weiterhin erst beim App-Build aus dem gemeinsamen strikten Leser; Abhängigkeitsarchive und Binaries bleiben SHA-gebunden; beide SwiftPM-Lockdateien binden swift-argument-parser 1.7.1 an dieselbe Revision (unterschiedliche Lockformat-Versionen sind werkzeugbedingt). Der neue Helper kapselt Versions- und Prozesssnapshot-Verträge ohne globale Mutation.",
         "tests": [
-          "bash -n, --help und unbekannte Option: Exit 0/0/64",
-          "read_app_version: 2.4 und 2.4.1 akzeptiert; fehlend, leer und 2.4.1-beta abgelehnt",
-          "./build.sh: SHA-geprüfte Werkzeuge, Release-CLI und ad-hoc-signierte App 1.3.0 erfolgreich gebaut",
-          "codesign --verify --deep --strict und swift build -c release -Xswiftc -warnings-as-errors: bestanden"
+          "Vollständiger ./build.sh-Lauf erzeugte Release-CLI und ad-hoc-signierte App 1.3.1; Plist-Version 1.3.1 und Projektdatei per plutil bestätigt; test_scripts.sh, bash -n und build.sh --help bestanden."
         ]
       }
     },
@@ -243,41 +251,40 @@
       "reason": "DMG-Erzeugung, temporäre Mounts und bewusst nicht öffentlicher Release-Pfad",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260815T134633974092+0200",
-        "completed_at": "2026-08-15T14:16:30+02:00",
-        "observed_head": "9a4f0e2b01819570608f973325076273e15a22f0",
-        "content_sha256": "a095f243635b1707ffa33c65cf01fc4e32fc9af5a3c100c51a70b17f7cfd0e4c",
+        "campaign_id": "20260830T095802250952+0200",
+        "completed_at": "2026-08-30T09:59:54+02:00",
+        "observed_head": "3fe4c82a4dbf3592d7d8d5d1d7e574d1fdbb794a",
+        "content_sha256": "0aa3a9e6dbefb8526e713235fd72b2000d82e074a9e64e1676cfe2f59a086475",
         "file_count": 1,
-        "review": "full",
-        "outcome": "improved",
-        "summary": "Gesamten privaten DMG-Pfad einschließlich atomarem Endnamen, Mount-Cleanup, Lizenzhinweisen, App-/DMG-Tickets und Veröffentlichungsverbot geprüft. Hilfe blendet die Shebang aus; Mount- und Zertifikatssuche lesen Pipelines vollständig und können unter pipefail keinen falschen SIGPIPE-Fehler mehr liefern.",
+        "review": "delta-plus-boundaries",
+        "outcome": "reviewed-clean",
+        "summary": "Release-Diff und vollständige DMG-Grenze geprüft: VERSION wird über den gemeinsamen numerischen Vertrag validiert, bevor DIST-, DMG-, Staging-, RW- oder Trap-Pfade entstehen. Der Trap bleibt auf den privaten Mount und validierte Zwischenpfade begrenzt; fertiges DMG wird erst nach Signatur, Notarisierung, Ticket und Gatekeeper-Prüfung atomar benannt. Veröffentlichungs- und /Applications-Pfade bleiben ausgeschlossen.",
         "tests": [
-          "bash -n release.sh und --help-Vertrag: passed",
-          "Vorher-/Nachher-Pipefail-Probe: Kurzleser Exit 141, vollständige Leser Exit 0 bei identischem Treffer",
-          "./release.sh --publish: bewusst unbekannt, Exit 64 ohne Build oder externen Zugriff"
+          "bash -n; release.sh --help Exit 0; absichtlich nicht vorhandene Option --publish Exit 64 vor Build/Notary; gemeinsame ungültige Versionsfälle über test_scripts.sh abgewiesen."
         ]
       }
     },
     {
       "id": "regression-tests",
       "paths": [
-        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ReviewFixTests.swift"
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ReviewFixTests.swift",
+        "test_scripts.sh"
       ],
       "risk": "medium",
       "priority": 9,
       "reason": "Breite Querschnittstests für Laufzeit, Import, Einstellungen und Tool-Auflösung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:39:19+02:00",
-        "observed_head": "6b3ba080c679e045fa5cdb9bf07a0723897e00e3",
-        "content_sha256": "11b07b51b49a246b41c885fe19255c3c9872abd8fc24145f031103794dbdfa7e",
-        "file_count": 1,
+        "campaign_id": "20260830T095802250952+0200",
+        "completed_at": "2026-08-30T10:00:44+02:00",
+        "observed_head": "457f37694bb22fe57f9c5bc92c1238632b9b2b0e",
+        "content_sha256": "fd1ba9668191de8b148ea4469fbb43da2c989423c308854b42aef651cb7a7f56",
+        "file_count": 2,
         "review": "delta-plus-boundaries",
-        "outcome": "reviewed-clean",
-        "summary": "Den echten MediaInfo-Prozessgruppentest mit Fristen, Cleanup und PID-Nachweis nachgeprüft; keine weitere Abweichung gefunden.",
+        "outcome": "improved",
+        "summary": "Neue Review-Regressionen und ihre Fehlerpfade geprüft und gehärtet: Die Shell-Suite deckt nun neben gültigen Versionen auch fehlende, leere, suffigierte und pfadartige Werte ab und beweist, dass eine wiederverwendete PID mit geändertem Snapshot abgelehnt wird. Der Hintergrund-Encoder-Test beendet seinen Kindprozess jetzt auch bei einer vorzeitigen Assertion oder einem Leseproblem.",
         "tests": [
-          "Gezielter Test fünfmal und swift test mit 195 Tests grün"
+          "test_scripts.sh fünfmal bestanden; Hintergrund-Encoder-Test nach der Cleanup-Härtung bestanden und kompiliert; git diff --check bestanden."
         ]
       }
     },
@@ -296,16 +303,16 @@
       "reason": "Dünne SwiftUI-Schicht, Datei-Drop, Exportplanung und Sitzungsdarstellung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:39:38+02:00",
-        "observed_head": "98ca008ed4a7d7cb1771ace45817267cb590a31d",
-        "content_sha256": "77eea2b9a7e9c0e9c4456abc99f017ad4d2876b75e7c84713aed52e96c8e80c5",
+        "campaign_id": "20260830T095802250952+0200",
+        "completed_at": "2026-08-30T10:01:02+02:00",
+        "observed_head": "457f37694bb22fe57f9c5bc92c1238632b9b2b0e",
+        "content_sha256": "0d930df1944bf6bb841d9cc765cbc146f5f20ae938351aeb0de10de6afe113ea",
         "file_count": 6,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Den Sheet-Schließpfad und onDisappear-Abbruch samt Zustandsbindung nachgeprüft; keine weitere Abweichung gefunden.",
+        "summary": "SwiftUI-Dropdelta und Frontendgrenzen geprüft: Jeder Provider behält seine stabile Batchposition; nil-URL oder Fehler wird auf dem Main Actor als typisierter Batchfehler gestagt und genau einmal abgeschlossen. Erfolgreiche Provider laufen unverändert durch den tokengebundenen Importtask; der bestehende Fehlerdialog zeigt die gemeinsame atomare Verwerfungsbegründung. Andere Views und Session-Bindungen bleiben unberührt.",
         "tests": [
-          "Xcode-Debug-Build mit warnings-as-errors grün; Prozessgruppentest und 195 Swift-Tests grün"
+          "Vollständiger xcodebuild-Pfad über ./build.sh kompilierte die SwiftUI-App 1.3.1; Provider-Batch-Regression in der 199-Test-Suite bestanden. Kein manueller GUI-Lauf, da ein fokussierender App-Start ohne Zustimmung laut Projektregel unterbleibt."
         ]
       }
     },
@@ -320,31 +327,28 @@
       "reason": "App-Ziel, Build-Einstellungen und Paket-Verknüpfung im Xcode-Projekt",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:15:39+02:00",
-        "observed_head": "148ccb063fccf96395ac2d0da36817c2b982c414",
-        "content_sha256": "e99af1af7bc5fab6d84a09779be95a5e66c283074344d447785cc0c0a15c6940",
+        "campaign_id": "20260830T095802250952+0200",
+        "completed_at": "2026-08-30T10:01:17+02:00",
+        "observed_head": "457f37694bb22fe57f9c5bc92c1238632b9b2b0e",
+        "content_sha256": "e3daff35389de9fb144696c7e65a028ada14ad92c0d39a308e335e452ac56bd8",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Projektdatei und neu inventarisierte Xcode-Lockdatei geprüft. App-Target, lokales Core-Paket, macOS-13-Ziel, Swift 6/MainActor, Plist, Signing-Übergabe und zielgenaue Warnungsfehler sind konsistent; Xcode und SwiftPM binden denselben Paket-Pin.",
+        "summary": "Xcode-Delta und Paketgrenzen geprüft: Debug und Release tragen dieselbe MARKETING_VERSION 1.3.1; info.plist bindet CFBundleShortVersionString daran und behält den unveränderten Buildzähler-Vertrag. Projektstruktur bleibt gültig, beide SwiftPM-Lockdateien zeigen auf dieselbe ArgumentParser-Version und Revision.",
         "tests": [
-          "plutil -lint project.pbxproj und xcodebuild -list -json: bestanden",
-          "frischer xcodebuild Debug macOS arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED, App-Compiler mit -warnings-as-errors",
-          "frischer xcodebuild Release macOS arm64 CODE_SIGNING_ALLOWED=NO: BUILD SUCCEEDED, App-Compiler mit -warnings-as-errors",
-          "semantischer Vergleich beider Package.resolved: identische Revision 626b5b7 und Version 1.7.1"
+          "plutil-Projektprüfung bestanden; vollständiger xcodebuild über build.sh bestanden; gebautes Bundle meldet CFBundleShortVersionString 1.3.1 und CFBundleVersion 1."
         ]
       }
     }
   ],
   "architecture": {
-    "campaign_id": "20260829T204240680364+0200",
-    "recorded_at": "2026-08-29T20:44:45+02:00",
-    "observed_head": "118b1ad53cae3373ec0e8b565fbf0d33cb62f264",
-    "summary": "Das Paradigma passt weiterhin zu den zwei Frontends. Der gemeinsame Core hält Konvertierung und Import konsistent; ConversionSession (1.947 Zeilen) bündelt jedoch Zustandsmodell, Import und Metadatenanalyse, FFmpegWrapper (3.900 Zeilen) Prozess-, Dateibesitz-, Kodier- und Commit-Mechanik.",
-    "paradigm": "Schichtenmodell mit gemeinsamem Core; SwiftUI-Frontend MVVM-artig über ConversionSession und CLI als separater Adapter",
+    "campaign_id": "20260830T095802250952+0200",
+    "recorded_at": "2026-08-30T09:58:02+02:00",
+    "observed_head": "3fe4c82a4dbf3592d7d8d5d1d7e574d1fdbb794a",
+    "summary": "Das Paradigma passt weiterhin zu den zwei Frontends und hält Import sowie Konvertierung in einem gemeinsamen Core konsistent. ConversionSession und FFmpegWrapper bleiben jedoch große Verantwortungszentren; die neuen Änderungen extrahieren Shell-Verträge und Artwork-Startlogik, ohne eine riskante Paradigma-Umstellung zu rechtfertigen.",
+    "paradigm": "Gemeinsamer Swift-Core mit MainActor-Sitzungsmodell, dünnen SwiftUI-/CLI-Frontends und POSIX-/Shell-Sicherheitsgrenzen für Prozesse, Dateien, Installation und Release",
     "fit": "gespannt",
-    "recommendation": "Verantwortungsgrenzen und testbare Hilfstypen nur in den jeweils geprüften Bereichen schärfen. Ein Paradigmenwechsel lohnt sich nicht: Er würde hohen Umbauaufwand verursachen, ohne die bereits gemeinsame Fachlogik von GUI und CLI besser zu teilen."
+    "recommendation": "Weiterhin kleine, belegte Extraktionen an stabilen Vertragsgrenzen bevorzugen; keine großflächige Neuschreibung."
   },
   "themes": [
     {
