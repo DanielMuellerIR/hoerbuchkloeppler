@@ -524,9 +524,16 @@ struct OutputSafetyTests {
     @MainActor
     func finalProcessRejectsBackgroundEncoder() async throws {
         let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
         let wrapper = directory.appendingPathComponent("ffmpeg-wrapper")
         let childPIDFile = directory.appendingPathComponent("child.pid")
+        defer {
+            if let text = try? String(contentsOf: childPIDFile, encoding: .utf8),
+               let childPID = pid_t(text),
+               Darwin.kill(childPID, 0) == 0 {
+                _ = Darwin.kill(childPID, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: directory)
+        }
         try makeExecutable(wrapper, contents: """
         #!/bin/sh
         /bin/sleep 30 </dev/null >/dev/null 2>&1 &

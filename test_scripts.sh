@@ -14,17 +14,23 @@ trap cleanup EXIT
 
 valid_two="$work_dir/version-two"
 valid_three="$work_dir/version-three"
+invalid_empty="$work_dir/version-empty"
+invalid_suffix="$work_dir/version-suffix"
 invalid_path="$work_dir/version-path"
 printf '1.4\n' > "$valid_two"
 printf '1.4.2\n' > "$valid_three"
+: > "$invalid_empty"
+printf '1.4.2-beta\n' > "$invalid_suffix"
 printf '../../fremd\n' > "$invalid_path"
 
 [ "$(hoerbuchkloeppler_read_version "$valid_two")" = "1.4" ]
 [ "$(hoerbuchkloeppler_read_version "$valid_three")" = "1.4.2" ]
-if hoerbuchkloeppler_read_version "$invalid_path" >/dev/null 2>&1; then
-  echo "Fehler: Pfadbestandteile wurden als Release-Version akzeptiert." >&2
-  exit 1
-fi
+for invalid_version in "$invalid_empty" "$invalid_suffix" "$invalid_path" "$work_dir/fehlt"; do
+  if hoerbuchkloeppler_read_version "$invalid_version" >/dev/null 2>&1; then
+    echo "Fehler: Ungültige oder fehlende Release-Version wurde akzeptiert: $invalid_version" >&2
+    exit 1
+  fi
+done
 
 start="Sun Aug 30 09:47:56 2026"
 target="/Applications/Hörbuchklöppler.app/Contents/MacOS/Hörbuchklöppler"
@@ -56,6 +62,11 @@ hoerbuchkloeppler_snapshot_targets_executable "$captured" "$target"
 : > "$ps_calls"
 hoerbuchkloeppler_process_matches_snapshot 12345 "$snapshot" "$target"
 [ "$(wc -l < "$ps_calls" | tr -d ' ')" -eq 1 ]
+if hoerbuchkloeppler_process_matches_snapshot 12345 "$snapshot" "$target"; then
+  echo "Fehler: Wiederverwendete PID mit neuer Identität wurde akzeptiert." >&2
+  exit 1
+fi
+[ "$(wc -l < "$ps_calls" | tr -d ' ')" -eq 2 ]
 unset -f ps
 
 echo "Shell-Sicherheitstests bestanden."
