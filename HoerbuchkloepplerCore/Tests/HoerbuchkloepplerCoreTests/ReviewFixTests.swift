@@ -519,6 +519,55 @@ struct OutputSafetyTests {
         let failure = session.eventLogs.first { $0.message.contains("Exit-Code") }?.message
         #expect(failure?.contains("Unrecognized option") == true)
     }
+
+    @Test("Finaler Wrapper-Exit mit Hintergrund-Encoder gilt nicht als Erfolg")
+    @MainActor
+    func finalProcessRejectsBackgroundEncoder() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let wrapper = directory.appendingPathComponent("ffmpeg-wrapper")
+        let childPIDFile = directory.appendingPathComponent("child.pid")
+        try makeExecutable(wrapper, contents: """
+        #!/bin/sh
+        /bin/sleep 30 </dev/null >/dev/null 2>&1 &
+        printf '%s' "$!" > "$1"
+        exit 0
+        """)
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        let context = session.beginConversionRun()
+
+        let succeeded = FFmpegWrapper.runFinalProcess(
+            args: [childPIDFile.path],
+            session: session,
+            context: context,
+            progressBase: 0,
+            progressWeight: 1,
+            phaseDuration: 1,
+            logMessage: "Wrapper-Testlauf",
+            pacmanTitle: "Test",
+            executableURL: wrapper
+        )
+        let childPID = try #require(pid_t(String(
+            contentsOf: childPIDFile,
+            encoding: .utf8
+        )))
+        let deadline = Date().addingTimeInterval(2)
+        while Darwin.kill(childPID, 0) == 0, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        for _ in 0..<10 where !session.eventLogs.contains(where: {
+            $0.message.contains("Hintergrundprozesse")
+        }) {
+            await Task.yield()
+        }
+
+        #expect(!succeeded)
+        #expect(Darwin.kill(childPID, 0) == -1 && errno == ESRCH)
+        #expect(session.eventLogs.contains {
+            $0.message.contains("Hintergrundprozesse")
+        })
+    }
 }
 
 @Suite("Review-Fixes – Tool-Auflösung")
@@ -1433,6 +1482,77 @@ struct ImportLifecycleTests {
         ])
         #expect(session.importErrorMessage?.contains("vollständig verworfen") == true)
         #expect(!session.isImporting)
+    }
+
+    @Test("Ein Provider-Ladefehler verwirft erfolgreiche Nachbarn mit Positionsangabe")
+    func providerLoadFailureRejectsWholeBatch() async {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        let token = session.beginImport(expectedItemCount: 2)
+        let accepted = AudioFile(
+            url: URL(fileURLWithPath: "/tmp/akzeptiert.mp3"),
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Akzeptiert"
+        )
+        session.stageAudioLoadResult(
+            .success(files: [accepted], warnings: []),
+            importToken: token
+        )
+        await session.finishImport(token)
+        session.stageProviderLoadFailure(
+            position: 2,
+            total: 2,
+            errorDescription: "Datei nicht verfügbar",
+            importToken: token
+        )
+        await session.finishImport(token)
+
+        #expect(session.audioFiles.isEmpty)
+        #expect(session.lastImportFailures.count == 1)
+        #expect(session.importErrorMessage?.contains("Drop-Element 2 von 2") == true)
+        #expect(session.importErrorMessage?.contains("Datei nicht verfügbar") == true)
+        #expect(!session.isImporting)
+    }
+
+    @Test("Ein verworfener Zusatz-Drop erhält die bestehende CLI-Ordnerbindung")
+    func rejectedAdditionalDropPreservesCLIFolder() async {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        session.title = "Buch"
+        session.author = "Autor"
+        let folder = URL(fileURLWithPath: "/tmp/vorhandenes-buch")
+        let existing = AudioFile(
+            url: folder.appendingPathComponent("01.mp3"),
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Kapitel"
+        )
+        await session.applyScannedFolder(.init(
+            folderURL: folder,
+            audioFiles: [existing],
+            imageURLs: [],
+            embeddedArtwork: nil
+        ))
+        #expect(session.cliFolderIfRepresentable == folder)
+
+        let token = session.beginImport()
+        session.stageProviderLoadFailure(
+            position: 1,
+            total: 1,
+            errorDescription: nil,
+            importToken: token
+        )
+        await session.finishImport(token)
+
+        #expect(session.audioFiles.map(\.id) == [existing.id])
+        #expect(session.cliFolderIfRepresentable == folder)
+
+        let cancelledToken = session.beginImport()
+        session.stageAudioLoadResult(.cancelled, importToken: cancelledToken)
+        await session.finishImport(cancelledToken)
+        #expect(session.audioFiles.map(\.id) == [existing.id])
+        #expect(session.cliFolderIfRepresentable == folder)
     }
 
     @Test("Skip und Abbruch bleiben vom Analysefehler getrennt")

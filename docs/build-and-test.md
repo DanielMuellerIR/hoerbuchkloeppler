@@ -79,6 +79,7 @@ nicht nur „Build grün".
 
 ```bash
 cd HoerbuchkloepplerCore && swift test        # vollständige Core-/CLI-Suite
+cd .. && ./test_scripts.sh                    # Build-/Install-/Release-Wächter
 ```
 
 Deckt die reine Kernlogik ab: FFMETADATA-Escaping/Parsing, Kapitel-Arithmetik
@@ -87,7 +88,9 @@ NaN/Infinity-Härtung sowie Ausgabeplan/atomare Übernahme, Tool-Auflösung,
 laufbezogenen Abbruch, Metadatenentscheidung, echte asynchrone
 AVFoundation-Analyse einer WAV-Datei, Symlink-Deduplizierung, Unterordner-
 Sortierung, atomaren Mehrdateien-Import, Video-only-Ablehnung,
-Prozessgruppen-Abbruch, Staging-Namensgrenzen und shell-sicheren CLI-Handoff.
+Prozessgruppen-Abbruch, Wrapper-Exit mit weiterlaufendem Hintergrundprozess,
+Staging-Namensgrenzen und shell-sicheren CLI-Handoff. `test_scripts.sh` prüft
+zusätzlich Versionssyntax und die Ein-Snapshot-Identität für Installationsprozesse.
 Bewusst **nicht** dabei: das reale Encoding-Ergebnis — dafür ist das Rezept oben da.
 
 Die geprüften Funktionen sind `internal` statt `private`, damit `@testable

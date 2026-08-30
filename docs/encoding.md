@@ -117,6 +117,9 @@ Original bleibt bis zum atomaren Commit erhalten.
 ## Prozess-Management & Cancellation
 
 - **Laufbezogener Kontext:** Jeder Konvertierungslauf besitzt seine eigenen Prozesse und Temp-Verzeichnisse in einem `ConversionContext`.
+- **Erfolgsgrenze:** Nach dem Exit jedes Segment- oder Finalprozesses muss seine
+  besessene Prozessgruppe leer sein. Zurückgelassene Hintergrundprozesse werden
+  beendet; der betroffene Batch wird verworfen und keine Partial-Datei übernommen.
 - **Cancellation:** Ein Abbruch beendet und bereinigt ausschließlich den Kontext der betroffenen `ConversionSession`; parallele Fenster bleiben unberührt. Ein schneller Neustart macht die alte Completion per Lauf-ID ungültig.
 - **Signal-Handling:** Das CLI fängt `SIGINT` (Ctrl+C) und `SIGTERM` bereits
   während Ordnerscan und Metadatenanalyse ab. Es cancelt den registrierten Swift-Vorbereitungstask,

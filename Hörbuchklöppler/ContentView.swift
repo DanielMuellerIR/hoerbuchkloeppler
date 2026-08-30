@@ -318,10 +318,19 @@ struct ContentView: View {
     private func handleDroppedProviders(_ providers: [NSItemProvider]) {
         let importToken = session.beginImport(expectedItemCount: providers.count)
         let currentSession = session
-        for provider in providers {
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+        let providerCount = providers.count
+        for (index, provider) in providers.enumerated() {
+            _ = provider.loadObject(ofClass: URL.self) { url, error in
+                let errorDescription = error?.localizedDescription
+                let providerFailed = error != nil || url == nil
                 Task { @MainActor in
-                    guard let url else {
+                    guard !providerFailed, let url else {
+                        currentSession.stageProviderLoadFailure(
+                            position: index + 1,
+                            total: providerCount,
+                            errorDescription: errorDescription,
+                            importToken: importToken
+                        )
                         await currentSession.finishImport(importToken)
                         return
                     }

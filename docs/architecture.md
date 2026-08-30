@@ -30,10 +30,12 @@ Core.
   `AVAsset.load(...)` beziehungsweise `AVMetadataItem.load(...)` geladen. GUI
   und CLI erwarten denselben asynchronen Import-Lebenszyklus; die frühere
   `metadataGroup: DispatchGroup`-Sonderbehandlung der CLI entfällt. Ein
-  Import-Batch bleibt bis zum Ende aller Analysen im Staging. Fehlt bei einer
-  Quelle Dauer oder Audio-Stream oder läuft ihre Kapitelanalyse ins Zeitlimit,
-  verwerfen GUI und CLI den ganzen Batch statt ein unvollständiges Hörbuch zu
-  erzeugen.
+  Import-Batch bleibt bis zum Ende aller Provider-Ladevorgänge und Analysen im
+  Staging. Liefert ein GUI-Provider keine Datei-URL, fehlt bei einer Quelle Dauer
+  oder Audio-Stream oder läuft ihre Kapitelanalyse ins Zeitlimit, verwerfen GUI
+  und CLI den ganzen Batch statt ein unvollständiges Hörbuch zu erzeugen. Ein
+  verworfener Zusatz-Drop lässt die bestehende CLI-Ordnerbindung unverändert und
+  nimmt eine zuvor laufende Artwork-Suche für den sichtbaren Bestand wieder auf.
 - **Quellpfad und Lese-URL:** `FoundFile.source` ist der sichtbare Pfad, der
   Anzeige, Sortierung und Fallback-Kapiteltitel bestimmt. `FoundFile.resolved`
   ist das aufgelöste reguläre Ziel, das AVFoundation, ffmpeg, mediainfo und die
@@ -51,8 +53,10 @@ Core.
   und Konvertierungsprozesse. Dadurch kann SIGINT abbrechen, ohne die
   Main-Actor-Isolation zu umgehen. Externe Werkzeuge laufen in einer besessenen
   Prozessgruppe; Abbruch und begrenzter Pipe-Join beenden auch Nachkommen zuerst
-  mit SIGTERM und nach 0,5 Sekunden mit SIGKILL. Der Konvertierungs-Context
-  entfernt temporäre und unvollständige Dateien erst danach.
+  mit SIGTERM und nach 0,5 Sekunden mit SIGKILL. Auch ein Exit 0 des direkten
+  Wrappers gilt nicht als Erfolg, solange in seiner besessenen Prozessgruppe ein
+  Hintergrundprozess weiterläuft. Der Konvertierungs-Context entfernt temporäre
+  und unvollständige Dateien erst danach.
 - **App-Sandbox: AUS** — nötig, um externe Binaries auszuführen.
 
 ## UI-Pattern (App)

@@ -169,6 +169,53 @@ struct CoverSelectionTests {
         #expect(session.embeddedCoverData == expectedEmbeddedArtwork)
     }
 
+    @Test("Ein verworfener Zusatz-Drop startet die entwertete Artwork-Suche neu")
+    func rejectedAdditionalDropRestartsArtworkSearch() async throws {
+        let source = URL(fileURLWithPath: "/tmp/bestehendes-kapitel.m4a")
+        let artwork = try onePixelPNGData()
+        let probe = ArtworkLoaderProbe(dataByURL: [source: artwork])
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        session.title = "Titel"
+        session.author = "Autor"
+        session.embeddedArtworkLoader = { url in await probe.load(url) }
+        let existing = AudioFile(
+            url: source,
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Kapitel"
+        )
+
+        await session.processIncomingFiles([existing])
+        var probeState = await probe.snapshot()
+        var attempts = 0
+        while !probeState.started, attempts < 200 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(10))
+            probeState = await probe.snapshot()
+        }
+        #expect(probeState.started)
+
+        let token = session.beginImport()
+        session.stageProviderLoadFailure(
+            position: 1,
+            total: 1,
+            errorDescription: nil,
+            importToken: token
+        )
+        await session.finishImport(token)
+
+        attempts = 0
+        while session.embeddedCoverData == nil, attempts < 200 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        probeState = await probe.snapshot()
+        #expect(probeState.calls == [source, source])
+        #expect(session.embeddedCoverData == artwork)
+        await probe.releaseFirstCall()
+    }
+
     @Test("Deaktivierte Ordneranalyse liest weder eingebettete noch separate Bilder")
     func folderScanCanSkipArtwork() async throws {
         let directory = try conversionTestDirectory()
@@ -2346,23 +2393,6 @@ struct ConversionFileOwnershipTests {
         try data.write(to: cover)
 
         #expect(FFmpegWrapper.loadCoverSnapshot(
-            at: cover,
-            expectedIdentity: expected
-        ) == nil)
-    }
-
-    @Test("Ohne geplante Cover-Identität wird eine später erschienene Datei nicht geladen")
-    func plannedCoverRequiresCapturedIdentity() throws {
-        let directory = try conversionTestDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let cover = directory.appendingPathComponent("cover.png")
-        let expected = FFmpegWrapper.fileSystemIdentity(
-            at: cover,
-            followSymlink: true
-        )
-        try onePixelPNGData().write(to: cover)
-
-        #expect(FFmpegWrapper.loadPlannedCoverSnapshot(
             at: cover,
             expectedIdentity: expected
         ) == nil)

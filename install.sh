@@ -66,6 +66,9 @@ done
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
 
+# shellcheck source=script-helpers.sh
+source "./script-helpers.sh"
+
 # Ein benutzerdefiniertes Testziel darf den späteren Staging-Pfad nicht auf ein
 # breites oder unerwartetes Dateisystemziel lenken. `--no-install` braucht diese
 # Prüfung nicht, weil dieser Modus DEST überhaupt nicht anfasst.
@@ -209,23 +212,16 @@ if [ -d "$DEST/Contents/MacOS" ]; then
 fi
 destination_pids=()
 destination_identities=()
-process_identity() {
-  ps -ww -p "$1" -o lstart= -o command= 2>/dev/null || true
-}
 process_is_original_destination() {
-  local pid="$1" expected="$2" current
-  current="$(process_identity "$pid")"
-  [ -n "$current" ] && [ "$current" = "$expected" ]
+  hoerbuchkloeppler_process_matches_snapshot "$1" "$2" "$DEST_EXECUTABLE"
 }
 while IFS= read -r pid; do
   [ -n "$pid" ] || continue
-  process_command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
-  case "$process_command" in
-    "$DEST_EXECUTABLE"|"$DEST_EXECUTABLE "*)
+  process_snapshot="$(hoerbuchkloeppler_process_snapshot "$pid")"
+  if hoerbuchkloeppler_snapshot_targets_executable "$process_snapshot" "$DEST_EXECUTABLE"; then
       destination_pids+=("$pid")
-      destination_identities+=("$(process_identity "$pid")")
-      ;;
-  esac
+      destination_identities+=("$process_snapshot")
+  fi
 done < <(pgrep -x "$DEST_EXECUTABLE_NAME" 2>/dev/null || true)
 if [ "${#destination_pids[@]}" -gt 0 ]; then
   log "Beende laufende ${APP_NAME}-Instanz aus $DEST"

@@ -35,7 +35,9 @@ cd "$(dirname "$0")"
 APP_NAME="Hörbuchklöppler"
 APP="./${APP_NAME}.app"
 VOLNAME="$APP_NAME"
-VERSION="$(cat VERSION)"
+# shellcheck source=script-helpers.sh
+source "./script-helpers.sh"
+VERSION="$(hoerbuchkloeppler_read_version)"
 # dist/ liegt bewusst AUSSERHALB von build/: build.sh löscht build/ bei jedem
 # App-Build komplett — ein früher notarisiertes DMG unter build/dmg verschwand
 # damit schon beim Start des nächsten Release-Versuchs.

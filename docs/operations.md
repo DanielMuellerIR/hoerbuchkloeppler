@@ -57,9 +57,15 @@ Signatur-, Ticket-, Gatekeeper- und Laufzeitprogramm-Prüfungen. Beim Austausch
 behält es die vorige App bis zur erfolgreichen Prüfung des Installationsziels
 als Backup; schlägt ein nachgelagerter Test fehl, setzt der EXIT-Trap dieses
 Bundle atomar zurück. Eine laufende Ziel-App erhält zuerst SIGTERM und nach fünf
-Sekunden ohne Beendigung SIGKILL.
+Sekunden ohne Beendigung SIGKILL. Registrierung, Startzeit und vollständiges
+Kommando jedes Kandidaten stammen dabei aus einem einzigen `ps`-Snapshot; vor
+jedem Signal muss derselbe Snapshot noch zum exakten Zielprogramm passen.
 `./install.sh --no-notarize` erzeugt und prüft ausschließlich den
 Developer-ID-signierten Test-Build im Projekt-Root und installiert ihn nie.
+
+`build.sh` und `release.sh` lesen `VERSION` über dieselbe strikte Prüfung. Nur
+zwei- oder dreiteilige numerische Versionen sind erlaubt; `release.sh` prüft sie,
+bevor es DMG-, Staging- oder Cleanup-Pfade daraus ableitet.
 
 ## Ausführungsrecht der Binaries
 

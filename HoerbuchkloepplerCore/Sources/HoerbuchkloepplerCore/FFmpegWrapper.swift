@@ -84,6 +84,20 @@ enum ProcessTerminator {
         )
     }
 
+    /// Nach dem Exit des direkten Werkzeugprozesses darf seine besessene
+    /// Prozessgruppe keine Nachkommen mehr enthalten. Ein Wrapper könnte sonst
+    /// den eigentlichen Encoder im Hintergrund weiterlaufen lassen, während die
+    /// bereits teilweise geschriebene Datei als erfolgreich übernommen wird.
+    /// Der Rückgabewert sagt, ob ein solcher Rest gefunden und beendet wurde.
+    @discardableResult
+    static func terminateRemainingOwnedGroup(_ process: Process) -> Bool {
+        guard !process.isRunning,
+              let group = ownedGroup(for: process),
+              groupIsRunning(group) else { return false }
+        terminateAndWait([process])
+        return true
+    }
+
     static func terminateAndWait(
         _ request: TerminationRequest,
         graceInterval: TimeInterval = defaultGraceInterval
@@ -822,23 +836,7 @@ private struct ConversionJob: Sendable {
     let title: String
     let author: String
     let genre: String
-    let coverURL: URL?
-    let coverIdentity: FileSystemIdentity?
     let coverData: Data?
-
-    func replacingCoverData(_ data: Data?) -> ConversionJob {
-        ConversionJob(
-            plan: plan,
-            outputLeases: outputLeases,
-            settings: settings,
-            title: title,
-            author: author,
-            genre: genre,
-            coverURL: nil,
-            coverIdentity: nil,
-            coverData: data
-        )
-    }
 }
 
 /// Liest eine Prozess-Pipe auf genau einer seriellen Queue bis EOF. `waitUntilEOF`
@@ -1287,6 +1285,11 @@ public struct FFmpegWrapper {
                 ProcessTerminator.terminateAndWait([process])
             }
             process.waitUntilExit()
+            // Auch kurze Hilfsaufrufe dürfen keinen vom Wrapper abgekoppelten
+            // Nachkommen im eigenen Prozessbaum zurücklassen. Der aufrufende
+            // Pfad braucht hier keinen eigenen Fehlerfall: Seine Ausgabe bleibt
+            // verwertbar, nachdem der fremde Rest sicher beendet wurde.
+            ProcessTerminator.terminateRemainingOwnedGroup(process)
             // Ein bereits beendeter direkter Prozess kann einen Nachkommen mit
             // geerbtem stdout hinterlassen. Dessen offener Schreibdeskriptor darf
             // den informativen Versions-/MediaInfo-Aufruf nicht endlos blockieren.
@@ -1516,21 +1519,6 @@ public struct FFmpegWrapper {
         return data
     }
 
-    /// Produktionspfad für ein manuell gewähltes Cover: Ohne beim Klick
-    /// erfasste Identität wird keine später am Pfad erschienene Datei geladen.
-    static func loadPlannedCoverSnapshot(
-        at url: URL,
-        expectedIdentity: FileSystemIdentity?,
-        isCancelled: () -> Bool = { false }
-    ) -> Data? {
-        guard let expectedIdentity else { return nil }
-        return loadCoverSnapshot(
-            at: url,
-            expectedIdentity: expectedIdentity,
-            isCancelled: isCancelled
-        )
-    }
-
     @MainActor
     static func coverSnapshotForConversion(_ session: ConversionSession) -> Data? {
         session.embeddedCoverData
@@ -1594,8 +1582,6 @@ public struct FFmpegWrapper {
             // Ein manuell gewähltes Cover wird ausschließlich aus dem beim
             // Auswählen gelesenen Snapshot kodiert. Der sichtbare Pfad bleibt
             // nur UI-Metadatum und darf den Inhalt später nicht austauschen.
-            coverURL: nil,
-            coverIdentity: nil,
             coverData: coverSnapshotForConversion(session)
         )
         let plannedTotalDuration = plannedFiles.reduce(0) { $0 + $1.duration }
@@ -1638,22 +1624,6 @@ public struct FFmpegWrapper {
         session.addLog("Technik: \(modeName) via \(codecInfo)", type: .info)
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let coverData = job.coverURL.flatMap {
-                loadPlannedCoverSnapshot(
-                    at: $0,
-                    expectedIdentity: job.coverIdentity,
-                    isCancelled: { context.isCancelled }
-                )
-            }
-                ?? job.coverData
-            if job.coverURL != nil, coverData == nil, !context.isCancelled {
-                session.enqueueLog(
-                    "⚠️ Gewähltes Cover ist keine unveränderte, reguläre Bilddatei bis 32 MiB; Ausgabe ohne Cover.",
-                    type: .info,
-                    runID: context.id
-                )
-            }
-            let job = job.replacingCoverData(coverData)
             let heldOutputLeases = job.outputLeases
             defer { withExtendedLifetime(heldOutputLeases) {} }
             // Verfolgt, ob ALLE Gruppen erfolgreich waren -- nur dann ist der Lauf
@@ -2026,12 +1996,22 @@ public struct FFmpegWrapper {
                     try? errorPipe.fileHandleForWriting.close()
                     outputReader.start(onChunk: consumeProgress)
                     process.waitUntilExit()
+                    let hadBackgroundProcesses = ProcessTerminator
+                        .terminateRemainingOwnedGroup(process)
                     // Join des Lesers vor Status/Phasenwechsel: Kein Callback aus
                     // diesem Segment darf danach noch Fortschritt einreihen.
                     let stderrData = outputReader.waitUntilEOF(timeout: 0.25) {
                         ProcessTerminator.terminateAndWait([process])
                     }
                     if context.isCancelled { return }
+                    if hadBackgroundProcesses {
+                        session.enqueueLog(
+                            "❌ Segment \(idx+1) ließ nach dem Werkzeug-Exit Hintergrundprozesse zurück; der Batch wird verworfen.",
+                            type: .highlight,
+                            runID: context.id
+                        )
+                        return
+                    }
                     do {
                         // ffmpeg öffnet die URL selbst. Eine während des Lesens
                         // ersetzte oder in-place geänderte Quelle darf deshalb
@@ -2345,7 +2325,8 @@ public struct FFmpegWrapper {
         stagingURL: URL? = nil,
         expectedStagingOwnership: StagingOwnership? = nil,
         stagingHandle: StagingOutputHandle? = nil,
-        beforeProcessStart: (() -> Void)? = nil
+        beforeProcessStart: (() -> Void)? = nil,
+        executableURL: URL? = nil
     ) -> Bool {
         session.enqueueSegmentReset(title: pacmanTitle, runID: context.id)
         if context.isCancelled { return false }
@@ -2353,7 +2334,7 @@ public struct FFmpegWrapper {
         
         // Fehlendes ffmpeg klar melden statt (wie früher) /usr/bin/false zu starten,
         // dessen Exit-Code nur eine irreführende Fehlermeldung produzierte.
-        guard let ffmpegURL = getBinaryURL(name: "ffmpeg") else {
+        guard let ffmpegURL = executableURL ?? getBinaryURL(name: "ffmpeg") else {
             session.enqueueLog(
                 "❌ ffmpeg wurde nicht gefunden (weder gebündelt noch im PATH/Homebrew/MacPorts). Bitte ./build.sh ausführen oder ffmpeg installieren.",
                 type: .highlight,
@@ -2429,10 +2410,20 @@ public struct FFmpegWrapper {
             }
             
             process.waitUntilExit()
+            let hadBackgroundProcesses = ProcessTerminator
+                .terminateRemainingOwnedGroup(process)
             let stderrData = outputReader.waitUntilEOF(timeout: 0.25) {
                 ProcessTerminator.terminateAndWait([process])
             }
             if context.isCancelled { return false }
+            if hadBackgroundProcesses {
+                session.enqueueLog(
+                    "❌ KRITISCHER FEHLER: Werkzeug meldete Exit, ließ aber Hintergrundprozesse zurück. Die Ausgabe wird nicht übernommen.",
+                    type: .highlight,
+                    runID: context.id
+                )
+                return false
+            }
             if process.terminationStatus == 0 {
                 session.enqueueProgress(
                     mappedProgress(
