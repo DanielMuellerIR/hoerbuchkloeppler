@@ -43,6 +43,13 @@ gezielt das passende Dokument greppen/lesen statt alles laden.
   `ffmpeg` auslösen. Deshalb hat `release.sh` bewusst keinen `--publish`-Pfad,
   keinen GitHub-Upload und keinen Tag — bitte auch keinen nachrüsten.
 
+- **`SWIFT_TREAT_WARNINGS_AS_ERRORS` nicht in den Xcode-Build geben.** Xcode
+  setzt bei lokalen Swift-Paketen bereits `-suppress-warnings`; ein zusätzliches
+  `-warnings-as-errors` ergibt eine unzulässige Optionskombination, und der Build
+  bricht ab (belegt 2026-08-29). Warnungen als Fehler deshalb nur in der
+  Swift-Suite prüfen: `swift test -Xswiftc -warnings-as-errors`; `build.sh`
+  fährt den xcodebuild-Pfad ohne den Schalter.
+
 - **Temp-Verzeichnisse nur über Gerät und Inode wiedererkennen.** Die
   Besitzerprüfung eines von `ffmpeg` befüllten Staging-Ordners darf weder
   Verzeichnisgröße noch Zeitstempel vergleichen — beide ändern sich während der
