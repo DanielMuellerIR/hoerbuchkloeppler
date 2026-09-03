@@ -1322,9 +1322,12 @@ struct MetadataAndCLITests {
         let pidFile = directory.appendingPathComponent("media-info.pid")
         let slowTool = directory.appendingPathComponent("langsam")
         let fastTool = directory.appendingPathComponent("schnell")
+        // Die PID atomar einsetzen: `> "$1"` legt die Datei schon vor dem
+        // Schreiben an, und der Test las sie unter Last als leeren String.
         try makeExecutable(slowTool, contents: """
         #!/bin/sh
-        printf '%s' "$$" > "$1"
+        printf '%s' "$$" > "$1.neu"
+        mv "$1.neu" "$1"
         trap 'exit 0' TERM INT
         while :; do /bin/sleep 1; done
         """)
@@ -1342,14 +1345,17 @@ struct MetadataAndCLITests {
             chapterTitle: "Alt"
         ))
 
-        let startDeadline = Date().addingTimeInterval(2)
-        while !FileManager.default.fileExists(atPath: pidFile.path),
-              Date() < startDeadline {
-            try await Task.sleep(for: .milliseconds(10))
+        // Auf eine LESBARE PID warten, nicht nur auf die Existenz der Datei.
+        // Ein ausgelasteter Mac braucht bis zum Start des Werkzeugs länger als
+        // die vorherigen zwei Sekunden.
+        let startDeadline = Date().addingTimeInterval(20)
+        var startedPID: pid_t?
+        while startedPID == nil, Date() < startDeadline {
+            startedPID = (try? String(contentsOf: pidFile, encoding: .utf8))
+                .flatMap { pid_t($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            if startedPID == nil { try await Task.sleep(for: .milliseconds(10)) }
         }
-        let oldPID = try #require(
-            pid_t(String(contentsOf: pidFile, encoding: .utf8))
-        )
+        let oldPID = try #require(startedPID)
         defer {
             if Darwin.kill(oldPID, 0) == 0 {
                 _ = Darwin.kill(oldPID, SIGKILL)
@@ -1364,13 +1370,13 @@ struct MetadataAndCLITests {
             chapterTitle: "Neu"
         ))
 
-        let resultDeadline = Date().addingTimeInterval(2)
+        let resultDeadline = Date().addingTimeInterval(20)
         while session.isFetchingInfo, Date() < resultDeadline {
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(session.selectedFileInfoText.contains("Neue Datei"))
 
-        let exitDeadline = Date().addingTimeInterval(2)
+        let exitDeadline = Date().addingTimeInterval(20)
         while Darwin.kill(oldPID, 0) == 0, Date() < exitDeadline {
             try await Task.sleep(for: .milliseconds(10))
         }
