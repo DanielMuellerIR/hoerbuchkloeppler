@@ -32,6 +32,19 @@ for invalid_version in "$invalid_empty" "$invalid_suffix" "$invalid_path" "$work
   fi
 done
 
+# Die VERSION-Datei ist laut AGENTS.md die einzige Quelle der App-Version.
+# build.sh, install.sh und release.sh stempeln sie über MARKETING_VERSION in den
+# Build. Ein direkter Xcode-Build (Cmd-R) nimmt dagegen den im Projekt
+# hinterlegten Wert — laufen beide auseinander, trägt genau dieser Build eine
+# falsche Versionsnummer, ohne dass es irgendwo auffiele.
+project_versions="$(sed -n 's/^[[:space:]]*MARKETING_VERSION = \(.*\);$/\1/p' \
+  "Hörbuchklöppler.xcodeproj/project.pbxproj" | sort -u)"
+repo_version="$(hoerbuchkloeppler_read_version)"
+if [ "$project_versions" != "$repo_version" ]; then
+  echo "Fehler: MARKETING_VERSION im Xcode-Projekt ('$project_versions') weicht von VERSION ('$repo_version') ab." >&2
+  exit 1
+fi
+
 start="Sun Aug 30 09:47:56 2026"
 target="/Applications/Hörbuchklöppler.app/Contents/MacOS/Hörbuchklöppler"
 snapshot="$start     $target --wiederherstellen"
