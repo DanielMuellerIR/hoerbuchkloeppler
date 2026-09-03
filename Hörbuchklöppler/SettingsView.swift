@@ -92,14 +92,11 @@ struct SettingsView: View {
             .padding().keyboardShortcut(.defaultAction)
         }
         .frame(width: 450)
-        .alert("Einstellungen konnten nicht gespeichert werden", isPresented: Binding(
-            get: { saveError != nil },
-            set: { if !$0 { saveError = nil } }
-        )) {
-            Button("OK") { saveError = nil }
-        } message: {
-            Text(saveError ?? "Unbekannter Fehler")
-        }
+        .errorAlert(
+            "Einstellungen konnten nicht gespeichert werden",
+            message: $saveError,
+            fallback: "Unbekannter Fehler"
+        )
         .onAppear {
             // Local state sync
             isUnlimited = session.settings.maxDurationHours == nil

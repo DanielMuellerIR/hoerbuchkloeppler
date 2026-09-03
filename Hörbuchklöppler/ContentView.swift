@@ -272,30 +272,21 @@ struct ContentView: View {
         .alert("Tools fehlen", isPresented: $showingToolErrorAlert) { Button("OK", role: .cancel) { } } message: {
             Text("Für die Konvertierung werden FFmpeg und MediaInfo benötigt.\n\nBitte installieren Sie Homebrew und führen Sie im Terminal aus:\nbrew install ffmpeg mediainfo")
         }
-        .alert("Import nicht übernommen", isPresented: Binding(
-            get: { session.importErrorMessage != nil },
-            set: { if !$0 { session.importErrorMessage = nil } }
-        )) {
-            Button("OK", role: .cancel) { session.importErrorMessage = nil }
-        } message: {
-            Text(session.importErrorMessage ?? "Unbekannter Analysefehler")
-        }
-        .alert("Konvertierung nicht gestartet", isPresented: Binding(
-            get: { conversionStartError != nil },
-            set: { if !$0 { conversionStartError = nil } }
-        )) {
-            Button("OK", role: .cancel) { conversionStartError = nil }
-        } message: {
-            Text(conversionStartError ?? "Unbekannter Startfehler")
-        }
-        .alert("CLI-Handoff fehlgeschlagen", isPresented: Binding(
-            get: { cliHandoffError != nil },
-            set: { if !$0 { cliHandoffError = nil } }
-        )) {
-            Button("OK", role: .cancel) { cliHandoffError = nil }
-        } message: {
-            Text(cliHandoffError ?? "Das Terminal konnte nicht geöffnet werden.")
-        }
+        .errorAlert(
+            "Import nicht übernommen",
+            message: $session.importErrorMessage,
+            fallback: "Unbekannter Analysefehler"
+        )
+        .errorAlert(
+            "Konvertierung nicht gestartet",
+            message: $conversionStartError,
+            fallback: "Unbekannter Startfehler"
+        )
+        .errorAlert(
+            "CLI-Handoff fehlgeschlagen",
+            message: $cliHandoffError,
+            fallback: "Das Terminal konnte nicht geöffnet werden."
+        )
         .onAppear { checkTools() }
         .frame(minWidth: 850, minHeight: 650) // Fenster etwas höher gemacht (650 statt 550)
         .sheet(isPresented: $showingSettings) { SettingsView(session: session, isPresented: $showingSettings) }
