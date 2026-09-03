@@ -118,7 +118,9 @@ Deshalb laufen alle Terminal-Ausgaben der CLI über `TerminalRenderer` in
 
 ## Schlüssel-Dateien zum Prüfen bei Änderungen
 
-- `FFmpegWrapper.swift` — Kommando-Bau, Größen-Validierung, Prozesse.
+- `FFmpegWrapper.swift` — Kommando-Bau und Kodierpipeline;
+  `ProcessTermination.swift` — Prozessstart und -abbruch;
+  `OutputStaging.swift` — Staging, Sperren, atomare Übernahme, Bereinigung.
 - `ConversionSession.swift` — Lebenszyklus, Thread-sicheres Logging.
 - `KloepplerCLI.swift` — Terminal-Output, ANSI, `--verbose`.
 - `AudioFile+Extensions.swift` — Metadaten/Kapitel/Cover.

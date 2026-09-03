@@ -13,7 +13,7 @@ Core.
 
 ## Execution-Engine
 
-- Externe Tools laufen über `Process()` (`FFmpegWrapper.swift`).
+- Externe Tools laufen über `Process()` (`ProcessTermination.swift`).
 - ffmpeg-Aufrufe **immer mit `-nostdin`** — sonst hängt der Prozess im
   Hintergrund.
 - Binär-Auflösung: Zentraler Helper `FFmpegWrapper.getBinaryURL(name:)` sucht erst im `Bundle.module`, dann in allen Pfaden der Umgebungsvariablen `$PATH` und schließlich in typischen macOS Standardordnern (`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`).
@@ -73,7 +73,9 @@ Symbolnamen als Anker (bewusst **ohne** Zeilennummern — die driften bei jeder
 
 | Datei | Zuständigkeit | Schlüssel-Symbole |
 |---|---|---|
-| `FFmpegWrapper.swift` | Zentraler Ausgabeplan, unveränderlicher Worker-Snapshot, atomare Partial→Ziel-Übernahme, Prozessausführung, Concat/Muxing, laufbezogene Cancellation | `ConversionJob` · `makeConversionPlan` · `convert(session:plan:)` · `commitStagedOutput` · `performSequentialConversion` · `performParallelConversion` · `runFinalProcess` · `splitAudioFilesIfNeeded` · `ProcessTerminator.wait(upTo:while:)` (gemeinsame Prozess-Frist, auch von `AudioFile+Extensions` genutzt) |
+| `FFmpegWrapper.swift` | Kodierpipeline und Laufsteuerung: Ausgabeplan, laufbezogener Besitz von Prozessen und Zwischendateien, Segment- und Muxing-Schritte | `ConversionPlan` · `ConversionContext` · `ConversionJob` · `makeConversionPlan` · `validateConversionPlan` · `convert(session:plan:)` · `performSequentialConversion` · `performParallelConversion` · `runFinalProcess` · `splitAudioFilesIfNeeded` |
+| `ProcessTermination.swift` | Prozess-Lebenszyklus: Werkzeugprozesse starten, ihre Ausgabe lesen, zweistufig (TERM→KILL) samt Prozessgruppe beenden, Tool-Auflösung | `ProcessTerminator` · `wait(upTo:while:)` · `terminateAndWait` · `ToolProcessContext` · `ProcessPipeReader` · `getBinaryURL` · `runCapturedProcess` |
+| `OutputStaging.swift` | Dateisystem-Sicherheitsgrenze: Eintrag über Gerät und Inode wiedererkennen, exklusiv anlegen, prozessübergreifend sperren, atomar ins Ziel tauschen, nur nachweislich Eigenes bereinigen | `FileSystemIdentity` · `StagingOwnership` · `OutputLeaseSet` · `acquireOutputLeases` · `createProtectedStagingOutput` · `commitStagedOutput` · `removeOrphanedStagedOutputs` · `removeOwnedTempDirectory` |
 | `CLIInvocation.swift` | Vollständiger, POSIX-shell-sicherer GUI→CLI-Handoff | `CLIInvocation.arguments` · `shellCommand` |
 | `ConversionSession.swift` | Main-Actor-isolierter Lebenszyklus und `@Published`-State, gemeinsame Pfad-/Symlink-Auflösung, atomarer und abbrechbarer asynchroner Import, Worker→UI-Nachrichten | `FoundFile` · `AudioLoadResult` · `beginImport` · `finishImport` · `foundFile(at:)` · `deduplicateFoundFiles` · `loadAudioFiles` · `processIncomingFiles` · `scanFolder` · `prepareFolder` · `addFolder` · `addLog` |
 | `AudioSettings.swift` | Einstellungs-Struct (`Codable`) | Felder → [settings.md](settings.md) |
