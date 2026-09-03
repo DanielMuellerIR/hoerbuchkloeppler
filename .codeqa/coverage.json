@@ -105,12 +105,14 @@
       "id": "conversion-engine",
       "paths": [
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift",
-        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/FFmpegWrapperTests.swift"
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/FFmpegWrapperTests.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ProcessTermination.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/OutputStaging.swift"
       ],
       "risk": "critical",
       "priority": 2,
       "reason": "Datenintegrität, externe Prozesse, Parallelität, Abbruch und atomare Ausgabedateien",
-      "state": "completed",
+      "state": "pending",
       "last_run": {
         "campaign_id": "20260903T102818420748+0200",
         "completed_at": "2026-09-03T10:52:26+02:00",
@@ -123,7 +125,11 @@
         "tests": [
           "swift test -Xswiftc -warnings-as-errors: 201/201 passed"
         ]
-      }
+      },
+      "pending_paths": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ProcessTermination.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/OutputStaging.swift"
+      ]
     },
     {
       "id": "cli-frontend",
