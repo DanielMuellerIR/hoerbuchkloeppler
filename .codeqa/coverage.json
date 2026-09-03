@@ -2,11 +2,12 @@
   "schema_version": 2,
   "project": "Hoerbuchkloeppler",
   "campaign": {
-    "id": "20260830T095802250952+0200",
+    "id": "20260903T102818420748+0200",
     "token_budget": 3000000,
     "status": "complete",
-    "started_at": "2026-08-30T09:58:02+02:00",
-    "finished_at": "2026-08-30T10:01:47+02:00",
+    "started_at": "2026-09-03T10:28:18+02:00",
+    "tokens_spent": 365987,
+    "finished_at": "2026-09-03T10:57:11+02:00",
     "finish_reason": "all-current"
   },
   "campaign_history": [
@@ -35,6 +36,14 @@
       "started_at": "2026-08-29T20:42:40+02:00",
       "tokens_spent": 1296017,
       "finished_at": "2026-08-29T21:46:14+02:00",
+      "finish_reason": "all-current"
+    },
+    {
+      "id": "20260830T095802250952+0200",
+      "token_budget": 3000000,
+      "status": "complete",
+      "started_at": "2026-08-30T09:58:02+02:00",
+      "finished_at": "2026-08-30T10:01:47+02:00",
       "finish_reason": "all-current"
     }
   ],
@@ -79,16 +88,16 @@
       "reason": "Bekannte SIGINT-Lücke in der Vorbereitungsphase sowie zentraler Main-Actor-, Import- und Metadatenzustand",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260830T095802250952+0200",
-        "completed_at": "2026-08-30T09:58:24+02:00",
-        "observed_head": "3fe4c82a4dbf3592d7d8d5d1d7e574d1fdbb794a",
-        "content_sha256": "c02f76df51268e7a95eb257180a2a2e9475270c7bd7f5d074d9dedff3f47dc12",
+        "campaign_id": "20260903T102818420748+0200",
+        "completed_at": "2026-09-03T10:30:21+02:00",
+        "observed_head": "18b72e77e229a14735e432a3e3f004758666c55e",
+        "content_sha256": "efb132c869b91023059712fe80ae54910323f77c0badb966eaf90cfcf538f290",
         "file_count": 1,
         "review": "delta-plus-boundaries",
-        "outcome": "reviewed-clean",
-        "summary": "Import-Deltas und Lebenszyklusgrenzen geprüft: Providerfehler gelangen typisiert in denselben atomaren Batch wie Analysefehler; Fehler und Abbruch verändern die bestehende CLI-Abbildung nicht; nur eine tatsächlich laufende, durch beginImport entwertete Artwork-Suche wird auf dem unveränderten sichtbaren Bestand neu gestartet. Token-, Cover-Revision-, manuelle-Cover- und Alle-löschen-Grenzen bleiben wirksam.",
+        "outcome": "improved",
+        "summary": "Doppelter Task-Registrierungsvertrag in awaitRegisteredTask und doppelter Import-Abbruchpfad in abandonPendingImport zusammengeführt; Dubletten-Meldung für einen mehrfach gelieferten Pfad korrigiert",
         "tests": [
-          "Gezielte Provider-, CLI-Zustands- und Artwork-Neustarttests sowie vollständiger Lauf mit 199 Tests bestanden; Release-Core/App-Build 1.3.1 bestanden."
+          "swift test -Xswiftc -warnings-as-errors: 201/201 passed"
         ]
       }
     },
@@ -103,16 +112,16 @@
       "reason": "Datenintegrität, externe Prozesse, Parallelität, Abbruch und atomare Ausgabedateien",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260830T095802250952+0200",
-        "completed_at": "2026-08-30T09:58:46+02:00",
-        "observed_head": "3fe4c82a4dbf3592d7d8d5d1d7e574d1fdbb794a",
-        "content_sha256": "9b6444dd5d21635d83de2d29f0551271b6d3b597b8e132de1d40edbf7cbbc5ae",
+        "campaign_id": "20260903T102818420748+0200",
+        "completed_at": "2026-09-03T10:52:26+02:00",
+        "observed_head": "ed4227b33129590125968fd4433d082e9c5179e8",
+        "content_sha256": "d34acc4d5933b445c6ca4ff70c46d81fba76c5ef49b00f9ff92a44c7dfe35f36",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Prozess-, Commit- und Cover-Deltas geprüft: Final- und Parallelsegmentpfad prüfen nach dem Leader-Exit dieselbe noch registrierte Prozessgruppe, beenden Reste vor Status-/Dateiprüfungen und verweigern die Übernahme. Der allgemeine Capture-Pfad räumt dieselbe Gruppe vor dem Pipe-Join auf. Der tote Cover-Pfad ist vollständig entfernt; der Worker besitzt nur noch den vor Start aufgenommenen Datensnapshot.",
+        "summary": "Nachbuchung des Querschnitts-Diffs: vier Fristschleifen durch ProcessTerminator.wait ersetzt, Testprozess auf Schlafschleife umgestellt — beides in diesem Lauf verifiziert",
         "tests": [
-          "Hintergrund-Encoder-Regression fünfmal stabil; vollständige 199-Test-Suite und Release-Build bestanden; tote Cover-Symbole fehlen im Produkt- und Testcode."
+          "swift test -Xswiftc -warnings-as-errors: 201/201 passed"
         ]
       }
     },
@@ -126,16 +135,17 @@
       "reason": "Signalbehandlung, Fehler-Exit-Codes, Eingabevalidierung und skriptfähige Ausgabe",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:31:48+02:00",
-        "observed_head": "c47696359cd89493efe995e82b71425c1373a268",
-        "content_sha256": "d00377b38beced739a37ae764014f1694124969ea5478f3c316404e99e4d5ee1",
+        "campaign_id": "20260903T102818420748+0200",
+        "completed_at": "2026-09-03T10:39:32+02:00",
+        "observed_head": "a3e44676e3e6c2bc0d5464db601cb4b7bb1164d8",
+        "content_sha256": "c47f7878c67dbfd0a5b1ed46a4194badc28e10cc53bcc87c00f31dc58eff9619",
         "file_count": 1,
         "review": "delta-plus-boundaries",
-        "outcome": "reviewed-clean",
-        "summary": "Die bereits verifizierte Weitergabe der Cover-Analyseoption und ihre CLI-Priorität gegen --cover/--no-cover nachgeprüft; keine weitere Abweichung gefunden.",
+        "outcome": "improved",
+        "summary": "Ausgabeziel-Auflösung aus execute in resolveOutputFile extrahiert; neun getrennte Paare aus stderr-Meldung und Exit-Code zu reportedFailure zusammengezogen",
         "tests": [
-          "swift test: 192 Tests grün; reale CLI-Konvertierung mit --no-cover grün; CLI-Delta vollständig geprüft"
+          "swift test -Xswiftc -warnings-as-errors: 201/201 passed",
+          "CLI-Matrix: 3 --output-Zweige erfolgreich, 6 Fehlerpfade mit Exit 1 und unveränderter stderr-Meldung"
         ]
       }
     },
@@ -174,16 +184,16 @@
       "reason": "AVFoundation-Analyse, Kapitelimport und externe ffmpeg-Prozessgrenze",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260829T204240680364+0200",
-        "completed_at": "2026-08-29T21:45:38+02:00",
-        "observed_head": "4306795e724145d07569bcbdb89bd2e6c872ff76",
-        "content_sha256": "b1c2f56145b8d9d765b7fe8f5d9148ef6e16cb464c4d33d852d90e4fc346cecb",
+        "campaign_id": "20260903T102818420748+0200",
+        "completed_at": "2026-09-03T10:52:27+02:00",
+        "observed_head": "ed4227b33129590125968fd4433d082e9c5179e8",
+        "content_sha256": "444b3b1847b819fb084a74655636c57a179eb8dd723ceefd0e1f4e66f3e4d2f4",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Geänderten Kapitelextraktionspfad und seine Grenzen nachgeprüft: Der neue Hook läuft erst nach URL- und Abbruchprüfung, verändert ohne explizite Testinjektion weder ffmpeg-Pfad noch Argumente und lässt Start, Prozessgruppenregistrierung, Pipe-Leser und Cancellation-Handler unverändert.",
+        "summary": "Nachbuchung: waitForProcessExit nutzt jetzt ProcessTerminator.wait; Frist- und Klemmregel der Kapitelanalyse unverändert, restliche Datei im Projekt-Review 2026-09-03 vollständig gelesen",
         "tests": [
-          "Neuer echter Prozessabbruchtest fünfmal stabil; vollständiger Core-Lauf mit 196 Tests; Swift-Release-Build; git diff --check."
+          "swift test -Xswiftc -warnings-as-errors: 201/201 passed"
         ]
       }
     },
@@ -275,16 +285,16 @@
       "reason": "Breite Querschnittstests für Laufzeit, Import, Einstellungen und Tool-Auflösung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260830T095802250952+0200",
-        "completed_at": "2026-08-30T10:00:44+02:00",
-        "observed_head": "457f37694bb22fe57f9c5bc92c1238632b9b2b0e",
-        "content_sha256": "fd1ba9668191de8b148ea4469fbb43da2c989423c308854b42aef651cb7a7f56",
+        "campaign_id": "20260903T102818420748+0200",
+        "completed_at": "2026-09-03T10:53:52+02:00",
+        "observed_head": "70356e917db36b67f238223c425ca34d7c35f3a0",
+        "content_sha256": "68749949f1b69aad8ed90803bacc5d433f82378fb241a46d268d8a1546ed89c0",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Neue Review-Regressionen und ihre Fehlerpfade geprüft und gehärtet: Die Shell-Suite deckt nun neben gültigen Versionen auch fehlende, leere, suffigierte und pfadartige Werte ab und beweist, dass eine wiederverwendete PID mit geändertem Snapshot abgelehnt wird. Der Hintergrund-Encoder-Test beendet seinen Kindprozess jetzt auch bei einer vorzeitigen Assertion oder einem Leseproblem.",
+        "summary": "Wächter ergänzt: MARKETING_VERSION im Xcode-Projekt muss der VERSION-Datei entsprechen, sonst stempelt ein direkter Xcode-Build still eine falsche Version",
         "tests": [
-          "test_scripts.sh fünfmal bestanden; Hintergrund-Encoder-Test nach der Cleanup-Härtung bestanden und kompiliert; git diff --check bestanden."
+          "./test_scripts.sh grün; mit testweise abweichender VERSION Exit 1 mit beiden Werten in der Meldung"
         ]
       }
     },
@@ -296,23 +306,24 @@
         "Hörbuchklöppler/MetadataSelectionView.swift",
         "Hörbuchklöppler/SettingsView.swift",
         "Hörbuchklöppler/Hörbuchklöppler.swift",
-        "Hörbuchklöppler/info.plist"
+        "Hörbuchklöppler/info.plist",
+        "Hörbuchklöppler/ErrorAlert.swift"
       ],
       "risk": "medium",
       "priority": 10,
       "reason": "Dünne SwiftUI-Schicht, Datei-Drop, Exportplanung und Sitzungsdarstellung",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260830T095802250952+0200",
-        "completed_at": "2026-08-30T10:01:02+02:00",
-        "observed_head": "457f37694bb22fe57f9c5bc92c1238632b9b2b0e",
-        "content_sha256": "0d930df1944bf6bb841d9cc765cbc146f5f20ae938351aeb0de10de6afe113ea",
-        "file_count": 6,
+        "campaign_id": "20260903T102818420748+0200",
+        "completed_at": "2026-09-03T10:43:51+02:00",
+        "observed_head": "8a1d743a8cd02e6bd9e1448a850fa4c22ee18bbf",
+        "content_sha256": "d6e823b40d2254328302156b9645f35e79affe978558bd2ae646c9b6e065d6de",
+        "file_count": 7,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "SwiftUI-Dropdelta und Frontendgrenzen geprüft: Jeder Provider behält seine stabile Batchposition; nil-URL oder Fehler wird auf dem Main Actor als typisierter Batchfehler gestagt und genau einmal abgeschlossen. Erfolgreiche Provider laufen unverändert durch den tokengebundenen Importtask; der bestehende Fehlerdialog zeigt die gemeinsame atomare Verwerfungsbegründung. Andere Views und Session-Bindungen bleiben unberührt.",
+        "summary": "Nachbuchung der im selben Lauf ergänzten ErrorAlert.swift: 26 Zeilen, ein View-Modifier ohne eigenen Zustand, vier Aufrufer geprüft",
         "tests": [
-          "Vollständiger xcodebuild-Pfad über ./build.sh kompilierte die SwiftUI-App 1.3.1; Provider-Batch-Regression in der 199-Test-Suite bestanden. Kein manueller GUI-Lauf, da ein fokussierender App-Start ohne Zustimmung laut Projektregel unterbleibt."
+          "xcodebuild -configuration Release: BUILD SUCCEEDED"
         ]
       }
     },
@@ -342,13 +353,13 @@
     }
   ],
   "architecture": {
-    "campaign_id": "20260830T095802250952+0200",
-    "recorded_at": "2026-08-30T09:58:02+02:00",
-    "observed_head": "3fe4c82a4dbf3592d7d8d5d1d7e574d1fdbb794a",
-    "summary": "Das Paradigma passt weiterhin zu den zwei Frontends und hält Import sowie Konvertierung in einem gemeinsamen Core konsistent. ConversionSession und FFmpegWrapper bleiben jedoch große Verantwortungszentren; die neuen Änderungen extrahieren Shell-Verträge und Artwork-Startlogik, ohne eine riskante Paradigma-Umstellung zu rechtfertigen.",
+    "campaign_id": "20260903T102818420748+0200",
+    "recorded_at": "2026-09-03T10:56:59+02:00",
+    "observed_head": "919db7c4d5fe782603d41916b2e7145b0c26546b",
+    "summary": "Das Paradigma trägt weiterhin: Beide Frontends teilen sich denselben Core, und die Sicherheitsgrenzen liegen sauber an den POSIX-Aufrufen. Gespannt bleibt es an zwei Stellen: FFmpegWrapper.swift hat 4052 Zeilen und vereint Prozessterminierung, Staging/Commit, Altlastenbereinigung und die Kodierpipeline; ConversionSession.swift hat 2099 Zeilen und vereint Importlebenszyklus, Metadaten, Artwork und die Worker-Brücke. Diese Kampagne hat dort nur gemeinsame Verträge herausgezogen (Prozess-Frist, Sperren-Freigabe, Verzeichnis-Deskriptor, versteckte Nachbarnamen, Task-Registrierung) statt die Zentren aufzuteilen.",
     "paradigm": "Gemeinsamer Swift-Core mit MainActor-Sitzungsmodell, dünnen SwiftUI-/CLI-Frontends und POSIX-/Shell-Sicherheitsgrenzen für Prozesse, Dateien, Installation und Release",
     "fit": "gespannt",
-    "recommendation": "Weiterhin kleine, belegte Extraktionen an stabilen Vertragsgrenzen bevorzugen; keine großflächige Neuschreibung."
+    "recommendation": "Kein Paradigmenwechsel. Der nächste sinnvolle Schritt wäre, FFmpegWrapper.swift entlang der bereits sichtbaren Nähte in drei Dateien zu trennen (Prozessterminierung, Staging/Commit/Bereinigung, Kodierpipeline) — der Nutzen ist Lesbarkeit und getrennte Testbarkeit, das Risiko liegt in der sicherheitskritischen Bereinigungslogik. Das braucht einen eigenen Auftrag mit eigenem Budget, nicht den Rand einer CodeQA-Kampagne."
   },
   "themes": [
     {
@@ -635,6 +646,52 @@
         "summary": "Bestätigt und testseitig verbessert: AudioLoadResult trennt Skip, typisierten Analysefehler und Abbruch. GUI-Batches werden bei einem Fehler atomar verworfen; die CLI verwendet dieselbe Fehlerliste. Ein neuer Test belegt, dass Skip akzeptierte Dateien erhält, Abbruch den Batch ohne falsche Fehlermeldung verwirft.",
         "tests": [
           "Policy-Test für Fehler sowie neuer Skip-/Abbruchtest grün; swift test: 194 Tests grün; realer CLI-Mischordner: Exit 1 und keine Ausgabe"
+        ]
+      }
+    },
+    {
+      "id": "process-exit-deadline-wait",
+      "summary": "Das Warten auf ein Prozessende mit Frist ist viermal einzeln implementiert (ProcessTerminator zweimal, runCapturedProcess, AudioFile.waitForProcessExit) — mit drei verschiedenen Überlauf-/Klemmregeln für die Deadline; ein gemeinsamer Helfer macht die Fristsemantik an einer Stelle prüfbar",
+      "evidence": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift"
+      ],
+      "priority": 2,
+      "state": "completed",
+      "noted_at": "2026-09-03T10:30:50+02:00",
+      "campaign_id": "20260903T102818420748+0200",
+      "started_at": "2026-09-03T10:44:29+02:00",
+      "completed": {
+        "campaign_id": "20260903T102818420748+0200",
+        "completed_at": "2026-09-03T10:45:53+02:00",
+        "observed_head": "9e0dcf1066a6f070e93bbd82079765af91fbf2e1",
+        "summary": "Vier Fristschleifen auf ein Prozessende in ProcessTerminator.wait(upTo:while:) gebündelt; Deadline-Überlaufschutz und Klemmung der Sekundenangabe gelten jetzt an allen vier Stellen, die Fristen selbst bleiben bei den Aufrufern",
+        "tests": [
+          "swift test -Xswiftc -warnings-as-errors: 201/201 passed",
+          "End-to-End: SIGINT-Abbruch Exit 130 ohne Reste, Parallellauf Exit 0"
+        ]
+      }
+    },
+    {
+      "id": "sigterm-resistant-test-processes",
+      "summary": "Beide Tests für SIGTERM-resistente Werkzeuge starten ihr Kind als Busy-Loop (while :; do :; done) und sättigen dabei je einen Kern, solange die übrige Suite parallel läuft; das macht die zeitkritischen Joins derselben und anderer Tests unter Last unzuverlässig",
+      "evidence": [
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ReviewFixTests.swift",
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/FFmpegWrapperTests.swift"
+      ],
+      "priority": 3,
+      "state": "completed",
+      "noted_at": "2026-09-03T10:40:28+02:00",
+      "campaign_id": "20260903T102818420748+0200",
+      "started_at": "2026-09-03T10:46:22+02:00",
+      "completed": {
+        "campaign_id": "20260903T102818420748+0200",
+        "completed_at": "2026-09-03T10:51:56+02:00",
+        "observed_head": "ed4227b33129590125968fd4433d082e9c5179e8",
+        "summary": "Beide SIGTERM-resistenten Testprozesse schlafen jetzt in 50-ms-Schritten statt einen Kern zu sättigen; SIGTERM-Resistenz und Aussagekraft beider Tests nachgewiesen unverändert",
+        "tests": [
+          "8 vollständige swift-test-Läufe unter zwölffacher CPU-Sättigung: alle 201/201 grün",
+          "Gegenprobe mit lahmgelegter SIGKILL-Eskalation: Abbruchtest rot, Timeout-Test grün — wie mit der alten Fassung"
         ]
       }
     }
