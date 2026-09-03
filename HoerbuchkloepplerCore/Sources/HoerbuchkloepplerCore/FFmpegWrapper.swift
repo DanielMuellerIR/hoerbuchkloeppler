@@ -411,11 +411,7 @@ final class OutputLeaseSet: @unchecked Sendable {
 
     deinit {
         for descriptor in descriptors {
-            var fileLock = flock()
-            fileLock.l_type = Int16(F_UNLCK)
-            fileLock.l_whence = Int16(SEEK_SET)
-            _ = Darwin.fcntl(descriptor, F_SETLK, &fileLock)
-            _ = Darwin.close(descriptor)
+            FFmpegWrapper.releaseOutputLock(descriptor)
         }
         FFmpegWrapper.releaseInProcessOutputPaths(canonicalPaths)
     }
@@ -1117,11 +1113,7 @@ public struct FFmpegWrapper {
 
         func releaseAcquiredDescriptors() {
             for descriptor in descriptors {
-                var fileLock = flock()
-                fileLock.l_type = Int16(F_UNLCK)
-                fileLock.l_whence = Int16(SEEK_SET)
-                _ = Darwin.fcntl(descriptor, F_SETLK, &fileLock)
-                _ = Darwin.close(descriptor)
+                releaseOutputLock(descriptor)
             }
             descriptors.removeAll()
             releaseInProcessOutputPaths(canonicalPaths)
@@ -1163,6 +1155,43 @@ public struct FFmpegWrapper {
             descriptors: descriptors,
             canonicalPaths: canonicalPaths
         )
+    }
+
+    /// Gibt eine `fcntl`-Sperre frei und schließt ihren Deskriptor. Der
+    /// Rückzug nach einem misslungenen Sperrsatz und das reguläre Ende über
+    /// `OutputLeaseSet.deinit` müssen exakt dasselbe tun; sonst bliebe auf einem
+    /// der beiden Wege eine Sperre oder ein Deskriptor stehen.
+    static func releaseOutputLock(_ descriptor: Int32) {
+        var fileLock = flock()
+        fileLock.l_type = Int16(F_UNLCK)
+        fileLock.l_whence = Int16(SEEK_SET)
+        _ = Darwin.fcntl(descriptor, F_SETLK, &fileLock)
+        _ = Darwin.close(descriptor)
+    }
+
+    /// Öffnet genau den benannten Ordner als Deskriptor. `O_DIRECTORY` weist
+    /// eine untergeschobene Datei ab, `O_NOFOLLOW` einen untergeschobenen
+    /// Symlink — an dieser Flagkombination hängt die gesamte gebundene
+    /// Bereinigung, deshalb steht sie nur an einer Stelle.
+    static func openOwnedDirectory(_ url: URL) -> Int32 {
+        url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return Darwin.open(
+                path,
+                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
+            )
+        }
+    }
+
+    /// Entfernt einen leeren Ordnereintrag. Bewusst `rmdir` statt
+    /// `removeItem`: Wurde der sichtbare Pfad nach dem gebundenen Leeren
+    /// ausgetauscht, bleibt ein Ersatz mit Inhalt stehen, statt rekursiv
+    /// gelöscht zu werden.
+    @discardableResult
+    static func removeEmptyDirectory(_ url: URL) -> Int32 {
+        url.withUnsafeFileSystemRepresentation { path in
+            path.map(Darwin.rmdir) ?? -1
+        }
     }
 
     static func releaseInProcessOutputPaths(_ paths: [String]) {
@@ -2533,10 +2562,10 @@ public struct FFmpegWrapper {
         id: UUID = UUID(),
         ownerPID: pid_t = ProcessInfo.processInfo.processIdentifier
     ) -> URL {
-        let parent = finalURL.deletingLastPathComponent()
-        let ext = finalURL.pathExtension.isEmpty ? "m4b" : finalURL.pathExtension
-        let basename = stagingBasename(for: finalURL)
-        return parent.appendingPathComponent(".\(basename).partial-\(ownerPID)-\(id.uuidString)").appendingPathExtension(ext)
+        return hiddenSiblingURL(
+            for: finalURL,
+            marker: "partial-\(ownerPID)-\(id.uuidString)"
+        )
     }
 
     /// Legt den späteren ffmpeg-Output exklusiv an und markiert genau diesen
@@ -2893,14 +2922,7 @@ public struct FFmpegWrapper {
         temporaryDirectoryOwnerPID(directory) == ownership.ownerPID else {
             return false
         }
-        let descriptor = directory.withUnsafeFileSystemRepresentation {
-            path -> Int32 in
-            guard let path else { return -1 }
-            return Darwin.open(
-                path,
-                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
-            )
-        }
+        let descriptor = openOwnedDirectory(directory)
         guard descriptor >= 0 else { return false }
         var boundInformation = stat()
         let boundMatches = Darwin.fstat(descriptor, &boundInformation) == 0
@@ -2926,22 +2948,28 @@ public struct FFmpegWrapper {
               identity.matchesDirectoryEntry(stillVisible) else {
             return false
         }
-        let removed = directory.withUnsafeFileSystemRepresentation { path in
-            path.map(Darwin.rmdir) ?? -1
-        }
+        let removed = removeEmptyDirectory(directory)
         return removed == 0 || errno == ENOENT
+    }
+
+    /// Gemeinsame Ableitung aller versteckten Nachbarnamen neben einem Ziel:
+    /// führender Punkt, der auf `NAME_MAX` gekürzte Basisname, der jeweilige
+    /// Marker und die Endung des Ziels. Staging- und Recovery-Namen dürfen sich
+    /// nur im Marker unterscheiden — sonst greifen die Sweeps daneben, die
+    /// genau an diesem Aufbau erkennen, was ihnen gehört.
+    private static func hiddenSiblingURL(for finalURL: URL, marker: String) -> URL {
+        let parent = finalURL.deletingLastPathComponent()
+        let ext = finalURL.pathExtension.isEmpty ? "m4b" : finalURL.pathExtension
+        return parent
+            .appendingPathComponent(".\(stagingBasename(for: finalURL)).\(marker)")
+            .appendingPathExtension(ext)
     }
 
     /// Recovery-Namen liegen bewusst außerhalb des `.partial-<PID>-`-Schemas:
     /// Die Altlastenbereinigung darf einen nach Rollback-Fehler geretteten
     /// fremden Eintrag auch nach einem Neustart niemals automatisch entfernen.
     static func recoveryOutputURL(for finalURL: URL, id: UUID = UUID()) -> URL {
-        let parent = finalURL.deletingLastPathComponent()
-        let ext = finalURL.pathExtension.isEmpty ? "m4b" : finalURL.pathExtension
-        let basename = stagingBasename(for: finalURL)
-        return parent.appendingPathComponent(
-            ".\(basename).recovery-\(id.uuidString)"
-        ).appendingPathExtension(ext)
+        return hiddenSiblingURL(for: finalURL, marker: "recovery-\(id.uuidString)")
     }
 
     private static func preserveRecoveryEntry(
@@ -3337,14 +3365,7 @@ public struct FFmpegWrapper {
             if !recoveryDirectoryCreated {
                 // Ohne gültige Besitzerdatei nimmt kein automatischer Sweep
                 // diesen nicht eindeutig eigenen Eintrag mehr auf.
-                let descriptor = cleanupDirectory
-                    .withUnsafeFileSystemRepresentation { path -> Int32 in
-                        guard let path else { return -1 }
-                        return Darwin.open(
-                            path,
-                            O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
-                        )
-                    }
+                let descriptor = openOwnedDirectory(cleanupDirectory)
                 if descriptor >= 0 {
                     var information = stat()
                     if Darwin.fstat(descriptor, &information) == 0,
@@ -3598,9 +3619,7 @@ public struct FFmpegWrapper {
         } catch {
             // Das exklusiv erzeugte Blatt ist bei fehlgeschlagenem Marker noch
             // leer. `rmdir` kann deshalb keine untergeschobenen Inhalte löschen.
-            _ = url.withUnsafeFileSystemRepresentation { path in
-                path.map(Darwin.rmdir) ?? -1
-            }
+            _ = removeEmptyDirectory(url)
             throw error
         }
     }
@@ -3876,13 +3895,7 @@ public struct FFmpegWrapper {
             return
         }
         beforeBoundRemoval?()
-        let descriptor = quarantine.withUnsafeFileSystemRepresentation { path -> Int32 in
-            guard let path else { return -1 }
-            return Darwin.open(
-                path,
-                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW
-            )
-        }
+        let descriptor = openOwnedDirectory(quarantine)
         guard descriptor >= 0 else { return }
         var boundInformation = stat()
         let boundMatches = Darwin.fstat(descriptor, &boundInformation) == 0
@@ -3907,9 +3920,7 @@ public struct FFmpegWrapper {
                 return
             }
             _ = Darwin.close(descriptor)
-            _ = quarantine.withUnsafeFileSystemRepresentation { path in
-                path.map(Darwin.rmdir) ?? -1
-            }
+            _ = removeEmptyDirectory(quarantine)
             return
         }
         let emptied = removeDirectoryContentsBound(to: descriptor)
@@ -3917,9 +3928,7 @@ public struct FFmpegWrapper {
         guard emptied else { return }
         // `rmdir` ist absichtlich nicht rekursiv: Wurde der sichtbare Pfad nach
         // dem gebundenen Leeren ausgetauscht, bleibt ein Ersatz mit Inhalt stehen.
-        _ = quarantine.withUnsafeFileSystemRepresentation { path in
-            path.map(Darwin.rmdir) ?? -1
-        }
+        _ = removeEmptyDirectory(quarantine)
     }
 
     public static func cleanupOldTempDirectories() {
