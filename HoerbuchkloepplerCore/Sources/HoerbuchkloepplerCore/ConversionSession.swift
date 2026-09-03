@@ -503,8 +503,26 @@ public final class ConversionSession: ObservableObject, Identifiable {
     public nonisolated func runPreparationTask(
         _ operation: @escaping @MainActor @Sendable () async -> Void
     ) async {
+        // Den Context VOR dem Task lesen: Ein gleichzeitiges `beginPreparation`
+        // darf den Task nicht beim Nachfolger registrieren, der ihn bei einem
+        // späteren Abbruch für seine eigene Arbeit hielte.
         let context = currentPreparationContext()
-        let task = Task { @MainActor in await operation() }
+        await awaitRegisteredTask(
+            Task { @MainActor in await operation() },
+            in: context
+        )
+    }
+
+    /// Gemeinsamer Registrierungsvertrag beider Task-Einstiege: den Task beim
+    /// übergebenen Context anmelden, auf sein Ende warten und ihn danach wieder
+    /// abmelden. Ein Context, der den Abbruch bereits gewonnen hat, liefert
+    /// keine Registrierung mehr; der Task wird dann sofort gecancelt, der
+    /// Aufrufer wartet aber trotzdem auf dessen sauberes Ende — sonst kehrte
+    /// die CLI mit Exit 130 zurück, während noch Arbeit läuft.
+    private nonisolated func awaitRegisteredTask(
+        _ task: Task<Void, Never>,
+        in context: PreparationContext?
+    ) async {
         guard let context else {
             await task.value
             return
@@ -528,21 +546,13 @@ public final class ConversionSession: ObservableObject, Identifiable {
     ) async {
         guard isCurrentImport(token) else { return }
         let context = currentPreparationContext()
-        let task = Task { @MainActor [weak self] in
-            guard let self, self.isCurrentImport(token) else { return }
-            await operation()
-        }
-        guard let context else {
-            await task.value
-            return
-        }
-        guard let registration = context.registerTaskCancellation({ task.cancel() }) else {
-            task.cancel()
-            await task.value
-            return
-        }
-        await task.value
-        context.unregisterTaskCancellation(registration)
+        await awaitRegisteredTask(
+            Task { @MainActor [weak self] in
+                guard let self, self.isCurrentImport(token) else { return }
+                await operation()
+            },
+            in: context
+        )
     }
 
     /// Vollständiger CLI-Ordnerimport als abbrechbarer Vorbereitungstask.
@@ -1050,10 +1060,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         pendingImportOperations -= 1
         guard pendingImportOperations == 0 else { return }
         if pendingImportWasCancelled {
-            let shouldResumeArtworkSearch = pendingImportShouldResumeArtworkSearch
-            isImporting = false
-            clearPendingImportBatch()
-            if shouldResumeArtworkSearch { startArtworkSearch() }
+            abandonPendingImport()
             return
         }
         if !pendingImportFailures.isEmpty {
@@ -1061,10 +1068,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
             pendingImportFailures.forEach { addLog($0.logMessage, type: .highlight) }
             lastImportFailures = pendingImportFailures
             importErrorMessage = Self.importFailureMessage(pendingImportFailures)
-            let shouldResumeArtworkSearch = pendingImportShouldResumeArtworkSearch
-            isImporting = false
-            clearPendingImportBatch()
-            if shouldResumeArtworkSearch { startArtworkSearch() }
+            abandonPendingImport()
             return
         }
 
@@ -1116,6 +1120,18 @@ public final class ConversionSession: ObservableObject, Identifiable {
         cliRepresentedChapterTitles = [:]
         clearPendingImportBatch()
         invalidateArtworkWork()
+    }
+
+    /// Beendet einen Import, dessen Ergebnis nicht übernommen wird (Abbruch
+    /// oder Analysefehler). Hat `beginImport` eine noch laufende Artwork-Suche
+    /// des Vorgängers entwertet, muss sie danach wieder anlaufen — sonst bliebe
+    /// das Buch ohne Cover. `clearPendingImportBatch` löscht dieses Merkmal,
+    /// deshalb wird es vorher gelesen.
+    private func abandonPendingImport() {
+        let shouldResumeArtworkSearch = pendingImportShouldResumeArtworkSearch
+        isImporting = false
+        clearPendingImportBatch()
+        if shouldResumeArtworkSearch { startArtworkSearch() }
     }
 
     private func clearPendingImportBatch() {
