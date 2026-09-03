@@ -822,7 +822,13 @@ struct ProcessPipeReaderTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let hanging = directory.appendingPathComponent("hanging")
         let failing = directory.appendingPathComponent("failing")
-        try writeExecutable(hanging, "#!/bin/sh\ntrap '' TERM\nwhile :; do :; done\n")
+        // Schlafen statt rechnen: Der Prozess ignoriert SIGTERM weiterhin und
+        // endet erst durch SIGKILL, sättigt dabei aber keinen Kern gegen die
+        // parallel laufende Suite.
+        try writeExecutable(
+            hanging,
+            "#!/bin/sh\ntrap '' TERM\nwhile :; do /bin/sleep 0.05; done\n"
+        )
         try writeExecutable(failing, "#!/bin/sh\nprintf 'diagnose'\nexit 3\n")
 
         let start = Date()

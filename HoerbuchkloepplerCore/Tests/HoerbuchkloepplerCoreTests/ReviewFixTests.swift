@@ -903,9 +903,15 @@ struct CancellationIsolationTests {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // Die Warteschleife schläft, statt zu rechnen. Ein Busy-Loop sättigt
+        // einen Kern, solange die übrige Suite parallel läuft, und lässt
+        // zeitkritische Joins hier und in anderen Tests unter Last auslaufen.
+        // Am Verhalten ändert das nichts: SIGTERM löst nur den Trap aus, die
+        // Schleife läuft weiter und der Prozess endet erst durch SIGKILL.
         process.arguments = [
             "-c",
-            "trap 'printf late > \"$1\"' TERM; printf READY; while :; do :; done",
+            "trap 'printf late > \"$1\"' TERM; printf READY; "
+                + "while :; do /bin/sleep 0.05; done",
             "hoerbuchkloeppler-test",
             staged.path
         ]
