@@ -58,17 +58,24 @@ struct ContentView: View {
     @State private var showingToolErrorAlert = false
     @State private var conversionStartError: String?
     @State private var cliHandoffError: String?
+    /// Einmal aufgelöster CLI-Pfad. Die Auflösung durchsucht den gesamten PATH
+    /// mit je einem Dateisystemzugriff pro Eintrag; im View-Body ausgewertet
+    /// liefe das bei jedem Fortschritts-Update zweimal auf dem Main Actor und
+    /// würde bei einem Netz-Mount im PATH die Oberfläche blockieren.
+    @State private var kloepplerURL: URL?
 
     func checkTools() {
         session.logCurrentSettings()
         Task {
-            let (ffmpeg, mediaInfo) = await Task.detached {
+            let (ffmpeg, mediaInfo, kloeppler) = await Task.detached {
                 FFmpegWrapper.cleanupOldTempDirectories()
                 return (
                     FFmpegWrapper.toolVersion(name: "ffmpeg"),
-                    FFmpegWrapper.toolVersion(name: "mediainfo")
+                    FFmpegWrapper.toolVersion(name: "mediainfo"),
+                    Self.resolveKloepplerURL()
                 )
             }.value
+            kloepplerURL = kloeppler
             if let (url, version) = ffmpeg {
                 ffmpegStatus = "OK (\(version))"
                 session.addLog("🛠️ FFmpeg gefunden an \(url.path) (Version: \(version))")
@@ -239,7 +246,7 @@ struct ContentView: View {
                             .buttonStyle(PlainButtonStyle())
                             .disabled(
                                 session.cliFolderIfRepresentable == nil
-                                    || resolveKloepplerURL() == nil
+                                    || kloepplerURL == nil
                             )
                             .help(cliHandoffHelp)
                         }
@@ -396,10 +403,15 @@ struct ContentView: View {
             session.addLog("⚠️ CLI-Übergabe nicht möglich: Die aktuelle Liste stammt nicht vollständig aus einem einzelnen Ordner-Import.")
             return
         }
-        guard let kloepplerURL = resolveKloepplerURL() else {
+        // Beim Klick erneut auflösen: Der beim Start gemerkte Pfad kann
+        // inzwischen verschwunden sein, und ein einzelner Klick trägt die
+        // Suchkosten problemlos.
+        guard let kloepplerURL = Self.resolveKloepplerURL() else {
+            self.kloepplerURL = nil
             session.addLog("⚠️ CLI-Übergabe nicht möglich: Das Programm „kloeppler“ wurde nicht gefunden.")
             return
         }
+        self.kloepplerURL = kloepplerURL
 
         let invocation = CLIInvocation(
             executable: kloepplerURL.path,
@@ -444,7 +456,9 @@ struct ContentView: View {
         }.value
     }
 
-    private func resolveKloepplerURL() -> URL? {
+    /// `nonisolated`, damit der PATH-Scan im Hintergrund-Task laufen darf
+    /// statt den Main Actor zu blockieren.
+    private nonisolated static func resolveKloepplerURL() -> URL? {
         // In Entwicklungs-Builds liegt die CLI neben der App oder im
         // SwiftPM-Release-Verzeichnis. Installierte Builds bieten den Handoff nur
         // an, wenn eine ausführbare CLI im PATH/üblichen Installationsort liegt.
@@ -461,7 +475,7 @@ struct ContentView: View {
         if session.cliFolderIfRepresentable == nil {
             return "Nur verfügbar, wenn die aktuelle Liste vollständig aus einem einzelnen Ordner-Import stammt."
         }
-        if resolveKloepplerURL() == nil {
+        if kloepplerURL == nil {
             return "Nicht verfügbar, weil das Programm „kloeppler“ nicht gefunden wurde."
         }
         return "Öffnet das Terminal mit dem vollständigen Befehl für die aktuellen Einstellungen, Metadaten und das Cover."

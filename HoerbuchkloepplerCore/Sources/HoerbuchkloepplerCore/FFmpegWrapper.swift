@@ -591,7 +591,14 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
     func discardStagedOutput(_ url: URL) {
         lock.lock()
         let ownership = stagedOutputs.removeValue(forKey: url)
+        let alreadyCancelled = cancelled
         lock.unlock()
+        // Nach einem gewonnenen Abbruch hat `cancel()` die Besitzliste geleert
+        // und räumt genau diesen Eintrag mit der einzig gültigen Ownership auf.
+        // Ein zweiter Versuch ohne Ownership könnte ihn nicht entfernen und
+        // würde die noch laufende Bereinigung fälschlich als liegengebliebene
+        // Datei melden.
+        guard ownership != nil || !alreadyCancelled else { return }
         let removed = ConversionContext.unlinkStagedOutput(
             url,
             expectedOwnership: ownership

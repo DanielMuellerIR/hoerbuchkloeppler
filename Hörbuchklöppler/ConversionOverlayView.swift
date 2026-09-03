@@ -47,7 +47,8 @@ struct ConversionOverlayView: View {
                         ScrollView {
                             VStack(alignment: .leading, spacing: 6) {
                                 // HISTORIE (Logs)
-                                Text(buildLogAttributedString())
+                                LogTranscriptView(entries: session.eventLogs)
+                                    .equatable()
                                     .padding(.horizontal, 16)
                                     .textSelection(.enabled)
 
@@ -110,17 +111,48 @@ struct ConversionOverlayView: View {
         }
     }
     
-    private func buildLogAttributedString() -> AttributedString {
-        var attrStr = AttributedString()
+}
+
+/// Zeigt den Logverlauf als EIGENE, vergleichbare View.
+///
+/// Das Overlay beobachtet die gesamte Session: Jedes Fortschritts-Ereignis des
+/// Workers (mehrfach pro Sekunde je Segment) wertet dessen `body` neu aus.
+/// Stünde der Textaufbau dort, würde bei jedem Tick der komplette Logbestand
+/// erneut in einen `AttributedString` geschrieben — auf dem Main Actor und mit
+/// wachsender Laufzeit. `ConversionSession.addLog` vermeidet dieselbe
+/// quadratische Arbeit bereits für `logString`.
+///
+/// Über `.equatable()` entscheidet SwiftUI anhand von `==`, ob der Text
+/// überhaupt neu gebaut werden muss. Einträge werden nur angehängt oder die
+/// Liste komplett geleert; Anzahl plus letzte Kennung erkennen beides.
+private struct LogTranscriptView: View, Equatable {
+    let entries: [LogEntry]
+
+    /// Ein DateFormatter ist teuer im Aufbau und hier zustandslos.
+    private static let timeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.timeStyle = .medium
-        
-        for entry in session.eventLogs {
+        return formatter
+    }()
+
+    static func == (lhs: LogTranscriptView, rhs: LogTranscriptView) -> Bool {
+        lhs.entries.count == rhs.entries.count
+            && lhs.entries.last?.id == rhs.entries.last?.id
+    }
+
+    var body: some View {
+        Text(Self.buildLogAttributedString(entries))
+    }
+
+    static func buildLogAttributedString(_ entries: [LogEntry]) -> AttributedString {
+        var attrStr = AttributedString()
+
+        for entry in entries {
             // Time
-            var timeStr = AttributedString(formatter.string(from: entry.date) + "  ")
+            var timeStr = AttributedString(timeFormatter.string(from: entry.date) + "  ")
             timeStr.font = .system(size: 11, design: .monospaced)
             timeStr.foregroundColor = .gray
-            
+
             // Message
             var msgStr = AttributedString(entry.message + "\n")
             msgStr.font = .system(size: 12, design: .monospaced)
@@ -133,7 +165,7 @@ struct ConversionOverlayView: View {
             case .dim:
                 msgStr.foregroundColor = Color(NSColor.darkGray).opacity(0.8)
             }
-            
+
             attrStr.append(timeStr)
             attrStr.append(msgStr)
         }

@@ -1192,10 +1192,20 @@ public final class ConversionSession: ObservableObject, Identifiable {
         let deduplicated = Self.deduplicateAudioFiles(audioFiles + newFiles)
         self.audioFiles = deduplicated.files.sorted(by: Self.audioFileComesBefore)
         for duplicate in deduplicated.discardedSources {
-            addLog(
-                "⚠️ \(duplicate.discarded.lastPathComponent) und \(duplicate.kept.lastPathComponent) "
-                + "lesen dieselbe Audiodatei; importiert wird nur \(duplicate.kept.lastPathComponent)."
-            )
+            // Derselbe Pfad in beiden Feldern heißt: Ein Drop hat diese Datei
+            // mehrfach geliefert (z.B. Ordner plus eine Datei daraus). Die
+            // Zwei-Namen-Meldung nennte hier zweimal denselben Namen.
+            if duplicate.discarded == duplicate.kept {
+                addLog(
+                    "⚠️ \(duplicate.kept.lastPathComponent) wurde mehrfach übergeben; "
+                    + "importiert wird nur ein Exemplar."
+                )
+            } else {
+                addLog(
+                    "⚠️ \(duplicate.discarded.lastPathComponent) und \(duplicate.kept.lastPathComponent) "
+                    + "lesen dieselbe Audiodatei; importiert wird nur \(duplicate.kept.lastPathComponent)."
+                )
+            }
         }
         if canRepresentFolder, let sourceFolderForCLI {
             cliSourceFolderURL = sourceFolderForCLI

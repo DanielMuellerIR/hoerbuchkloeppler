@@ -1435,6 +1435,31 @@ struct ImportLifecycleTests {
         #expect(session.eventLogs.contains { $0.message.contains("lesen dieselbe Audiodatei") })
     }
 
+    /// Ordner plus eine Datei daraus in einem Drop liefern denselben Pfad
+    /// zweimal. Die Zwei-Namen-Meldung nennte hier zweimal denselben Namen und
+    /// sagte dem Nutzer nicht, was tatsächlich passiert ist.
+    @Test("Ein mehrfach gelieferter Pfad wird als Doppelübergabe gemeldet")
+    func repeatedProviderPathIsReportedAsDuplicateDelivery() async {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        let file = AudioFile(
+            url: URL(fileURLWithPath: "/tmp/Kapitel 1.mp3"),
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Eins"
+        )
+
+        await session.processIncomingFiles([file, file], skipCoverExtraction: true)
+
+        #expect(session.audioFiles.count == 1)
+        #expect(session.eventLogs.contains {
+            $0.message.contains("Kapitel 1.mp3 wurde mehrfach übergeben")
+        })
+        #expect(!session.eventLogs.contains {
+            $0.message.contains("lesen dieselbe Audiodatei")
+        })
+    }
+
     @Test("Doppelte Provider-Ergebnisse behalten jedes Containerkapitel genau einmal")
     func identicalProviderResultsAreDeduplicatedBySegment() {
         let container = URL(fileURLWithPath: "/tmp/Buch.m4b")
@@ -2076,6 +2101,30 @@ struct ReviewFixes20260817Tests {
         context.cancel()
 
         #expect(FileManager.default.fileExists(atPath: inhalt.path))
+    }
+
+    /// Nach einem gewonnenen Abbruch besitzt nur noch die Abbruchbereinigung
+    /// die Staging-Einträge samt ihrer Ownership. Läuft der Worker danach in
+    /// seinen Fehlerpfad, darf sein `discardStagedOutput` denselben Eintrag
+    /// weder anfassen noch als liegengeblieben melden — sonst behauptet die
+    /// Meldung eine oft mehrere Gigabyte große Leiche, die es nicht gibt.
+    @Test("Der Worker meldet nach gewonnenem Abbruch keine liegengebliebene Datei")
+    func discardAfterWonCancellationStaysSilent() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let logs = ThreadSafeLogProbe()
+        let context = ConversionContext { _, message in logs.append(message) }
+        #expect(context.cancel())
+
+        // Genau der Eintrag, den die Abbruchbereinigung gleich entfernt: Er
+        // liegt noch da, der Worker hat seine Ownership aber schon verloren.
+        let staging = directory.appendingPathComponent("entry.m4b")
+        try Data("teilweise geschrieben".utf8).write(to: staging)
+        context.discardStagedOutput(staging)
+
+        #expect(logs.snapshot().isEmpty)
+        #expect(FileManager.default.fileExists(atPath: staging.path))
     }
 
 }

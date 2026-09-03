@@ -726,27 +726,35 @@ struct KloepplerCLI: AsyncParsableCommand {
 
         var pixelData = [UInt8](repeating: 0, count: renderWidth * height)
 
-        guard let context = CGContext(data: &pixelData,
-                                      width: renderWidth,
-                                      height: height,
-                                      bitsPerComponent: 8,
-                                      bytesPerRow: bytesPerRow,
-                                      space: colorSpace,
-                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return "" }
+        // Der CGContext behält den übergebenen Zeiger und schreibt erst beim
+        // späteren `draw` hinein. Ein `&pixelData` wäre nur für die Dauer des
+        // CGContext-Aufrufs gültig; erzeugen, zeichnen und auslesen müssen
+        // deshalb innerhalb desselben `withUnsafeMutableBytes`-Blocks liegen.
+        return pixelData.withUnsafeMutableBytes { storage -> String in
+            guard let base = storage.baseAddress,
+                  let context = CGContext(data: base,
+                                          width: renderWidth,
+                                          height: height,
+                                          bitsPerComponent: 8,
+                                          bytesPerRow: bytesPerRow,
+                                          space: colorSpace,
+                                          bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return "" }
 
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: renderWidth, height: height))
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: renderWidth, height: height))
 
-        var result = ""
-        for y in 0..<height {
-            for x in 0..<renderWidth {
-                let offset = (height - 1 - y) * renderWidth + x // CGContext draws inverted on macOS
-                let pixelValue = pixelData[offset]
-                // Map 0-255 to 0-9
-                let charIndex = Int(Double(pixelValue) / 255.0 * Double(asciiChars.count - 1))
-                result += asciiChars[charIndex]
+            let pixels = storage.bindMemory(to: UInt8.self)
+            var result = ""
+            for y in 0..<height {
+                for x in 0..<renderWidth {
+                    let offset = (height - 1 - y) * renderWidth + x // CGContext draws inverted on macOS
+                    let pixelValue = pixels[offset]
+                    // Map 0-255 to 0-9
+                    let charIndex = Int(Double(pixelValue) / 255.0 * Double(asciiChars.count - 1))
+                    result += asciiChars[charIndex]
+                }
+                result += "\n"
             }
-            result += "\n"
+            return result
         }
-        return result
     }
 }
