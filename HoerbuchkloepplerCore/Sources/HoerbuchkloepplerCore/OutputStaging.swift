@@ -1,18 +1,18 @@
 import Foundation
 import Darwin
 
-// Dateisystem-Sicherheitsgrenze der Ausgabe: Ein Eintrag wird ueber Geraet und
-// Inode wiedererkannt, exklusiv angelegt, gegen prozessuebergreifende Sperren
+// Dateisystem-Sicherheitsgrenze der Ausgabe: Ein Eintrag wird über Gerät und
+// Inode wiedererkannt, exklusiv angelegt, gegen prozessübergreifende Sperren
 // abgesichert, atomar ins Ziel getauscht und nur dann bereinigt, wenn er
-// nachweislich der eigene ist. Alles hier haelt genau diese Zusage; die
+// nachweislich der eigene ist. Alles hier hält genau diese Zusage; die
 // Kodierpipeline ruft es nur auf.
 
 /// Dateiname der Besitzermarke in jedem exklusiv angelegten Arbeitsordner.
 private let tempOwnerFilename = ".owner-pid"
-/// Aufgezeichnete Identitaet des einen Eintrags, den ein Cleanup-Ordner
+/// Aufgezeichnete Identität des einen Eintrags, den ein Cleanup-Ordner
 /// entfernen darf.
 private let cleanupEntryIdentityFilename = ".entry-identity.json"
-/// Extended Attribute, das die Besitzer-PID am Inode der Staging-Datei haelt.
+/// Extended Attribute, das die Besitzer-PID am Inode der Staging-Datei hält.
 private let stagingOwnerAttribute = "com.hoerbuchkloeppler.staging-owner"
 /// Prozessinterne Belegung der Ausgabeziele. Die dateibasierte `fcntl`-Sperre
 /// wirkt zwischen Prozessen; innerhalb eines Prozesses meldet dieses Register

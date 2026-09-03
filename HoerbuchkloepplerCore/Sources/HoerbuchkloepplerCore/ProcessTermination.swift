@@ -3,7 +3,7 @@ import Darwin
 
 // Prozess-Lebenszyklus: eigene Werkzeugprozesse starten, ihre Ausgabe lesen und
 // sie zweistufig beenden. Bewusst getrennt von der Kodierpipeline — hier steht
-// nur, WIE ein fremdes Programm ausgefuehrt und sicher wieder eingefangen wird,
+// nur, WIE ein fremdes Programm ausgeführt und sicher wieder eingefangen wird,
 // nicht, wozu.
 
 /// Beendet eigene Tool-Prozesse zweistufig. `terminate()` sendet nur SIGTERM;
