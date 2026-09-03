@@ -8,6 +8,15 @@ private func writeStandardError(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
+/// Meldet den Grund auf stderr und liefert den Fehler-Exit. `throw
+/// reportedFailure(…)` hält Meldung und Exit-Code an jeder Abbruchstelle
+/// zusammen; vorher standen beide neunmal als getrenntes Zeilenpaar da und
+/// konnten beim Umbauen auseinanderlaufen.
+private func reportedFailure(_ message: String) -> ExitCode {
+    writeStandardError(message)
+    return .failure
+}
+
 private final class InterruptState: @unchecked Sendable {
     private enum Phase {
         case preparing
@@ -347,8 +356,7 @@ struct KloepplerCLI: AsyncParsableCommand {
         let sourceURL = URL(fileURLWithPath: folderPath)
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: folderPath, isDirectory: &isDir), isDir.boolValue else {
-            writeStandardError("Fehler: Der Pfad \(folderPath) existiert nicht oder ist kein Ordner.")
-            throw ExitCode.failure
+            throw reportedFailure("Fehler: Der Pfad \(folderPath) existiert nicht oder ist kein Ordner.")
         }
         // Nach der Existenzprüfung den physischen Ordner festhalten. Sonst kann
         // ein später umgebogener Symlink sowohl die Quelle als auch das abgeleitete
@@ -427,8 +435,7 @@ struct KloepplerCLI: AsyncParsableCommand {
             }
 
             guard !session.audioFiles.isEmpty else {
-                writeStandardError("Fehler: Keine gültigen Audiodateien im Ordner gefunden.")
-                throw ExitCode.failure
+                throw reportedFailure("Fehler: Keine gültigen Audiodateien im Ordner gefunden.")
             }
 
             if let mode = mode {
@@ -456,19 +463,16 @@ struct KloepplerCLI: AsyncParsableCommand {
                 do {
                     coverValues = try coverURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
                 } catch {
-                    writeStandardError("❌ Cover-Datei konnte nicht geprüft werden: \(cover)")
-                    throw ExitCode.failure
+                    throw reportedFailure("❌ Cover-Datei konnte nicht geprüft werden: \(cover)")
                 }
                 let maximumCoverByteCount = 32 * 1024 * 1024
                 guard coverValues.isRegularFile == true,
                       let coverByteCount = coverValues.fileSize,
                       coverByteCount <= maximumCoverByteCount else {
-                    writeStandardError("❌ Cover muss eine reguläre Bilddatei mit höchstens 32 MiB sein: \(cover)")
-                    throw ExitCode.failure
+                    throw reportedFailure("❌ Cover muss eine reguläre Bilddatei mit höchstens 32 MiB sein: \(cover)")
                 }
                 guard session.selectCover(url: coverURL) else {
-                    writeStandardError("❌ Cover-Datei ist nicht als Bild lesbar: \(cover)")
-                    throw ExitCode.failure
+                    throw reportedFailure("❌ Cover-Datei ist nicht als Bild lesbar: \(cover)")
                 }
             }
             try throwIfInterrupted()
@@ -477,41 +481,11 @@ struct KloepplerCLI: AsyncParsableCommand {
             // Lesen selbst verwendet den aufgelösten physischen Ordner.
             let rawTitle = session.title.isEmpty ? sourceURL.lastPathComponent : session.title
             let finalTitle = KloepplerCLI.sanitizeFilename(rawTitle)
-            let outputFile: URL
-            if let output = output {
-                var outIsDir: ObjCBool = false
-                let outExists = FileManager.default.fileExists(atPath: output, isDirectory: &outIsDir)
-                if outExists && outIsDir.boolValue {
-                    // Ordner angegeben: Dateiname wie bisher aus dem Titel bilden
-                    let outputDirectory = URL(fileURLWithPath: output)
-                        .standardizedFileURL.resolvingSymlinksInPath()
-                    outputFile = outputDirectory.appendingPathComponent("\(finalTitle).m4b")
-                } else if output.lowercased().hasSuffix(".m4b") {
-                    // Voller Zielpfad: Eltern-Ordner muss existieren (bei Bedarf anlegen)
-                    let target = URL(fileURLWithPath: output).standardizedFileURL
-                    do {
-                        try FileManager.default.createDirectory(
-                            at: target.deletingLastPathComponent(),
-                            withIntermediateDirectories: true
-                        )
-                    } catch {
-                        writeStandardError("❌ Ausgabeordner konnte nicht angelegt werden: \(error.localizedDescription)")
-                        throw ExitCode.failure
-                    }
-                    let resolvedParent = target.deletingLastPathComponent().resolvingSymlinksInPath()
-                    outputFile = resolvedParent.appendingPathComponent(target.lastPathComponent)
-                } else {
-                    writeStandardError("❌ --output muss ein existierender Ordner oder ein .m4b-Pfad sein: \(output)")
-                    throw ExitCode.failure
-                }
-            } else {
-                // Das dokumentierte Standardziel liegt neben dem angegebenen
-                // Quellpfad, nicht neben dem Ziel eines Quellordner-Symlinks. Nur
-                // dessen Elternordner wird physisch gebunden.
-                let sourceParent = sourceURL.standardizedFileURL
-                    .deletingLastPathComponent().resolvingSymlinksInPath()
-                outputFile = sourceParent.appendingPathComponent("\(finalTitle).m4b")
-            }
+            let outputFile = try resolveOutputFile(
+                option: output,
+                sourceURL: sourceURL,
+                title: finalTitle
+            )
 
             let conversionPlan = FFmpegWrapper.makeConversionPlan(
                 files: session.audioFiles,
@@ -543,8 +517,7 @@ struct KloepplerCLI: AsyncParsableCommand {
                             || isatty(FileHandle.standardOutput.fileDescriptor) == 0 {
                     // Nur fragen, wenn Eingabe UND sichtbare Ausgabe an Terminals
                     // hängen. Bei umgeleitetem stdout wäre die Frage unsichtbar.
-                    writeStandardError("❌ Zieldatei(en) existieren bereits: \(names). Zum Überschreiben --force verwenden.")
-                    throw ExitCode.failure
+                    throw reportedFailure("❌ Zieldatei(en) existieren bereits: \(names). Zum Überschreiben --force verwenden.")
                 } else {
                     print("⚠️ Diese Zieldatei(en) existieren bereits: \(names)")
                     print("Möchten Sie die Dateien überschreiben? (j/N): ", terminator: "")
@@ -568,8 +541,7 @@ struct KloepplerCLI: AsyncParsableCommand {
                 session: session,
                 plan: conversionPlan
             ) {
-                writeStandardError("❌ Konvertierung konnte nicht gestartet werden: \(message)")
-                throw ExitCode.failure
+                throw reportedFailure("❌ Konvertierung konnte nicht gestartet werden: \(message)")
             }
             // Ein Signal kann genau zwischen Phasenwechsel und dem synchronen
             // Erzeugen des Contexts eintreffen. Dann jetzt den neuen Context stoppen.
@@ -649,6 +621,55 @@ struct KloepplerCLI: AsyncParsableCommand {
         emitInterruptIfNeeded()
         if let receivedSignal { throw ExitCode(128 + receivedSignal) }
         if let executionError { throw executionError }
+    }
+
+    /// Bestimmt das tatsächliche Ausgabeziel. Drei Fälle, die vorher als
+    /// 30-zeiliger Block mitten in `execute` standen:
+    ///
+    /// - `--output` nennt einen existierenden Ordner: Dateiname aus dem Titel,
+    /// - `--output` nennt einen `.m4b`-Pfad: Elternordner bei Bedarf anlegen,
+    /// - ohne `--output`: neben dem ANGEGEBENEN Quellpfad, nicht neben dem Ziel
+    ///   eines Quellordner-Symlinks — physisch gebunden wird nur dessen
+    ///   Elternordner.
+    private static func resolveOutputFile(
+        option: String?,
+        sourceURL: URL,
+        title: String
+    ) throws -> URL {
+        guard let option else {
+            let sourceParent = sourceURL.standardizedFileURL
+                .deletingLastPathComponent().resolvingSymlinksInPath()
+            return sourceParent.appendingPathComponent("\(title).m4b")
+        }
+        var isDirectory: ObjCBool = false
+        let exists = FileManager.default.fileExists(
+            atPath: option,
+            isDirectory: &isDirectory
+        )
+        if exists && isDirectory.boolValue {
+            let outputDirectory = URL(fileURLWithPath: option)
+                .standardizedFileURL.resolvingSymlinksInPath()
+            return outputDirectory.appendingPathComponent("\(title).m4b")
+        }
+        guard option.lowercased().hasSuffix(".m4b") else {
+            throw reportedFailure(
+                "❌ --output muss ein existierender Ordner oder ein .m4b-Pfad sein: \(option)"
+            )
+        }
+        let target = URL(fileURLWithPath: option).standardizedFileURL
+        do {
+            try FileManager.default.createDirectory(
+                at: target.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+        } catch {
+            throw reportedFailure(
+                "❌ Ausgabeordner konnte nicht angelegt werden: \(error.localizedDescription)"
+            )
+        }
+        let resolvedParent = target.deletingLastPathComponent()
+            .resolvingSymlinksInPath()
+        return resolvedParent.appendingPathComponent(target.lastPathComponent)
     }
 
     /// Macht aus einem (Metadaten-)Titel einen sicheren Dateinamen: Pfad- und
