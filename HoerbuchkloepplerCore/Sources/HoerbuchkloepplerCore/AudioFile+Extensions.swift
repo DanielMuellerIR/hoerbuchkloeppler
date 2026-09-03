@@ -240,16 +240,10 @@ extension AudioFile {
     /// Wartet höchstens die verbleibende Kapitelanalyse-Frist auf den Prozess.
     /// EOF allein bedeutet nicht, dass ein fehlerhaftes Ersatzprogramm beendet ist.
     static func waitForProcessExit(_ process: Process, timeout: TimeInterval) -> Bool {
+        // Eine nichtendliche Frist bedeutet hier ausdrücklich „gar nicht warten“;
+        // die Kapitelanalyse deckelt zusätzlich bei einer Stunde.
         let boundedTimeout = timeout.isFinite ? min(max(0, timeout), 3_600) : 0
-        let timeoutNanoseconds = UInt64(boundedTimeout * 1_000_000_000)
-        let start = DispatchTime.now().uptimeNanoseconds
-        let deadline = start > UInt64.max - timeoutNanoseconds
-            ? UInt64.max
-            : start + timeoutNanoseconds
-        while process.isRunning, DispatchTime.now().uptimeNanoseconds < deadline {
-            Thread.sleep(forTimeInterval: 0.01)
-        }
-        return !process.isRunning
+        return ProcessTerminator.wait(upTo: boundedTimeout) { process.isRunning }
     }
 
     /// Liest eine ffmetadata-Pipe bis zu einer festen Obergrenze und Frist.

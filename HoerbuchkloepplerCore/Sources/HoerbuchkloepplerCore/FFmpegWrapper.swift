@@ -56,6 +56,34 @@ enum ProcessTerminator {
         return ownedGroups[ObjectIdentifier(process)]
     }
 
+    /// Wartet höchstens `seconds` darauf, dass `isPending()` falsch wird, und
+    /// prüft dabei im 10-Millisekunden-Takt. Liefert `true`, wenn die Bedingung
+    /// vor Ablauf der Frist erfüllt war.
+    ///
+    /// Vier Stellen im Projekt warteten so auf ein Prozessende, jede mit
+    /// eigener Deadline-Arithmetik. Die Frist selbst bleibt bewusst beim
+    /// Aufrufer — sie reicht von einer halben Sekunde Schonfrist bis zu einer
+    /// Stunde Kapitelanalyse. Gemeinsam sind nur die Fallstricke: eine
+    /// nichtendliche oder negative Sekundenangabe wird auf 0 geklemmt, und die
+    /// Deadline wird überlaufsicher gebildet, weil `uptimeNanoseconds` plus
+    /// eine sehr große Frist sonst überliefe und die Schleife sofort endete.
+    @discardableResult
+    static func wait(
+        upTo seconds: TimeInterval,
+        while isPending: () -> Bool
+    ) -> Bool {
+        let bounded = seconds.isFinite ? max(0, seconds) : 0
+        let nanoseconds = UInt64(min(bounded, 86_400) * 1_000_000_000)
+        let start = DispatchTime.now().uptimeNanoseconds
+        let deadline = start > UInt64.max - nanoseconds
+            ? UInt64.max
+            : start + nanoseconds
+        while isPending(), DispatchTime.now().uptimeNanoseconds < deadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        return !isPending()
+    }
+
     private static func groupIsRunning(_ group: pid_t) -> Bool {
         if Darwin.kill(-group, 0) == 0 { return true }
         return errno != ESRCH
@@ -119,15 +147,13 @@ enum ProcessTerminator {
         let grace = graceInterval.isFinite
             ? max(0, graceInterval)
             : defaultGraceInterval
-        let deadline = DispatchTime.now().uptimeNanoseconds
-            + UInt64(grace * 1_000_000_000)
-        while targets.contains(where: { target in
-                  target.process.isRunning
+        let anyTargetAlive = {
+            targets.contains { target in
+                target.process.isRunning
                     || target.group.map(groupIsRunning) == true
-              }),
-              DispatchTime.now().uptimeNanoseconds < deadline {
-            Thread.sleep(forTimeInterval: 0.01)
+            }
         }
+        wait(upTo: grace, while: anyTargetAlive)
         for target in targets {
             let process = target.process
             let group = target.group
@@ -140,13 +166,7 @@ enum ProcessTerminator {
         // Genau der besitzende Worker ruft `waitUntilExit()` auf. Der Terminator
         // beobachtet nur den Status, damit nie zwei Threads dieselbe
         // Process-Instanz gleichzeitig reap-en.
-        let killDeadline = DispatchTime.now().uptimeNanoseconds + 1_000_000_000
-        while targets.contains(where: { target in
-                  target.process.isRunning
-                    || target.group.map(groupIsRunning) == true
-              }), DispatchTime.now().uptimeNanoseconds < killDeadline {
-            Thread.sleep(forTimeInterval: 0.01)
-        }
+        wait(upTo: 1, while: anyTargetAlive)
     }
 
     static func requestTermination(
@@ -1310,12 +1330,7 @@ public struct FFmpegWrapper {
             reader.start()
 
             let boundedTimeout = timeout.isFinite ? max(0, timeout) : 5
-            let nanoseconds = UInt64(min(boundedTimeout, 86_400) * 1_000_000_000)
-            let deadline = DispatchTime.now().uptimeNanoseconds + nanoseconds
-            while process.isRunning,
-                  DispatchTime.now().uptimeNanoseconds < deadline {
-                Thread.sleep(forTimeInterval: 0.01)
-            }
+            ProcessTerminator.wait(upTo: boundedTimeout) { process.isRunning }
             let timedOut = process.isRunning
             if timedOut {
                 ProcessTerminator.terminateAndWait([process])
