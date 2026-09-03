@@ -73,16 +73,18 @@ Symbolnamen als Anker (bewusst **ohne** Zeilennummern — die driften bei jeder
 
 | Datei | Zuständigkeit | Schlüssel-Symbole |
 |---|---|---|
-| `FFmpegWrapper.swift` | Zentraler Ausgabeplan, unveränderlicher Worker-Snapshot, atomare Partial→Ziel-Übernahme, Prozessausführung, Concat/Muxing, laufbezogene Cancellation | `ConversionJob` · `makeConversionPlan` · `convert(session:plan:)` · `commitStagedOutput` · `performSequentialConversion` · `performParallelConversion` · `runFinalProcess` · `splitAudioFilesIfNeeded` |
+| `FFmpegWrapper.swift` | Zentraler Ausgabeplan, unveränderlicher Worker-Snapshot, atomare Partial→Ziel-Übernahme, Prozessausführung, Concat/Muxing, laufbezogene Cancellation | `ConversionJob` · `makeConversionPlan` · `convert(session:plan:)` · `commitStagedOutput` · `performSequentialConversion` · `performParallelConversion` · `runFinalProcess` · `splitAudioFilesIfNeeded` · `ProcessTerminator.wait(upTo:while:)` (gemeinsame Prozess-Frist, auch von `AudioFile+Extensions` genutzt) |
 | `CLIInvocation.swift` | Vollständiger, POSIX-shell-sicherer GUI→CLI-Handoff | `CLIInvocation.arguments` · `shellCommand` |
 | `ConversionSession.swift` | Main-Actor-isolierter Lebenszyklus und `@Published`-State, gemeinsame Pfad-/Symlink-Auflösung, atomarer und abbrechbarer asynchroner Import, Worker→UI-Nachrichten | `FoundFile` · `AudioLoadResult` · `beginImport` · `finishImport` · `foundFile(at:)` · `deduplicateFoundFiles` · `loadAudioFiles` · `processIncomingFiles` · `scanFolder` · `prepareFolder` · `addFolder` · `addLog` |
 | `AudioSettings.swift` | Einstellungs-Struct (`Codable`) | Felder → [settings.md](settings.md) |
 | `SettingsManager.swift` | Laden/Speichern `~/.Hoerbuchkloeppler/settings.json` | `shared` · `loadSettings` · `saveSettings` |
 | `AudioFile+Extensions.swift` | Asynchrone AVFoundation-Artwork-Analyse, Kapitel-Extraktion via **gebündeltem ffmpeg** (`-f ffmetadata`) | `extractEmbeddedArtwork` · `extractChapters` · `parseFFMetadataChapters` |
-| `KloepplerCLI.swift` | AsyncParsableCommand-CLI: erwarteter Import, TTY-abhängige ANSI-Animation, Klartextstatus in Pipes, SIGINT-Phasen, ASCII-Cover — Optionen siehe [build-and-test.md](build-and-test.md) | `KloepplerCLI` (`@main`) · `execute(_:)` · `validate()` · `sanitizeFilename` · `buildPacmanBar` · `generateAsciiArt` |
+| `KloepplerCLI.swift` | AsyncParsableCommand-CLI: erwarteter Import, TTY-abhängige ANSI-Animation, Klartextstatus in Pipes, SIGINT-Phasen, ASCII-Cover — Optionen siehe [build-and-test.md](build-and-test.md) | `KloepplerCLI` (`@main`) · `execute(_:)` · `validate()` · `resolveOutputFile` · `sanitizeFilename` · `buildPacmanBar` · `generateAsciiArt` |
 
-App-Views (`Hörbuchklöppler/`): `ContentView`, `ConversionOverlayView`,
-`MetadataSelectionView`, `SettingsView`, `Hörbuchklöppler.swift` (App-Entry).
+App-Views (`Hörbuchklöppler/`): `ContentView`, `ConversionOverlayView`
+(mit `LogTranscriptView`), `MetadataSelectionView`, `SettingsView`,
+`ErrorAlert.swift` (gemeinsamer `View.errorAlert`-Modifier),
+`Hörbuchklöppler.swift` (App-Entry).
 
 Belegte, noch nicht beauftragte Produkt- und Performance-Ansätze stehen getrennt
 in [opportunities.md](opportunities.md).
