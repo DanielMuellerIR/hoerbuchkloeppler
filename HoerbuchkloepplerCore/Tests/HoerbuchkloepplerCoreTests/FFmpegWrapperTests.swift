@@ -216,6 +216,102 @@ struct CoverSelectionTests {
         await probe.releaseFirstCall()
     }
 
+    @Test("Ein übersprungener Zusatz-Drop startet die entwertete Artwork-Suche neu")
+    func skippedAdditionalDropRestartsArtworkSearch() async throws {
+        let source = URL(fileURLWithPath: "/tmp/uebersprungenes-kapitel.m4a")
+        let artwork = try onePixelPNGData()
+        let probe = ArtworkLoaderProbe(dataByURL: [source: artwork])
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        session.title = "Titel"
+        session.author = "Autor"
+        session.embeddedArtworkLoader = { url in await probe.load(url) }
+        let existing = AudioFile(
+            url: source,
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Kapitel"
+        )
+
+        await session.processIncomingFiles([existing])
+        var probeState = await probe.snapshot()
+        var attempts = 0
+        while !probeState.started, attempts < 200 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(10))
+            probeState = await probe.snapshot()
+        }
+        #expect(probeState.started)
+
+        // Eine gedroppte Bild- oder Textdatei ist keine Audiodatei: Der Batch
+        // wird erfolgreich verbucht, liefert aber keine einzige Datei.
+        let token = session.beginImport()
+        session.stageAudioLoadResult(.skipped, importToken: token)
+        await session.finishImport(token)
+
+        attempts = 0
+        while session.embeddedCoverData == nil, attempts < 200 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        probeState = await probe.snapshot()
+        #expect(probeState.calls == [source, source])
+        #expect(session.embeddedCoverData == artwork)
+        await probe.releaseFirstCall()
+    }
+
+    @Test("Ein Ordner ohne Cover startet die entwertete Artwork-Suche neu")
+    func coverlessFolderDropRestartsArtworkSearch() async throws {
+        let source = URL(fileURLWithPath: "/tmp/bestehendes-kapitel-ordner.m4a")
+        let artwork = try onePixelPNGData()
+        let probe = ArtworkLoaderProbe(dataByURL: [source: artwork])
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        session.title = "Titel"
+        session.author = "Autor"
+        session.embeddedArtworkLoader = { url in await probe.load(url) }
+        let existing = AudioFile(
+            url: source,
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Kapitel"
+        )
+
+        await session.processIncomingFiles([existing])
+        var probeState = await probe.snapshot()
+        var attempts = 0
+        while !probeState.started, attempts < 200 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(10))
+            probeState = await probe.snapshot()
+        }
+        #expect(probeState.started)
+
+        // Ein Ordner ohne Audiodateien, ohne eingebettetes Cover und ohne
+        // Bilddatei: nichts, was die alte Suche ersetzen könnte.
+        let token = session.beginImport()
+        session.stageScannedFolder(
+            .init(
+                folderURL: URL(fileURLWithPath: "/tmp/Leerer Ordner"),
+                audioFiles: [],
+                imageURLs: [],
+                embeddedArtwork: nil
+            ),
+            importToken: token
+        )
+        await session.finishImport(token)
+
+        attempts = 0
+        while session.embeddedCoverData == nil, attempts < 200 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        probeState = await probe.snapshot()
+        #expect(probeState.calls == [source, source])
+        #expect(session.embeddedCoverData == artwork)
+        await probe.releaseFirstCall()
+    }
+
     @Test("Deaktivierte Ordneranalyse liest weder eingebettete noch separate Bilder")
     func folderScanCanSkipArtwork() async throws {
         let directory = try conversionTestDirectory()

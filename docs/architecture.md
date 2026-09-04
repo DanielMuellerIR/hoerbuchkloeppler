@@ -34,8 +34,11 @@ Core.
   Staging. Liefert ein GUI-Provider keine Datei-URL, fehlt bei einer Quelle Dauer
   oder Audio-Stream oder läuft ihre Kapitelanalyse ins Zeitlimit, verwerfen GUI
   und CLI den ganzen Batch statt ein unvollständiges Hörbuch zu erzeugen. Ein
-  verworfener Zusatz-Drop lässt die bestehende CLI-Ordnerbindung unverändert und
-  nimmt eine zuvor laufende Artwork-Suche für den sichtbaren Bestand wieder auf.
+  verworfener Zusatz-Drop lässt die bestehende CLI-Ordnerbindung unverändert.
+  Eine zuvor laufende Artwork-Suche für den sichtbaren Bestand läuft nach dem
+  Drop wieder an — auch dann, wenn er erfolgreich verbucht wurde, aber selbst
+  weder ein Cover mitbrachte noch eine eigene Suche startete (übersprungene
+  Nicht-Audiodatei, Ordner ohne verwertbares Cover).
 - **Quellpfad und Lese-URL:** `FoundFile.source` ist der sichtbare Pfad, der
   Anzeige, Sortierung und Fallback-Kapiteltitel bestimmt. `FoundFile.resolved`
   ist das aufgelöste reguläre Ziel, das AVFoundation, ffmpeg, mediainfo und die

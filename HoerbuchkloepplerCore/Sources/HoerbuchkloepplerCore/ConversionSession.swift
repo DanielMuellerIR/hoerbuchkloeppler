@@ -1078,6 +1078,12 @@ public final class ConversionSession: ObservableObject, Identifiable {
         let stagedWarnings = pendingImportWarnings
         let requiresArtworkSearch = pendingImportRequiresArtworkSearch
         let sourceFolder = pendingImportCanRepresentFolder ? pendingImportFolderURL : nil
+        // Auch ein erfolgreich verbuchter Batch kann leer bleiben (eine
+        // übersprungene Nicht-Audiodatei, ein Ordner ohne Audiodateien). Er
+        // ersetzt die von `beginImport` entwertete Suche des Vorgängers dann
+        // nicht. `clearPendingImportBatch` löscht das Merkmal, deshalb wird es
+        // vorher gelesen.
+        let shouldResumeArtworkSearch = pendingImportShouldResumeArtworkSearch
         clearPendingImportBatch()
         await applyScannedFolderContents(
             audioFiles: stagedAudioFiles,
@@ -1088,6 +1094,9 @@ public final class ConversionSession: ObservableObject, Identifiable {
             sourceFolderForCLI: sourceFolder,
             skipCoverExtraction: !requiresArtworkSearch
         )
+        if shouldResumeArtworkSearch {
+            resumeArtworkSearchAfterBatch(token)
+        }
         if (title.isEmpty || author.isEmpty), let first = audioFiles.first {
             await importGlobalMetadata(from: first, importToken: token)
             await finishMetadataImport(token: token, sourceFileID: first.id)
@@ -1132,6 +1141,22 @@ public final class ConversionSession: ObservableObject, Identifiable {
         isImporting = false
         clearPendingImportBatch()
         if shouldResumeArtworkSearch { startArtworkSearch() }
+    }
+
+    /// Nimmt die von `beginImport` entwertete Suche des Vorgängers wieder auf,
+    /// nachdem ein Batch übernommen wurde. Hat der Batch selbst ein Cover
+    /// gesetzt oder eine eigene Suche gestartet, passiert nichts: `coverImage`/
+    /// `coverPath` beziehungsweise `isPreparingArtwork` zeigen das an.
+    private func resumeArtworkSearchAfterBatch(_ token: ImportToken) {
+        // Hat während der Übernahme schon der nächste Drop begonnen, gehört die
+        // Suche nicht mehr diesem Import. Der neue Batch erbt die Pflicht,
+        // damit sie nicht zwischen zwei Importen verloren geht.
+        guard isCurrentImport(token) else {
+            pendingImportShouldResumeArtworkSearch = true
+            return
+        }
+        guard !isPreparingArtwork else { return }
+        startArtworkSearch()
     }
 
     private func clearPendingImportBatch() {
