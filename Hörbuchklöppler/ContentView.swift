@@ -310,7 +310,52 @@ struct ContentView: View {
             .frame(width: 700, height: 500)
             .onDisappear { session.cancelRawMediaInfo() }
         }
-        .onDrop(of: [.fileURL], isTargeted: nil) { providers in handleDroppedProviders(providers); return true }
+        .toolbar {
+            Button("Dateien oder Ordner hinzufügen …", action: chooseImportSources)
+                .keyboardShortcut("o", modifiers: .command)
+                .disabled(session.isConverting)
+        }
+        .safeAreaInset(edge: .bottom) {
+            if session.isImporting {
+                HStack {
+                    ProgressView(value: Double(session.importCompletedItems), total: Double(max(1, session.importTotalItems)))
+                        .frame(width: 140)
+                    Text("\(session.importCompletedItems) / \(session.importTotalItems): \(session.importDetail)")
+                        .lineLimit(1)
+                    Spacer()
+                    Button("Import abbrechen") { session.cancelImport() }
+                        .disabled(!session.canCancelImport)
+                }.padding(8)
+            }
+        }
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            guard !session.isConverting else { return false }
+            handleDroppedProviders(providers)
+            return true
+        }
+    }
+
+    private func chooseImportSources() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Importieren"
+        panel.message = "Audiodateien oder Ordner auswählen"
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+        panel.beginSheetModal(for: window) { response in
+            guard response == .OK else { return }
+            let urls = panel.urls
+            Task { @MainActor in
+                let token = session.beginImport(expectedItemCount: urls.count)
+                await session.runImportTask(token) {
+                    for url in urls {
+                        guard !Task.isCancelled else { return }
+                        await Self.processDroppedURL(url, session: session, importToken: token)
+                    }
+                }
+            }
+        }
     }
 
     private func handleDroppedProviders(_ providers: [NSItemProvider]) {

@@ -144,3 +144,17 @@ Deshalb laufen alle Terminal-Ausgaben der CLI über `TerminalRenderer` in
   Staging-Reste geprüft; weitere 24 Läufe deckten die Abschluss-Rennbedingung ab.
 - **Noch ungetestet:** GUI-App-Lauf (nur Kompilierung via xcodebuild geprüft),
   Audio-Qualität nach Gehör.
+
+## GUI-Import
+
+„Dateien oder Ordner hinzufügen …“ (Cmd+O) und Drag-and-drop verwenden
+dieselben Core-Importregeln. Die Fortschrittsleiste zählt analysierte Einträge;
+beim Erkennen eines Ordners wächst die Gesamtzahl um dessen Dateien. Cover-
+und Metadatenanalyse können danach noch Zeit benötigen.
+„Import abbrechen“ verwirft den noch nicht übernommenen Batch vollständig,
+erhält vorhandene Kapitel und Metadaten und beendet dessen Analyseprozesse.
+Verspätete Provider-Antworten verlieren ihre Importberechtigung. Während der
+abschließenden Metadatenübernahme ist Abbrechen deaktiviert.
+
+Regression: `userCancellationPreservesExistingBook` prüft Teilfortschritt,
+Task-Abbruch, erhaltene Bearbeitung und verspätete Beiträge vor/nach Neustart.

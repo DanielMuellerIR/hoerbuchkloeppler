@@ -735,6 +735,55 @@ struct CancellationIsolationTests {
         #expect(!session.cancelPreparation())
     }
 
+    @Test("Import-Abbrechen beendet registrierte Tasks und ignoriert verspätete Beiträge")
+    func userCancellationPreservesExistingBook() async throws {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        let original = AudioFile(url: URL(fileURLWithPath: "/tmp/Alt.wav"), startTime: 2, duration: 4, chapterTitle: "Bearbeitet")
+        session.audioFiles = [original]
+        session.title = "Mein Titel"
+        session.author = "Autor"
+        session.removeCover()
+        let token = session.beginImport(expectedItemCount: 2)
+        let incoming = AudioFile(url: URL(fileURLWithPath: "/tmp/Neu.wav"), startTime: 0, duration: 3, chapterTitle: "Neu")
+        session.stageAudioLoadResult(.success(files: [incoming], warnings: []), importToken: token)
+        await session.finishImport(token)
+        #expect(session.importCompletedItems == 1)
+        #expect(session.importTotalItems == 2)
+        let probe = PreparationCancellationProbe()
+        let work = Task {
+            await session.runImportTask(token) {
+                await probe.markStarted()
+                do { try await Task.sleep(for: .seconds(30)) } catch { }
+                await probe.markFinished(cancelled: Task.isCancelled)
+            }
+        }
+        for _ in 0..<1_000 {
+            if await probe.snapshot().started { break }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(await probe.snapshot().started)
+        session.cancelImport()
+        await work.value
+        #expect(await probe.snapshot().observedCancellation)
+        session.stageAudioLoadResult(.success(files: [incoming], warnings: []), importToken: token)
+        await session.finishImport(token)
+        #expect(session.audioFiles.map(\.id) == [original.id])
+        #expect(session.audioFiles.first?.chapterTitle == "Bearbeitet")
+        #expect(session.title == "Mein Titel")
+        #expect(session.author == "Autor")
+        #expect(session.isCoverSuppressed)
+        #expect(!session.isImporting)
+        let nextToken = session.beginImport()
+        await session.runImportTask(token) { Issue.record("Alter Provider startete erneut") }
+        await session.finishImport(token)
+        #expect(session.isImporting)
+        #expect(session.importCompletedItems == 0)
+        session.stageAudioLoadResult(.skipped, importToken: nextToken)
+        await session.finishImport(nextToken)
+        #expect(!session.isImporting)
+    }
+
     @Test("Ein neuer GUI-Drop cancelt den laufenden Import-Task")
     func replacementImportCancelsRunningTask() async throws {
         let session = ConversionSession(settings: AudioSettings())

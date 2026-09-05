@@ -442,6 +442,10 @@ public final class ConversionSession: ObservableObject, Identifiable {
     public private(set) var isCoverSuppressed = false
     private var pendingImportOperations = 0
     @Published public private(set) var isImporting = false
+    @Published public private(set) var importCompletedItems = 0
+    @Published public private(set) var importTotalItems = 0
+    @Published public private(set) var importDetail = ""
+    public var canCancelImport: Bool { isImporting && pendingImportOperations > 0 }
     @Published public var importErrorMessage: String?
     public private(set) var lastImportFailures: [AudioImportFailure] = []
     private var pendingImportAudioFiles: [AudioFile] = []
@@ -1035,6 +1039,9 @@ public final class ConversionSession: ObservableObject, Identifiable {
         // des neuen Batches auch die ursprüngliche Artwork-Suche wiederaufnehmen.
         let shouldResumeArtworkSearch = pendingImportShouldResumeArtworkSearch
             || isPreparingArtwork
+        importCompletedItems = 0
+        importTotalItems = max(0, expectedItemCount)
+        importDetail = "Dateien suchen und analysieren …"
         pendingImportOperations = max(0, expectedItemCount)
         isImporting = pendingImportOperations > 0
         importErrorMessage = nil
@@ -1058,6 +1065,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     public func finishImport(_ token: ImportToken) async {
         guard isCurrentImport(token), pendingImportOperations > 0 else { return }
         pendingImportOperations -= 1
+        importCompletedItems += 1
         guard pendingImportOperations == 0 else { return }
         if pendingImportWasCancelled {
             abandonPendingImport()
@@ -1072,6 +1080,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
             return
         }
 
+        importDetail = "Metadaten übernehmen …"
         let stagedAudioFiles = pendingImportAudioFiles
         let stagedImageURLs = pendingImportImageURLs
         let stagedArtwork = pendingImportArtwork
@@ -1097,6 +1106,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         if shouldResumeArtworkSearch {
             resumeArtworkSearchAfterBatch(token)
         }
+        guard isCurrentImport(token) else { return }
         if (title.isEmpty || author.isEmpty), let first = audioFiles.first {
             await importGlobalMetadata(from: first, importToken: token)
             await finishMetadataImport(token: token, sourceFileID: first.id)
@@ -1117,6 +1127,24 @@ public final class ConversionSession: ObservableObject, Identifiable {
             return
         }
         isImporting = false
+    }
+
+    /// Verwirft ausschließlich den noch nicht übernommenen Zusatzimport. Der
+    /// Generationstausch sperrt auch Provider, die nach dem Abbruch antworten.
+    public func cancelImport() {
+        guard canCancelImport else { return }
+        _ = preparationCoordinator.cancel()
+        importGeneration = UUID()
+        pendingImportOperations = 0
+        importDetail = "Import abgebrochen"
+        abandonPendingImport()
+    }
+
+    private func reportImportScan(_ token: ImportToken, total: Int? = nil, filename: String? = nil, completed: Bool = false) {
+        guard isCurrentImport(token) else { return }
+        if let total { importTotalItems += max(0, total - 1) }
+        if let filename { importDetail = filename }
+        if completed { importCompletedItems += 1 }
     }
 
     private func invalidateImportWork() {
@@ -1577,7 +1605,11 @@ public final class ConversionSession: ObservableObject, Identifiable {
             )
         }
 
-        for found in deduplicated.files {
+        if let importToken {
+            await reportImportScan(importToken, total: deduplicated.files.count)
+        }
+        for (index, found) in deduplicated.files.enumerated() {
+            if let importToken { await reportImportScan(importToken, filename: found.source.lastPathComponent) }
             if preparationCancellationRequested() { return cancelledResult() }
             switch found.kind {
             case .audio:
@@ -1596,6 +1628,9 @@ public final class ConversionSession: ObservableObject, Identifiable {
                 if analyzeArtwork { foundImages.append(found.readURL) }
             case .unsupported:
                 break
+            }
+            if let importToken, index < deduplicated.files.count - 1 {
+                await reportImportScan(importToken, completed: true)
             }
         }
         if preparationCancellationRequested() { return cancelledResult() }
@@ -1916,7 +1951,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
             importToken: importToken,
             sourceFolderForCLI: sourceFolderForCLI
         )
-        if coverRevision == expectedCoverRevision,
+        if importToken.map(isCurrentImport) ?? true,
+           coverRevision == expectedCoverRevision,
            !isCoverSuppressed,
            !imageURLs.isEmpty,
            let url = findLargestImage(from: imageURLs) {
