@@ -142,8 +142,10 @@ Deshalb laufen alle Terminal-Ausgaben der CLI über `TerminalRenderer` in
   2026-08-25 wurden SIGINT und SIGTERM während eines realen ffmpeg-Laufs je
   dreimal mit Exit 130 beziehungsweise 143, ohne finale Ausgabe und ohne
   Staging-Reste geprüft; weitere 24 Läufe deckten die Abschluss-Rennbedingung ab.
-- **Noch ungetestet:** GUI-App-Lauf (nur Kompilierung via xcodebuild geprüft),
-  Audio-Qualität nach Gehör.
+- **Appstart geprüft (2026-09-05):** Release-App im Hintergrund gestartet und
+  beendet; die aktive Anwendung blieb unverändert. GUI-Dateiprovider sind
+  zusätzlich fensterlos geprüft. Visuelle Bedienung und Audioqualität nach
+  Gehör bleiben ungeprüft.
 
 ## GUI-Import
 
@@ -186,3 +188,23 @@ im genannten temporären Ordner. Format und Grenzen: [Projekte](projects.md).
 impliziert die Analyse und wendet einen gemeinsamen linearen Pegel an.
 Zusätzlicher Dekodier-/Analysepass und temporärer WAV-Bestand werden vorab
 in der GUI erklärt und im Lauf protokolliert. Beide Optionen sind standardmäßig aus.
+
+## Erweiterte Abnahme
+
+Nach `swift test` im Core:
+
+```sh
+python3 test_project_cli.py
+python3 tests/verify_audio_transitions.py
+python3 tests/verify_cli_matrix.py
+swiftc -parse-as-library -I HoerbuchkloepplerCore/.build/debug/Modules \
+  Hörbuchklöppler/ImportCoordinator.swift tests/verify_gui_import.swift \
+  HoerbuchkloepplerCore/.build/debug/HoerbuchkloepplerCore.build/*.swift.o \
+  -o /tmp/verify-gui-import
+/tmp/verify-gui-import
+```
+
+Die GUI-Importprüfung verwendet echte NSItemProvider ohne Fenster/Fokus und
+prüft acht Dateien, Fortschritt und verspätete Provider nach Abbruch.
+Die CLI-Matrix erzeugt lange stille Testquellen für echte Stunden-Splits.
+AAC-Toleranzen und gemessene Performance-Kapitelversätze stehen in encoding.md.

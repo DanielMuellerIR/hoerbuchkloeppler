@@ -98,6 +98,7 @@ public struct AudioImportFailure: Equatable, Sendable {
         case noAudioTrack
         case chapterAnalysisTimedOut
         case analysisFailed
+        case sourceChanged
         case providerLoadFailed(String?)
     }
 
@@ -119,6 +120,8 @@ public struct AudioImportFailure: Equatable, Sendable {
             return "Kapitelanalyse hat das Zeitlimit überschritten"
         case .analysisFailed:
             return "Audioanalyse fehlgeschlagen"
+        case .sourceChanged:
+            return "Quelldatei wurde während der Analyse verändert"
         case .providerLoadFailed(let details):
             if let details, !details.isEmpty {
                 return "Datei-URL konnte nicht geladen werden (\(details))"
@@ -406,9 +409,13 @@ private final class ConversionEventQueue: @unchecked Sendable {
 @MainActor
 public final class ConversionSession: ObservableObject, Identifiable {
     public let id = UUID()
-    @Published public var settings: AudioSettings
+    public nonisolated let importService = AudioImportService()
+    @Published public var settings: AudioSettings { didSet { importService.workerLimit = settings.importWorkerLimit } }
     public init(settings: AudioSettings = SettingsManager.shared.loadSettings()) {
         self.settings = settings.normalized()
+        importService.workerLimit = self.settings.importWorkerLimit
+        let service = importService
+        embeddedArtworkLoader = { url in await service.artwork(at: url) }
         conversionEventQueue.start { [weak self] event in
             self?.applyConversionEvent(event)
         }
@@ -418,6 +425,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         didSet {
             recordChapterEdit(previous: oldValue)
             if audioFiles.isEmpty {
+                importService.clearCachedArtwork()
                 invalidateImportWork()
                 clearMetadata()
             }
@@ -474,6 +482,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
     @Published public var projectSourceIssues: [ProjectSourceIssue] = []
     public var loadedProjectURL: URL?
     var projectSources: [ProjectSource] = []
+    let projectFingerprints = ProjectFingerprintStore()
+    var projectOperation = UUID()
     var undoChapters: [ChapterEditSnapshot] = []
     var redoChapters: [ChapterEditSnapshot] = []
     var restoringChapters = false
@@ -499,6 +509,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// Beginnt einen abbrechbaren Import-/Metadatenlauf. Die CLI startet ihn vor
     /// dem asynchron erwarteten Ordnerscan.
     public nonisolated func beginPreparation() {
+        importService.clearCachedArtwork()
         preparationCoordinator.begin()
     }
 
@@ -591,15 +602,22 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// an zwei gleich typisierten Parametern vertauscht werden.
     private nonisolated func extractChapterResult(
         from file: FoundFile,
-        importToken: ImportToken? = nil
+        importToken: ImportToken? = nil,
+        knownFile: AudioFile? = nil
     ) async -> ChapterExtractionResult {
         let context = currentPreparationContext()
         return await AudioFile.extractChaptersControlled(
             from: file,
+            knownFile: knownFile,
             shouldCancel: { context?.isCancelled ?? false },
             runProcess: { process in
-                if let context { return try context.run(process) }
+                if let context {
+                    let started = try context.run(process)
+                    if started { self.importService.recordChapterRequest() }
+                    return started
+                }
                 try process.run()
+                self.importService.recordChapterRequest()
                 ProcessTerminator.recordOwnedProcessGroup(process)
                 return true
             },
@@ -640,23 +658,16 @@ public final class ConversionSession: ObservableObject, Identifiable {
     ) async -> AudioLoadResult {
         guard file.kind == .audio else { return .skipped }
 
-        // Den Stream-Typ vor Dauer- und Kapitelanalyse prüfen. Eine
-        // Video-only-MP4 darf weder einen ffmpeg-Kapitellauf starten noch die
-        // irreführende Fallback-Meldung „Keine Kapitel“ erzeugen.
-        switch await AudioFile.audioTrackAvailability(at: file.readURL) {
-        case .available:
-            break
-        case .missing:
-            return .failure(AudioImportFailure(sourceURL: file.source, reason: .noAudioTrack))
-        case .unreadable:
-            return .failure(AudioImportFailure(sourceURL: file.source, reason: .analysisFailed))
-        case .cancelled:
-            return .cancelled
+        let analysis: ImportedSourceAnalysis
+        switch await importService.analyze(file) {
+        case .success(let loaded): analysis = loaded
+        case .failure(let failure): return .failure(failure)
+        case .cancelled: return .cancelled
         }
 
         let candidates: [AudioFile]
         if file.isChapterContainer {
-            switch await extractChapterResult(from: file, importToken: importToken) {
+            switch await extractChapterResult(from: file, importToken: importToken, knownFile: analysis.file) {
             case .files(let files): candidates = files
             case .failed(let reason):
                 return .failure(AudioImportFailure(sourceURL: file.source, reason: reason))
@@ -664,9 +675,13 @@ public final class ConversionSession: ObservableObject, Identifiable {
                 return .cancelled
             }
         } else {
-            candidates = [await AudioFile(foundFile: file)]
+            candidates = [analysis.file]
         }
         guard !preparationCancellationRequested() else { return .cancelled }
+
+        guard analysis.isCurrent() else {
+            return .failure(AudioImportFailure(sourceURL: file.source, reason: .sourceChanged))
+        }
 
         for candidate in candidates {
             guard candidate.duration.isFinite, candidate.duration > 0 else {
@@ -676,6 +691,23 @@ public final class ConversionSession: ObservableObject, Identifiable {
             }
         }
         return .success(files: candidates, warnings: [])
+    }
+
+    /// Gemeinsamer Batch-Einstieg für Dateienauswahl und Ordnerscan. Abbruch
+    /// gibt ausdrücklich kein scheinbar vollständiges Teilergebnis zurück.
+    public nonisolated func loadAudioFiles(
+        from files: [FoundFile],
+        importToken: ImportToken? = nil
+    ) async -> [AudioLoadResult] {
+        await importService.orderedMap(
+            files,
+            shouldCancel: { self.preparationCancellationRequested() },
+            operation: { file in
+                let result = await self.loadAudioFiles(from: file, importToken: importToken)
+                if let importToken { await self.reportImportScan(importToken, filename: file.source.lastPathComponent, completed: true) }
+                return result
+            }
+        ) ?? [.cancelled]
     }
 
     /// Startet einen neuen Lauf und macht einen eventuell noch auslaufenden
@@ -1050,6 +1082,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// Datei-/Ordner-Drops verlieren damit sofort ihre Schreibberechtigung.
     /// Nur auf dem Main Actor aufrufen.
     public func beginImport(expectedItemCount: Int = 1) -> ImportToken {
+        projectOperation = UUID()
+        importService.retainCachedArtwork(for: audioFiles.map(\.url))
         // Derselbe Context besitzt Swift-Tasks und externe Analyseprozesse. Ein
         // neuer Drop beendet damit die noch laufende Arbeit seines Vorgängers.
         preparationCoordinator.begin()
@@ -1081,10 +1115,10 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
     /// Meldet genau einen Provider/Scan als abgeschlossen. Erst wenn alle Teile
     /// desselben Drops übernommen sind, beginnt eine einzige Metadatenabfrage.
-    public func finishImport(_ token: ImportToken) async {
+    public func finishImport(_ token: ImportToken, countingProgress: Bool = true) async {
         guard isCurrentImport(token), pendingImportOperations > 0 else { return }
         pendingImportOperations -= 1
-        importCompletedItems += 1
+        if countingProgress { importCompletedItems += 1 }
         guard pendingImportOperations == 0 else { return }
         if pendingImportWasCancelled {
             abandonPendingImport()
@@ -1126,7 +1160,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
             resumeArtworkSearchAfterBatch(token)
         }
         guard isCurrentImport(token) else { return }
-        if (title.isEmpty || author.isEmpty), let first = audioFiles.first {
+        if (title.isEmpty || author.isEmpty || narrator.isEmpty || series.isEmpty || volumeNumber.isEmpty || language.isEmpty), let first = audioFiles.first {
             await importGlobalMetadata(from: first, importToken: token)
             await finishMetadataImport(token: token, sourceFileID: first.id)
         } else {
@@ -1161,7 +1195,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
     private func reportImportScan(_ token: ImportToken, total: Int? = nil, filename: String? = nil, completed: Bool = false) {
         guard isCurrentImport(token) else { return }
-        if let total { importTotalItems += max(0, total - 1) }
+        if let total { importTotalItems += max(0, total) }
         if let filename { importDetail = filename }
         if completed { importCompletedItems += 1 }
     }
@@ -1310,7 +1344,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         // GUI-Drops sammeln erst alle Provider und starten danach in
         // `finishImport` genau eine Metadatenabfrage. Der erwartete CLI-Pfad hat
         // keinen Import-Token und löst die Abfrage hier direkt aus.
-        if importToken == nil, (title.isEmpty || author.isEmpty) {
+        if importToken == nil, (title.isEmpty || author.isEmpty || narrator.isEmpty || series.isEmpty || volumeNumber.isEmpty || language.isEmpty) {
             if let first = audioFiles.first {
                 await importGlobalMetadata(from: first, importToken: importToken)
             }
@@ -1427,6 +1461,12 @@ public final class ConversionSession: ObservableObject, Identifiable {
               importToken == nil || audioFiles.contains(where: { $0.id == file.id }),
               preparation?.isCancelled != true else {
             return
+        }
+        if let metadata = importService.metadata(for: file.url) {
+            if narrator.isEmpty { narrator = metadata["narrator"] ?? "" }
+            if series.isEmpty { series = metadata["series"] ?? "" }
+            if volumeNumber.isEmpty { volumeNumber = metadata["volume_number"] ?? "" }
+            if language.isEmpty { language = metadata["language"] ?? "" }
         }
         guard let candidates else {
             // Kandidaten gehören immer genau zum aktuellen Import. Andernfalls
@@ -1627,39 +1667,38 @@ public final class ConversionSession: ObservableObject, Identifiable {
         }
 
         if let importToken {
-            await reportImportScan(importToken, total: deduplicated.files.count)
+            await reportImportScan(importToken, total: deduplicated.files.filter { $0.kind == .audio }.count)
         }
-        for (index, found) in deduplicated.files.enumerated() {
-            if let importToken { await reportImportScan(importToken, filename: found.source.lastPathComponent) }
-            if preparationCancellationRequested() { return cancelledResult() }
-            switch found.kind {
-            case .audio:
-                let loaded = await loadAudioFiles(from: found, importToken: importToken)
-                foundAudio.append(contentsOf: loaded.files)
-                warnings.append(contentsOf: loaded.warnings)
-                if loaded.wasCancelled {
-                    return cancelledResult()
+        let audioSources = deduplicated.files.filter { $0.kind == .audio }
+        if analyzeArtwork {
+            foundImages = deduplicated.files.filter { $0.kind == .image }.map(\.readURL)
+        }
+        guard let results = await importService.orderedMap(
+            audioSources,
+            shouldCancel: { self.preparationCancellationRequested() },
+            operation: { found in
+                if let importToken {
+                    await self.reportImportScan(importToken, filename: found.source.lastPathComponent)
                 }
-                if let failure = loaded.failures.first {
-                    // Alle weiteren Dateien trotzdem analysieren, damit GUI und
-                    // CLI in einem Lauf die vollständige Fehlerliste nennen.
-                    analysisFailures.append(failure)
-                }
-            case .image:
-                if analyzeArtwork { foundImages.append(found.readURL) }
-            case .unsupported:
-                break
+                let loaded = await self.loadAudioFiles(from: found, importToken: importToken)
+                if let importToken { await self.reportImportScan(importToken, completed: true) }
+                return loaded
             }
-            if let importToken, index < deduplicated.files.count - 1 {
-                await reportImportScan(importToken, completed: true)
-            }
+        ) else { return cancelledResult() }
+        for loaded in results {
+            if loaded.wasCancelled { return cancelledResult() }
+            foundAudio.append(contentsOf: loaded.files)
+            warnings.append(contentsOf: loaded.warnings)
+            // Jeden Dateifehler in Eingangsreihenfolge behalten; ein kaputter
+            // früher Eingang darf die Analyse der späteren Quellen nicht verhindern.
+            analysisFailures.append(contentsOf: loaded.failures)
         }
         if preparationCancellationRequested() { return cancelledResult() }
         var embedded: Data?
         if analyzeArtwork {
             for audioFile in Self.uniqueArtworkCandidates(foundAudio) {
                 if preparationCancellationRequested() { return cancelledResult() }
-                if let artworkData = await AudioFile.extractEmbeddedArtwork(from: audioFile.url) {
+                if let artworkData = await importService.artwork(at: audioFile.url) {
                     if preparationCancellationRequested() { return cancelledResult() }
                     if NSImage(data: artworkData) != nil {
                         embedded = artworkData
@@ -2154,7 +2193,7 @@ public struct AudioFile: Identifiable, Equatable, Sendable {
         }
     }
 
-    private static func findRobustTag(
+    static func findRobustTag(
         for tagName: String,
         in metadata: [AVMetadataItem]
     ) async -> String? {

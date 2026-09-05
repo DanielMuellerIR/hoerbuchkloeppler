@@ -59,3 +59,7 @@ die Schätzung keine Garantie.
 `analyzeLoudness` und `normalizeLoudness` sind Bool-Werte mit Default `false`.
 Die Angleichung impliziert den zusätzlichen Analysepass. Details, Zielpegel und
 WAV-Speicherbedarf stehen in [encoding.md](encoding.md#optionale-buchlautheit-2026-09-05).
+
+`importWorkerLimit` begrenzt Quellanalysen auf 1–8 (Default 4),
+GUI „Quellanalysen beim Import“, CLI `--import-workers`. Der Wert reist im Projekt
+und im kopierten CLI-Befehl mit.

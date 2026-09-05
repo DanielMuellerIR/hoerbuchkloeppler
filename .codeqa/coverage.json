@@ -81,12 +81,15 @@
     {
       "id": "session-lifecycle",
       "paths": [
-        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift"
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession+Project.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionRunState.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ProjectFingerprintStore.swift"
       ],
       "risk": "critical",
       "priority": 1,
       "reason": "Bekannte SIGINT-Lücke in der Vorbereitungsphase sowie zentraler Main-Actor-, Import- und Metadatenzustand",
-      "state": "completed",
+      "state": "pending",
       "last_run": {
         "campaign_id": "20260903T102818420748+0200",
         "completed_at": "2026-09-03T10:30:21+02:00",
@@ -99,7 +102,13 @@
         "tests": [
           "swift test -Xswiftc -warnings-as-errors: 201/201 passed"
         ]
-      }
+      },
+      "pending_paths": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession+Project.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionRunState.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ProjectFingerprintStore.swift"
+      ]
     },
     {
       "id": "conversion-engine",
@@ -107,7 +116,10 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift",
         "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/FFmpegWrapperTests.swift",
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ProcessTermination.swift",
-        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/OutputStaging.swift"
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/OutputStaging.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionPlan.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegArguments.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/LoudnessMeasurement.swift"
       ],
       "risk": "critical",
       "priority": 2,
@@ -127,8 +139,13 @@
         ]
       },
       "pending_paths": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift",
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/FFmpegWrapperTests.swift",
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ProcessTermination.swift",
-        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/OutputStaging.swift"
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/OutputStaging.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionPlan.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegArguments.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/LoudnessMeasurement.swift"
       ]
     },
     {
@@ -183,12 +200,13 @@
     {
       "id": "audio-analysis",
       "paths": [
-        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift"
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioImportService.swift"
       ],
       "risk": "high",
       "priority": 5,
       "reason": "AVFoundation-Analyse, Kapitelimport und externe ffmpeg-Prozessgrenze",
-      "state": "completed",
+      "state": "pending",
       "last_run": {
         "campaign_id": "20260903T102818420748+0200",
         "completed_at": "2026-09-03T10:52:27+02:00",
@@ -201,19 +219,26 @@
         "tests": [
           "swift test -Xswiftc -warnings-as-errors: 201/201 passed"
         ]
-      }
+      },
+      "pending_paths": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioImportService.swift"
+      ]
     },
     {
       "id": "core-configuration",
       "paths": [
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioSettings.swift",
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/SettingsManager.swift",
-        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/CLIInvocation.swift"
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/CLIInvocation.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudiobookProject.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionPreview.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/RunReport.swift"
       ],
       "risk": "high",
       "priority": 6,
       "reason": "Persistierte Einstellungen, Normalisierung und vollständiger shell-sicherer GUI-zu-CLI-Vertrag",
-      "state": "completed",
+      "state": "pending",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
         "completed_at": "2026-08-29T21:06:09+02:00",
@@ -228,7 +253,15 @@
           "kloeppler --bitrate 7999 und --samplerate 48001: jeweils Exit 64 mit Validierungsfehler",
           "swift test: 187 Tests in 22 Suites bestanden"
         ]
-      }
+      },
+      "pending_paths": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioSettings.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/SettingsManager.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/CLIInvocation.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudiobookProject.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionPreview.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/RunReport.swift"
+      ]
     },
     {
       "id": "build-system",
@@ -284,12 +317,21 @@
       "id": "regression-tests",
       "paths": [
         "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ReviewFixTests.swift",
-        "test_scripts.sh"
+        "test_scripts.sh",
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ProjectTests.swift",
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ResourceLimitTests.swift",
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ConversionPreviewTests.swift",
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/AudioImportServiceTests.swift",
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/LoudnessTests.swift",
+        "test_project_cli.py",
+        "tests/verify_cli_matrix.py",
+        "tests/verify_audio_transitions.py",
+        "tests/experiments/encoding_without_wav.py"
       ],
       "risk": "medium",
       "priority": 9,
       "reason": "Breite Querschnittstests für Laufzeit, Import, Einstellungen und Tool-Auflösung",
-      "state": "completed",
+      "state": "pending",
       "last_run": {
         "campaign_id": "20260903T102818420748+0200",
         "completed_at": "2026-09-03T10:53:52+02:00",
@@ -302,7 +344,20 @@
         "tests": [
           "./test_scripts.sh grün; mit testweise abweichender VERSION Exit 1 mit beiden Werten in der Meldung"
         ]
-      }
+      },
+      "pending_paths": [
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ReviewFixTests.swift",
+        "test_scripts.sh",
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ProjectTests.swift",
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ResourceLimitTests.swift",
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ConversionPreviewTests.swift",
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/AudioImportServiceTests.swift",
+        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/LoudnessTests.swift",
+        "test_project_cli.py",
+        "tests/verify_cli_matrix.py",
+        "tests/verify_audio_transitions.py",
+        "tests/experiments/encoding_without_wav.py"
+      ]
     },
     {
       "id": "gui-frontend",
@@ -313,12 +368,16 @@
         "Hörbuchklöppler/SettingsView.swift",
         "Hörbuchklöppler/Hörbuchklöppler.swift",
         "Hörbuchklöppler/info.plist",
-        "Hörbuchklöppler/ErrorAlert.swift"
+        "Hörbuchklöppler/ErrorAlert.swift",
+        "Hörbuchklöppler/ChapterPreviewPlayer.swift",
+        "Hörbuchklöppler/ImportCoordinator.swift",
+        "Hörbuchklöppler/OutputCoordinator.swift",
+        "Hörbuchklöppler/OutputPreviewView.swift"
       ],
       "risk": "medium",
       "priority": 10,
       "reason": "Dünne SwiftUI-Schicht, Datei-Drop, Exportplanung und Sitzungsdarstellung",
-      "state": "completed",
+      "state": "pending",
       "last_run": {
         "campaign_id": "20260903T102818420748+0200",
         "completed_at": "2026-09-03T10:43:51+02:00",
@@ -331,7 +390,20 @@
         "tests": [
           "xcodebuild -configuration Release: BUILD SUCCEEDED"
         ]
-      }
+      },
+      "pending_paths": [
+        "Hörbuchklöppler/ContentView.swift",
+        "Hörbuchklöppler/ConversionOverlayView.swift",
+        "Hörbuchklöppler/MetadataSelectionView.swift",
+        "Hörbuchklöppler/SettingsView.swift",
+        "Hörbuchklöppler/Hörbuchklöppler.swift",
+        "Hörbuchklöppler/info.plist",
+        "Hörbuchklöppler/ErrorAlert.swift",
+        "Hörbuchklöppler/ChapterPreviewPlayer.swift",
+        "Hörbuchklöppler/ImportCoordinator.swift",
+        "Hörbuchklöppler/OutputCoordinator.swift",
+        "Hörbuchklöppler/OutputPreviewView.swift"
+      ]
     },
     {
       "id": "xcode-config",

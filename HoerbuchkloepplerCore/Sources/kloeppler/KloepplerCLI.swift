@@ -180,6 +180,7 @@ private struct CLIOptions: Sendable {
     let verbose: Bool
     let force: Bool
     let workers: Int?
+    let importWorkers: Int?
     let analyzeLoudness: Bool
     let normalizeLoudness: Bool
     let narrator: String?
@@ -316,6 +317,8 @@ struct KloepplerCLI: AsyncParsableCommand {
 
     @Option(name: .long, help: "Maximale Encoding-Prozesse (1–32); automatisch höchstens vier.")
     var workers: Int?
+    @Option(name: .long, help: "Gleichzeitige Quellanalysen (1–8, Default 4).")
+    var importWorkers: Int?
 
     @Flag(name: .long, help: "Buchlautheit messen; zusätzlicher vollständiger Dekodier-/Analysepass und temporäre WAV-Dateien.")
     var analyzeLoudness = false
@@ -333,6 +336,7 @@ struct KloepplerCLI: AsyncParsableCommand {
     // Eingaben früh prüfen (läuft vor run()), damit klare Fehler entstehen statt
     // erst später eine kryptische ffmpeg-Meldung — wichtig für den Skript-/Agent-Einsatz.
     func validate() throws {
+        if let importWorkers, !(1...8).contains(importWorkers) { throw ValidationError("--import-workers erwartet 1–8.") }
         if let language { _ = try BookMetadata.outputLanguage(language) }
         if let volumeNumber { try BookMetadata.validateVolumeNumber(volumeNumber) }
         guard ["text", "json"].contains(format) else { throw ValidationError("--format erwartet text oder json.") }
@@ -378,7 +382,7 @@ struct KloepplerCLI: AsyncParsableCommand {
             output: output,
             verbose: verbose,
             force: force,
-            workers: workers, analyzeLoudness: analyzeLoudness, normalizeLoudness: normalizeLoudness,
+            workers: workers, importWorkers: importWorkers, analyzeLoudness: analyzeLoudness, normalizeLoudness: normalizeLoudness,
             narrator: narrator, series: series, volumeNumber: volumeNumber, language: language
         )
         try await Self.execute(options)
@@ -427,6 +431,7 @@ struct KloepplerCLI: AsyncParsableCommand {
         // CLI-Aufrufe sind reproduzierbar: nicht gesetzte Optionen verwenden die
         // dokumentierten Defaults und hängen nicht von GUI-settings.json ab.
         let session = ConversionSession(settings: AudioSettings())
+        if let workers = options.importWorkers { session.settings.importWorkerLimit = workers }
 
         // Ab hier gehört das Terminal dem Renderer: Alle Session-Logs laufen über
         // ihn, damit sie nicht in die Pacman-Fortschrittsanzeige hineinschreiben.
@@ -482,18 +487,22 @@ struct KloepplerCLI: AsyncParsableCommand {
             if let projectPath = options.project {
                 try session.openProject(from: URL(fileURLWithPath: projectPath))
             } else if !options.files.isEmpty {
+                if cover != nil || noCover { session.removeCover() }
                 let token = session.beginImport(expectedItemCount: options.files.count)
                 await session.runImportTask(token) {
+                    var foundFiles: [FoundFile] = []
                     for path in options.files {
-                        guard !Task.isCancelled else { return }
                         let source = URL(fileURLWithPath: path)
-                        if let found = ConversionSession.foundFile(at: source) {
-                            let result = await session.loadAudioFiles(from: found, importToken: token)
-                            session.stageAudioLoadResult(result, importToken: token)
-                        } else {
+                        if let found = ConversionSession.foundFile(at: source) { foundFiles.append(found) }
+                        else {
                             session.stageAudioLoadResult(.failure(AudioImportFailure(sourceURL: source, reason: .analysisFailed)), importToken: token)
+                            await session.finishImport(token)
                         }
-                        await session.finishImport(token)
+                    }
+                    let results = await session.loadAudioFiles(from: foundFiles, importToken: token)
+                    for result in results {
+                        session.stageAudioLoadResult(result, importToken: token)
+                        await session.finishImport(token, countingProgress: false)
                     }
                 }
                 // Core-Import dedupliziert nach gemeinsamer Dateiidentität. Nur
@@ -522,6 +531,7 @@ struct KloepplerCLI: AsyncParsableCommand {
                 throw reportedFailure("Fehler: Keine gültigen Audiodateien im Ordner gefunden.")
             }
 
+            if let workers = options.importWorkers { session.settings.importWorkerLimit = workers }
             if options.analyzeLoudness { session.settings.analyzeLoudness = true }
             if options.normalizeLoudness { session.settings.normalizeLoudness = true }
             if let narrator = options.narrator { session.narrator = narrator }

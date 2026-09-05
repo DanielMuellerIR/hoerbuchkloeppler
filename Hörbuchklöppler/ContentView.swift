@@ -7,11 +7,7 @@ import AVFoundation
 import Combine
 
 struct ContentView: View {
-    @State private var previewPlan: ConversionPlan?
-    @State private var showingConversionPreview = false
-    @State private var showingOverwriteAlert = false
-    @State private var pendingPlan: ConversionPlan? = nil
-    @State private var collidingOutputNames: [String] = []
+    @StateObject private var flow = OutputCoordinator()
     @StateObject var session = ConversionSession()
     @StateObject private var preview = ChapterPreviewPlayer()
     @State private var selectedChapters: Set<UUID> = []
@@ -21,7 +17,6 @@ struct ContentView: View {
     @State private var ffmpegStatus = "Prüfe..."
     @State private var miStatus = "Prüfe..."
     @State private var showingToolErrorAlert = false
-    @State private var conversionStartError: String?
     @State private var cliHandoffError: String?
     /// Einmal aufgelöster CLI-Pfad. Die Auflösung durchsucht den gesamten PATH
     /// mit je einem Dateisystemzugriff pro Eintrag; im View-Body ausgewertet
@@ -59,33 +54,8 @@ struct ContentView: View {
     }
 
     private func saveAndExport() {
-        if !ffmpegStatus.contains("OK") || !miStatus.contains("OK") {
-            self.showingToolErrorAlert = true; return
-        }
-        let savePanel = NSSavePanel()
-        if #available(macOS 10.15, *) { savePanel.allowedContentTypes = [UTType.mpeg4Movie] } else { savePanel.allowedFileTypes = ["m4b", "mp4"] }
-        savePanel.nameFieldStringValue = session.title.isEmpty ? "Hörbuch" : session.title
-        savePanel.canCreateDirectories = true
-        // Antwort-Behandlung gemeinsam, egal ob als Sheet oder modal gezeigt.
-        let handleResponse: (NSApplication.ModalResponse) -> Void = { response in
-            if response == .OK, let url = savePanel.url {
-                let finalURL = url.pathExtension.isEmpty ? url.appendingPathExtension("m4b") : url.deletingPathExtension().appendingPathExtension("m4b")
-                let plan = FFmpegWrapper.makeConversionPlan(
-                    files: session.audioFiles,
-                    outputURL: finalURL,
-                    maxDurationHours: session.settings.maxDurationHours
-                )
-                previewPlan = plan
-                showingConversionPreview = true
-            }
-        }
-        // Kein Force-Unwrap auf NSApp.mainWindow (kann nil sein -> Crash).
-        // Vorhandenes Fenster als Sheet-Parent nutzen, sonst Panel modal zeigen.
-        if let window = NSApp.mainWindow ?? NSApp.keyWindow ?? NSApp.windows.first {
-            savePanel.beginSheetModal(for: window, completionHandler: handleResponse)
-        } else {
-            handleResponse(savePanel.runModal())
-        }
+        guard ffmpegStatus.contains("OK"), miStatus.contains("OK") else { showingToolErrorAlert = true; return }
+        flow.selectOutput(session: session)
     }
 
     var body: some View {
@@ -259,7 +229,7 @@ struct ContentView: View {
         )
         .errorAlert(
             "Konvertierung nicht gestartet",
-            message: $conversionStartError,
+            message: $flow.conversionStartError,
             fallback: "Unbekannter Startfehler"
         )
         .errorAlert(
@@ -270,21 +240,19 @@ struct ContentView: View {
         .onAppear { checkTools() }
         .frame(minWidth: 850, minHeight: 650) // Fenster etwas höher gemacht (650 statt 550)
         .sheet(isPresented: $showingSettings) { SettingsView(session: session, isPresented: $showingSettings) }
-        .alert("Datei existiert bereits", isPresented: $showingOverwriteAlert) {
+        .alert("Datei existiert bereits", isPresented: $flow.showingOverwriteAlert) {
             Button("Abbrechen", role: .cancel) { }
             Button("Drüberklöppeln", role: .destructive) {
-                if let plan = pendingPlan { startConversion(plan) }
+                if let plan = flow.pendingPlan { flow.start(plan, session: session) }
             }
         } message: {
-            Text("Diese tatsächlichen Zieldateien existieren bereits:\n\(collidingOutputNames.joined(separator: "\n"))\n\nMöchten Sie sie wirklich überklöppeln?")
+            Text("Diese tatsächlichen Zieldateien existieren bereits:\n\(flow.collidingOutputNames.joined(separator: "\n"))\n\nMöchten Sie sie wirklich überklöppeln?")
         }
-        .sheet(isPresented: $showingConversionPreview) {
-            if let plan = previewPlan {
-                OutputPreviewView(preview: ConversionPreview(plan: plan, settings: session.settings), onCancel: { showingConversionPreview = false }, onStart: {
-                    showingConversionPreview = false
-                    let collisions = plan.outputURLsRequiringOverwriteConfirmation
-                    if collisions.isEmpty { startConversion(plan) }
-                    else { pendingPlan = plan; collidingOutputNames = collisions.map(\.lastPathComponent); showingOverwriteAlert = true }
+        .sheet(isPresented: $flow.showingConversionPreview) {
+            if let plan = flow.previewPlan {
+                OutputPreviewView(preview: ConversionPreview(plan: plan, settings: session.settings), onCancel: { flow.showingConversionPreview = false }, onStart: {
+                    flow.showingConversionPreview = false
+                    flow.confirmPreview(plan, session: session)
                 })
             }
         }
@@ -348,13 +316,13 @@ struct ContentView: View {
             let panel = NSSavePanel(); panel.nameFieldStringValue = "Hörbuch.hkproject"
             panel.beginSheetModal(for: window) { response in
                 guard response == .OK, let url = panel.url else { return }
-                do { try session.saveProject(to: url) } catch { projectError = error.localizedDescription }
+                Task { do { try await session.saveProjectAsync(to: url) } catch { projectError = error.localizedDescription } }
             }
         } else {
             let panel = NSOpenPanel(); panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
             panel.beginSheetModal(for: window) { response in
                 guard response == .OK, let url = panel.url else { return }
-                do { preview.stop(); try session.openProject(from: url) } catch { projectError = error.localizedDescription }
+                Task { do { preview.stop(); try await session.openProjectAsync(from: url) } catch { projectError = error.localizedDescription } }
             }
         }
     }
@@ -371,31 +339,11 @@ struct ContentView: View {
             guard response == .OK else { return }
             let urls = panel.urls
             Task { @MainActor in
-                let token = session.beginImport(expectedItemCount: urls.count)
-                await session.runImportTask(token) {
-                    for url in urls {
-                        guard !Task.isCancelled else { return }
-                        await ImportCoordinator.processURL(url, session: session, importToken: token)
-                    }
-                }
+                await ImportCoordinator.importURLs(urls, session: session)
             }
         }
     }
 
-    private func startConversion(_ plan: ConversionPlan) {
-        session.refreshProjectSourceIssues()
-        guard session.projectSourceIssues.isEmpty else {
-            projectError = "Projektquellen fehlen oder wurden verändert."
-            return
-        }
-        switch FFmpegWrapper.convert(session: session, plan: plan) {
-        case .started:
-            conversionStartError = nil
-        case .rejected(let message):
-            conversionStartError = message
-        }
-    }
-    
     /// Kapitel-Dauer als `m:ss` bzw. `h:mm:ss` (ab einer Stunde).
     private func formatDuration(_ seconds: TimeInterval) -> String {
         let total = Int(seconds.rounded())

@@ -41,7 +41,7 @@ extension ConversionSession {
                 sources.append(ProjectSource(id: id,
                     location: ProjectLocation(url: file.sourceURL, projectURL: url),
                     readLocation: ProjectLocation(url: file.url, projectURL: url),
-                    sha256: try prior?.sha256 ?? ProjectSource.fingerprint(file.url)))
+                    sha256: try prior?.sha256 ?? projectFingerprints.fingerprint(file.url)))
             }
             sections.append(ProjectSection(id: file.id, sourceID: id, start: file.startTime, duration: file.duration, title: file.chapterTitle))
         }
@@ -60,7 +60,11 @@ extension ConversionSession {
 
     public func openProject(from url: URL) throws {
         guard !isConverting else { throw ProjectError.invalid("Während einer Konvertierung kann kein Projekt geöffnet werden.") }
-        let project = try AudiobookProject.read(from: url)
+        try applyProject(AudiobookProject.read(from: url), from: url)
+    }
+
+    private func applyProject(_ project: AudiobookProject, from url: URL) throws {
+        guard !isConverting else { throw ProjectError.invalid("Während einer Konvertierung kann kein Projekt geöffnet werden.") }
         var files: [AudioFile] = []
         let sources = Dictionary(uniqueKeysWithValues: project.sources.map { ($0.id, $0) })
         for section in project.sections {
@@ -81,6 +85,30 @@ extension ConversionSession {
         refreshProjectSourceIssues()
     }
 
+    public func openProjectAsync(from url: URL) async throws {
+        let operation = UUID(); projectOperation = operation
+        let store = projectFingerprints
+        let project = try await Task.detached {
+            let project = try AudiobookProject.read(from: url)
+            for source in project.sources { _ = try? store.fingerprint(source.readLocation.resolve(from: url)) }
+            return project
+        }.value
+        guard projectOperation == operation else { return }
+        try applyProject(project, from: url)
+    }
+
+    public func saveProjectAsync(to url: URL) async throws {
+        let operation = UUID(); projectOperation = operation
+        let files = audioFiles
+        let store = projectFingerprints
+        await Task.detached {
+            for file in files { _ = try? store.fingerprint(file.url) }
+        }.value
+        guard projectOperation == operation else { return }
+        guard files == audioFiles else { throw ProjectError.invalid("Kapitel wurden während des Speicherns verändert; bitte erneut speichern.") }
+        try saveProject(to: url)
+    }
+
     public func refreshProjectSourceIssues() {
         guard let url = loadedProjectURL else { projectSourceIssues = []; return }
         let activeURLs = Set(audioFiles.map(\.sourceURL))
@@ -93,7 +121,13 @@ extension ConversionSession {
                 guard visible.resolvingSymlinksInPath() == readURL.resolvingSymlinksInPath() else {
                     return ProjectSourceIssue(id: source.id, path: visible.path, reason: "Verknüpfung wurde verändert")
                 }
-                if try ProjectSource.fingerprint(readURL) == source.sha256 { return nil }
+                guard FFmpegWrapper.fileSystemIdentity(at: readURL, followSymlink: true) != nil else {
+                    return ProjectSourceIssue(id: source.id, path: visible.path, reason: "Quelle fehlt oder ist nicht lesbar")
+                }
+                if projectFingerprints.changedSinceLastRead(readURL) {
+                    return ProjectSourceIssue(id: source.id, path: visible.path, reason: "Quelle wurde verändert")
+                }
+                if try projectFingerprints.fingerprint(readURL) == source.sha256 { return nil }
                 reason = "Quelle wurde verändert"
             } catch { reason = "Quelle fehlt oder ist nicht lesbar" }
             return ProjectSourceIssue(id: source.id, path: visible.path, reason: reason)

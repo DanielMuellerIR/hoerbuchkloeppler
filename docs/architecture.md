@@ -109,3 +109,12 @@ in [opportunities.md](opportunities.md).
 - `OutputPreviewView.swift`: konkrete Zielpfade und geschätzter Volume-Bedarf.
 
 Details zum Speicherformat und zu Bearbeitungsgrenzen: [Projekte](projects.md).
+
+`AudioImportService.swift` besitzt die gebündelte AVFoundation-Analyse,
+Dateiidentität, Metadaten-/Artwork-Snapshots, begrenzte Tasks und Analysezähler.
+`FFmpegArguments.swift` baut Slice-/Encoding-Argumente.
+`LoudnessMeasurement.swift` wertet die buchweite Lautheit und den gemeinsamen
+linearen Pegel aus.
+
+`OutputCoordinator.swift` besitzt Ausgabeauswahl, Vorschau, Überschreibbestätigung
+und Laufstart; `ContentView` bindet dessen Zustand.

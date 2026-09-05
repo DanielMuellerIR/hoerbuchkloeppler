@@ -18,6 +18,7 @@ struct LoudnessTests {
 
     @Test func metadataAndLoudnessTravelThroughCLI() throws {
         #expect(try BookMetadata.outputLanguage("de") == "deu")
+        #expect(try BookMetadata.outputLanguage("de-DE") == "deu")
         #expect(throws: (any Error).self) { try BookMetadata.outputLanguage("Deutsch") }
         #expect(throws: (any Error).self) { try BookMetadata.validateVolumeNumber("70000") }
         let invocation = CLIInvocation(executable: "kloeppler", folderURL: URL(fileURLWithPath: "/tmp"), settings: AudioSettings(normalizeLoudness: true), title: "", author: "", narrator: "Ada", series: "Reihe", volumeNumber: "2", language: "deu")

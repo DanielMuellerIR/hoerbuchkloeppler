@@ -120,10 +120,10 @@ public enum ProjectError: LocalizedError {
 extension BookMetadata {
     /// MP4 speichert die Sprache als dreistelligen ISO-639-2-Code.
     public static func outputLanguage(_ value: String) throws -> String {
-        let code = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let code = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().split(whereSeparator: { $0 == "-" || $0 == "_" }).first.map(String.init) ?? ""
         if code.isEmpty { return "" }
-        let commonCodes = ["de": "deu", "en": "eng", "fr": "fra", "es": "spa", "it": "ita", "pt": "por", "nl": "nld", "pl": "pol", "ru": "rus", "ja": "jpn", "zh": "zho", "ko": "kor", "ar": "ara", "tr": "tur", "sv": "swe", "da": "dan", "no": "nor", "fi": "fin", "cs": "ces", "uk": "ukr", "el": "ell"]
-        if let expanded = commonCodes[code] { return expanded }
+        let language = Locale.LanguageCode(code)
+        if language.isISOLanguage, let expanded = language.identifier(.alpha3) { return expanded }
         guard code.range(of: "^[a-z]{3}$", options: .regularExpression) != nil else {
             throw ProjectError.invalid("Sprache als dreistelligen ISO-639-2-Code angeben, z. B. deu oder eng.")
         }

@@ -54,6 +54,9 @@ struct SettingsView: View {
                 }
 
                 Section(header: Text("Performance & Optimierung").foregroundColor(.secondary)) {
+                    Picker("Quellanalysen beim Import", selection: $session.settings.importWorkerLimit) {
+                        ForEach(1...8, id: \.self) { Text(String($0)).tag($0) }
+                    }
                     Picker("Maximale Prozesse", selection: $session.settings.workerLimit) {
                         Text("Automatisch (höchstens 4)").tag(Int?.none)
                         ForEach(1...32, id: \.self) { Text(String($0)).tag(Int?.some($0)) }

@@ -11,6 +11,7 @@ public struct AudioSettings: Codable, Equatable, Sendable {
     public var isVerbose: Bool = false
     /// nil begrenzt automatisch auf höchstens vier Prozesse.
     public var workerLimit: Int? = nil
+    public var importWorkerLimit: Int = 4
     public var analyzeLoudness: Bool = false
     public var normalizeLoudness: Bool = false
 
@@ -26,6 +27,7 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         useParallelEncoding: Bool = true,
         isVerbose: Bool = false,
         workerLimit: Int? = nil,
+        importWorkerLimit: Int = 4,
         analyzeLoudness: Bool = false,
         normalizeLoudness: Bool = false
     ) {
@@ -36,6 +38,7 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         self.useParallelEncoding = useParallelEncoding
         self.isVerbose = isVerbose
         self.workerLimit = workerLimit
+        self.importWorkerLimit = importWorkerLimit
         self.analyzeLoudness = analyzeLoudness
         self.normalizeLoudness = normalizeLoudness
     }
@@ -53,6 +56,7 @@ public struct AudioSettings: Codable, Equatable, Sendable {
             ?? defaults.maxDurationHours
         useParallelEncoding = (try? values.decode(Bool.self, forKey: .useParallelEncoding))
             ?? defaults.useParallelEncoding
+        importWorkerLimit = (try? values.decode(Int.self, forKey: .importWorkerLimit)) ?? 4
         workerLimit = try? values.decodeIfPresent(Int.self, forKey: .workerLimit)
         analyzeLoudness = (try? values.decode(Bool.self, forKey: .analyzeLoudness)) ?? false
         normalizeLoudness = (try? values.decode(Bool.self, forKey: .normalizeLoudness)) ?? false
@@ -89,6 +93,7 @@ public struct AudioSettings: Codable, Equatable, Sendable {
             result.maxDurationHours = defaults.maxDurationHours
         }
         if let limit = result.workerLimit, !(1...32).contains(limit) { result.workerLimit = nil }
+        if !(1...8).contains(result.importWorkerLimit) { result.importWorkerLimit = 4 }
         return result
     }
 }

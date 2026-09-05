@@ -60,3 +60,63 @@ Die Messung verwendet macOS wegen `aac_at` und lokaler Sprachausgabe (`say -o`).
 Rohwerte werden als `results.json` im ausgegebenen Messordner abgelegt.
 Die Import-Baseline und die Skalierungsproben wurden separat gemessen; das
 beigefügte Skript reproduziert den Vergleich mit sechs Abschnitten.
+
+## Importdienst nach Zusammenlegung
+
+`AudioImportService` bündelt Tracks, Dauer und Metadaten; die anschließende
+Sprachabfrage und Artwork-Datenanforderungen werden separat gezählt.
+Datei-Drops und Auswahl sammeln Provider vor der begrenzten Analyse.
+
+## CLI-Vorher/Nachher
+
+Gleiche Fixtures und Messmethode wie die Baseline oben: je drei Läufe, Median Sekunden; RSS höchster Einzelwert. Zeit umfasst CLI-Start/Import/Zielvalidierung.
+
+| Quellen | Artwork | Vorher s | Nachher s | Änderung | Nachher RSS MiB |
+| --- | --- | ---: | ---: | ---: | ---: |
+| WAV 100 | aus | 0.3983 | 0.3484 | -12.5% | 60.50 |
+| WAV 100 | an | 0.4243 | 0.3500 | -17.5% | 60.75 |
+| WAV 1000 | aus | 1.2093 | 0.8341 | -31.0% | 78.19 |
+| WAV 1000 | an | 1.4096 | 0.8663 | -38.5% | 80.50 |
+| M4A 100 | aus | 0.3835 | 0.3513 | -8.4% | 60.86 |
+| M4A 100 | an | 0.3846 | 0.3412 | -11.3% | 62.55 |
+| M4A 1000 | aus | 1.2054 | 0.8644 | -28.3% | 78.78 |
+| M4A 1000 | an | 1.2203 | 0.9026 | -26.0% | 80.56 |
+
+## Instrumentierter Ordnerscan nach Änderung
+
+Zeiten enthalten Dateisuche, Analyse und Coversuche, ohne CLI-Start. Zähler messen tatsächlich ausgeführte AVAsset-Anforderungen und Artwork-Datenanforderungen. Ein Asset-Aufruf lädt drei Eigenschaften. Property-interne Betriebssystemarbeit und String-Tagwerte werden nicht als eigene Asset-Aufrufe gezählt.
+
+| Quellen | 1 Task s | 2 Tasks s | 4 Tasks s | 8 Tasks s | Asset-Aufrufe | Artwork-Datenaufrufe |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| WAV 100 | 0.0579 | 0.0356 | 0.0300 | 0.0301 | 100 | 0 |
+| WAV 1000 | 0.5156 | 0.2787 | 0.2163 | 0.2245 | 1000 | 0 |
+| M4A 100 | 0.0626 | 0.0421 | 0.0337 | 0.0321 | 100 | 1 |
+| M4A 1000 | 0.5128 | 0.2900 | 0.2141 | 0.2091 | 1000 | 1 |
+
+Ohne Artworksuche: in sämtlichen 48 Läufen null Artwork-Datenanforderungen. M4B-Gegenprobe mit zwei echten Kapiteln und Cover: ein Asset-Aufruf, ein ffmpeg-Kapitelprozess, ein Artwork-Datenaufruf; zwei Kapitel, keine Fehler.
+
+## Abbruch nach Änderung
+
+WAV1000: fünf Läufe, Exit-Codes [130, 130, 130, 130, 130], 288.97–370.16 ms bis Prozessende, Median 298.18 ms. SIGINT jeweils 0,5 s nach Start.
+
+M4A1000: fünf Läufe, Exit-Codes [130, 130, 130, 130, 130], 289.06–331.91 ms bis Prozessende, Median 298.98 ms. SIGINT jeweils 0,5 s nach Start.
+
+Grenzen: lokale kurze Dateien, warme Dateisystem-Caches, keine Netzlaufwerke. Lazy Metadaten-Snapshots erhöhen den Peak-RSS geringfügig, vermeiden dafür erneute Asset- und Artworkanalysen. Cache wird bei leerem Buch und neuem CLI-Vorbereitungslauf gelöscht; neue GUI-Imports behalten nur Metadaten bestehender Buchquellen.
+
+Reproduktion im gleichen temporären Ordner: `after.py`, `Scan.swift`, `cancel-after.py`; Rohwerte `after.json`, `scan-after.json`, `cancel-after.json`. Baseline und Encodingexperiment bleiben in `REPORT.md`.
+
+## Metadaten-Roundtrip
+
+Zusätzlich `metadata(for: url)` mit den kanonischen Keys `narrator`, `series`, `volume_number`, `language`. Custom-Tags und native MP4-Aliase: composer (`itsk/%A9wrt`), grouping (`itsk/%A9grp`), binäre disc-Nummer (`itsk/disk`). Audiotrack-Sprache wird gemeinsam über `.languageCode`/`.extendedLanguageTag` angefragt; neuer Zähler `trackLanguageRequests`, bei den Fixtures genau eine Anfrage pro Quelle. Dadurch bleibt die Assetanalyse gebündelt, die abhängige Trackabfrage wird separat und ehrlich gezählt.
+
+Echte Datei `native-tag-fixture/native.m4b` unter dem Messordner: Cover erhalten; Reimport liefert `narrator=Ada Beispiel`, `series=Die Testreihe`, `volume_number=3`, `language=deu`. Ein Assetload, ein Sprachload, ein Kapitelprozess, ein Artworkload. Die alternative use_metadata_tags-Datei wird als Gegenprobe aufbewahrt: AVFoundation findet darin weder diese Tags noch Cover.
+
+## Abbruch innerhalb der eigentlichen Analyse
+
+Der feste 0,5-s-Zeitpunkt trifft nach der Beschleunigung bereits die synchrone Buchübernahme (`processIncomingFiles`, Log „Importiere 1000 Audiodateien“). Ein Zusatzversuch bei 0,3 s traf in zwei von zehn Läufen noch vor Installation des Signalhandlers (Exit durch Signal2), bei den übrigen Läufen betrug die Abbruchdauer 2,77–5,75 ms. Diese Zeitpunkte messen unterschiedliche Phasen und sind nicht direkt vergleichbar.
+
+Ein zusätzlicher Core-Harness `Cancel.swift` wartet deshalb auf mindestens 100 tatsächlich begonnene Analysen und ruft dann cancelPreparation auf. Alle zehn Abbrüche akzeptiert; bestehendes leeres Buch blieb leer:
+
+WAV1000: 1.29–1.46 ms, Median 1.40 ms. Quellenzahlen vor/nach Abbruch: [(104, 104), (107, 107), (107, 107), (108, 108), (101, 101)].
+
+M4A1000: 1.33–1.76 ms, Median 1.62 ms. Quellenzahlen vor/nach Abbruch: [(109, 109), (110, 110), (111, 111), (110, 110), (104, 104)].

@@ -27,10 +27,10 @@ Nachimporte hängen neue, sortierte Kapitel an die vorhandene Reihenfolge an.
 Das Schließen des Konvertierungsprotokolls erhält das bearbeitete Buch.
 
 Die Kapitelhistorie umfasst höchstens 100 Schritte und wird beim Projektöffnen
-geleert; sie ist nicht Bestandteil der Projektdatei. Die Quellenprüfung beim
-Öffnen, Speichern und Start liest sämtliche aktiven Projektquellen synchron.
-Bei großen Büchern oder langsamen Datenträgern kann die Oberfläche währenddessen
-warten; die Prüfung ist derzeit nicht separat abbrechbar.
+geleert; sie ist nicht Bestandteil der Projektdatei. Die GUI liest Quellen
+beim Öffnen und Speichern außerhalb des Main Actors. Vor dem Start prüft sie
+unveränderte Datei-Snapshots ohne erneutes vollständiges Lesen. Das erstmalige
+Hashen eines großen Buchs benötigt dennoch entsprechende Lesezeit.
 
 ## CLI
 
@@ -58,3 +58,9 @@ Ausgabepfade; terminale Ereignisse nennen tatsächlich erfolgreiche Dateien und
 `success`. Diagnosen bleiben auf stderr. Ein früher Eingabe-/Projektfehler
 liefert `failed`, auch wenn kein `started` vorausging. ArgumentParser meldet
 Syntaxfehler weiterhin auf stderr. Exit-Codes bleiben unverändert.
+
+Die GUI berechnet Quellenhashes beim Öffnen/Speichern außerhalb des Main Actors.
+`ProjectFingerprintStore` bindet den wiederverwendeten Hash an Gerät, Inode,
+Größe und Änderungszeiten; eine anschließend veränderte Quelle wird beim Start
+ohne erneutes vollständiges Lesen abgewiesen. Der synchrone Core-/CLI-Einstieg
+bleibt verfügbar.

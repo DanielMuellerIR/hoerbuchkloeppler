@@ -190,3 +190,27 @@ Reihe als `grouping`, Bandnummer als `disc`, Sprache am Audiostream
 Felder unabhängig davon. Reader-Unterstützung für diese Zuordnung variiert.
 `use_metadata_tags` wurde mit echten Ausgaben verworfen: Es erhielt zwar freie
 Tags, entfernte aber in beiden Modi das eingebettete Cover.
+
+## Vollständig dekodierte Übergangsprüfung (2026-09-05)
+
+Drei Sinusabschnitte (660/440/880 Hz) mit 0,6/0,7/0,8 Sekunden,
+32 kHz, mono, 48k: Standard dekodiert 2,142 s, Performance 2,334 s.
+Die Audioanfänge werden über Frequenzanalyse des vollständig dekodierten PCM
+unabhängig von den Kapitelmetadaten erkannt. Standard: 0/0,6/1,3 s;
+Performance: 0/0,7/1,5 s. Kapitelmetadaten bleiben am geplanten Quellzeitpunkt.
+Damit sind die Performance-Kapitel im Beispiel 0/100/200 ms zu früh.
+
+`-copyts` bewahrt jetzt den ersten AAC-Vorlauf (2112 Samples), den der
+bisherige Concat-Schritt verlor. Weitere getrennte AAC-Segmente behalten
+ihr Priming und Padding; dieser Versatz wächst mit der Kapitelzahl. Die
+Regression begrenzt ihn pro weiterem Segment auf 2112 Vorlaufsamples plus
+höchstens zwei AAC-Frames zu je 1024 Samples. Standard benötigt nur die
+zwei Auffüllframes des einen Encodes. Diese Grenzen sind keine Zusage
+lückenloser Performance-Ausgabe. Für genaue Übergänge Standard verwenden.
+Reproduktion: `python3 tests/verify_audio_transitions.py`.
+
+Echter CLI-Split von zweimal 1801 s bei 8 kHz: beide Modi erzeugen je zwei
+Ausgaben; jede vollständig dekodiert 1801,208 s (weniger als zwei
+AAC-Frames bei dieser Rate). Cover und sämtliche Buchfelder im Rückimport
+bestätigt. `tests/verify_cli_matrix.py` prüft zusätzlich Exit 130/143 samt
+Bereinigung bei SIGINT/TERM und Fehler ohne Ausgabedatei.

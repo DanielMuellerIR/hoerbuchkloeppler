@@ -64,6 +64,25 @@ struct ProjectTests {
         #expect(session.projectSourceIssues.count == 1)
     }
 
+    @Test("Asynchrones Speichern/Öffnen hält Hashes an die Dateiidentität gebunden")
+    func asyncProjectRoundTrip() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Quelle.wav")
+        try Data([1, 2, 3]).write(to: source)
+        let session = ConversionSession(settings: AudioSettings(importWorkerLimit: 2))
+        session.audioFiles = [AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Kapitel")]
+        let url = root.appendingPathComponent("Buch.hkproject")
+        try await session.saveProjectAsync(to: url)
+        let reopened = ConversionSession(settings: AudioSettings())
+        try await reopened.openProjectAsync(from: url)
+        #expect(reopened.audioFiles == session.audioFiles)
+        #expect(reopened.settings.importWorkerLimit == 2)
+        #expect(reopened.projectSourceIssues.isEmpty)
+        try Data([4, 5, 6]).write(to: source)
+        reopened.refreshProjectSourceIssues()
+        #expect(reopened.projectSourceIssues.count == 1)
+    }
+
     @Test("Teilen, Zusammenführen, Nummerieren und Undo/Redo erhalten Zeitabschnitte")
     func editing() {
         let source = URL(fileURLWithPath: "/tmp/source.wav")

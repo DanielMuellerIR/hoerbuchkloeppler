@@ -24,25 +24,20 @@ extension AudioFile {
 
         guard let metadata = try? await asset.load(.metadata) else { return nil }
         guard !taskCancellationRequested() else { return nil }
-        for item in metadata {
+        for item in metadata where isArtworkItem(item) {
             guard !taskCancellationRequested() else { return nil }
-            // 1. Prüfung über CommonKey (Standardweg)
-            if let commonKey = item.commonKey?.rawValue, (commonKey == "artwork" || commonKey == "cover") {
-                let data = try? await item.load(.dataValue)
-                guard !taskCancellationRequested() else { return nil }
-                if let data = validatedEmbeddedArtworkData(data) { return data }
-            }
-            
-            // 2. Prüfung über den rohen Key (oft nötig für ID3/MP3)
-            if let key = item.key {
-                let keyString = String(describing: key).lowercased()
-                guard keyString.contains("artwork") || keyString.contains("cover") else { continue }
-                let data = try? await item.load(.dataValue)
-                guard !taskCancellationRequested() else { return nil }
-                if let data = validatedEmbeddedArtworkData(data) { return data }
-            }
+            let data = try? await item.load(.dataValue)
+            guard !taskCancellationRequested() else { return nil }
+            if let data = validatedEmbeddedArtworkData(data) { return data }
         }
         return nil
+    }
+
+    static func isArtworkItem(_ item: AVMetadataItem) -> Bool {
+        if let key = item.commonKey?.rawValue, key == "artwork" || key == "cover" { return true }
+        guard let key = item.key else { return false }
+        let name = String(describing: key).lowercased()
+        return name.contains("artwork") || name.contains("cover")
     }
 
     /// Übernimmt für eingebettete Cover dieselbe Größen- und Decode-Grenze wie
@@ -84,6 +79,7 @@ extension AudioFile {
     /// Meldungen in das gemeinsame Session-Log statt direkt auf stdout.
     static func extractChaptersControlled(
         from file: FoundFile,
+        knownFile: AudioFile? = nil,
         shouldCancel: @Sendable () -> Bool = { false },
         configureProcess: @Sendable (Process) -> Void = { _ in },
         runProcess: @Sendable (Process) throws -> Bool = { process in
@@ -96,6 +92,10 @@ extension AudioFile {
         },
         log: @Sendable (String) -> Void = { _ in }
     ) async -> ChapterExtractionResult {
+        func fallbackFile() async -> AudioFile {
+            if let knownFile { return knownFile }
+            return await AudioFile(foundFile: file)
+        }
         let url = file.readURL
         let visibleURL = file.source
         guard file.isChapterContainer else { return .files([]) }
@@ -103,7 +103,7 @@ extension AudioFile {
 
         guard let ffmpegURL = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else {
             log("⚠️ ffmpeg wurde nicht gefunden. Kapitel-Extraktion übersprungen.")
-            return .files([await AudioFile(foundFile: file)])
+            return .files([await fallbackFile()])
         }
 
         let process = Process()
@@ -164,30 +164,35 @@ extension AudioFile {
                 }
                 guard !output.readFailed else {
                     log("⚠️ Kapitelmetadaten aus \(visibleURL.lastPathComponent) konnten nicht vollständig gelesen werden. Nutze die Datei als ein Kapitel.")
-                    return .files([await AudioFile(foundFile: file)])
+                    return .files([await fallbackFile()])
                 }
                 guard !output.exceededLimit else {
                     log("⚠️ Kapitelmetadaten in \(visibleURL.lastPathComponent) überschreiten 8 MiB. Nutze die Datei als ein Kapitel.")
-                    return .files([await AudioFile(foundFile: file)])
+                    return .files([await fallbackFile()])
                 }
                 guard process.terminationStatus == 0 else {
                     log("⚠️ ffmpeg konnte Kapitel aus \(visibleURL.lastPathComponent) nicht vollständig lesen. Nutze die Datei als ein Kapitel.")
-                    return .files([await AudioFile(foundFile: file)])
+                    return .files([await fallbackFile()])
                 }
 
                 guard let text = String(data: output.data, encoding: .utf8) else {
                     log("⚠️ FFMETADATA von \(visibleURL.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
-                    return .files([await AudioFile(foundFile: file)])
+                    return .files([await fallbackFile()])
                 }
                 var chapters = parseFFMetadataChapters(text)
                 guard !chapters.isEmpty else {
                     log("⚠️ Keine Kapitel in \(visibleURL.lastPathComponent) gefunden. Nutze die Datei als ein Kapitel.")
-                    return .files([await AudioFile(foundFile: file)])
+                    return .files([await fallbackFile()])
                 }
 
-                let loadedDuration = try? await AVURLAsset(url: url).load(.duration)
+                let totalDuration: Double
+                if let knownFile {
+                    totalDuration = knownFile.duration
+                } else {
+                    let loadedDuration = try? await AVURLAsset(url: url).load(.duration)
+                    totalDuration = sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
+                }
                 guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
-                let totalDuration = sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
                 // Das LETZTE Kapitel hat in FFMETADATA oft keine END-Zeit — es gibt kein
                 // Folgekapitel, aus dem sie (wie in parseFFMetadataChapters) abgeleitet
                 // werden könnte. Ohne Korrektur bliebe es ein Null-Dauer-Kapitel, das ein
@@ -204,7 +209,7 @@ extension AudioFile {
                 // komplette Datei als ein Kapitel; so scheitert nicht das ganze Buch.
                 guard chaptersAreValid(chapters, totalDuration: totalDuration) else {
                     log("⚠️ Unvollständige Kapitelzeiten in \(visibleURL.lastPathComponent). Nutze die Datei als ein Kapitel.")
-                    return .files([await AudioFile(foundFile: file)])
+                    return .files([await fallbackFile()])
                 }
                 // Rundungsdifferenzen im FFMETADATA-Container lückenlos an die
                 // tatsächliche Dateidauer anlegen.
@@ -230,7 +235,7 @@ extension AudioFile {
             } catch {
                 if shouldCancel() || taskCancellationRequested() { return .cancelled }
                 log("⚠️ Kapitel aus \(visibleURL.lastPathComponent) konnten nicht gelesen werden: \(error.localizedDescription)")
-                return .files([await AudioFile(foundFile: file)])
+                return .files([await fallbackFile()])
             }
         } onCancel: {
             ProcessTerminator.requestTermination(process)
