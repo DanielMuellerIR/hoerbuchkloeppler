@@ -93,3 +93,18 @@ App-Views (`Hörbuchklöppler/`): `ContentView`, `ConversionOverlayView`
 
 Belegte, noch nicht beauftragte Produkt- und Performance-Ansätze stehen getrennt
 in [opportunities.md](opportunities.md).
+
+## Projekt- und Laufzustand
+
+- `AudiobookProject.swift`: versioniertes Transportmodell, Quellreferenzen und
+  SHA-256-Fingerprints; enthält keine Audiodaten.
+- `ConversionSession+Project.swift`: Projektübernahme, Quellenprüfung und
+  Kapitelhistorie mit Umordnen, Nummerieren, Teilen und Zusammenführen.
+- `ConversionRunState.swift`: flüchtiger Konvertierungszustand, unabhängig vom
+  gespeicherten Projekt; vorhandene Session-Eigenschaften bleiben Adapter.
+- `RunReport.swift`: versionierte Inspect- und JSON-Laufberichte für die CLI.
+- `ChapterPreviewPlayer.swift`: Besitz und Abspielposition des Vorschauplayers.
+- `ImportCoordinator.swift`: GUI-Providerkoordination über Core-Importtokens.
+- `OutputPreviewView.swift`: konkrete Zielpfade und geschätzter Volume-Bedarf.
+
+Details zum Speicherformat und zu Bearbeitungsgrenzen: [Projekte](projects.md).

@@ -416,6 +416,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     
     @Published public var audioFiles: [AudioFile] = [] {
         didSet {
+            recordChapterEdit(previous: oldValue)
             if audioFiles.isEmpty {
                 invalidateImportWork()
                 clearMetadata()
@@ -439,7 +440,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     var embeddedArtworkLoader: @Sendable (URL) async -> Data? = { url in
         await AudioFile.extractEmbeddedArtwork(from: url)
     }
-    public private(set) var isCoverSuppressed = false
+    public internal(set) var isCoverSuppressed = false
     private var pendingImportOperations = 0
     @Published public private(set) var isImporting = false
     @Published public private(set) var importCompletedItems = 0
@@ -466,17 +467,31 @@ public final class ConversionSession: ObservableObject, Identifiable {
     @Published public var title: String = ""
     @Published public var author: String = ""
     @Published public var genre: String = "Hörbuch"
+    @Published public var narrator = ""
+    @Published public var series = ""
+    @Published public var volumeNumber = ""
+    @Published public var language = ""
+    @Published public var projectSourceIssues: [ProjectSourceIssue] = []
+    public var loadedProjectURL: URL?
+    var projectSources: [ProjectSource] = []
+    var undoChapters: [ChapterEditSnapshot] = []
+    var redoChapters: [ChapterEditSnapshot] = []
+    var restoringChapters = false
+    @Published public var canUndoChapters = false
+    @Published public var canRedoChapters = false
     
     // --- KONVERSION STATUS & LOGGING ---
-    @Published public var isConverting: Bool = false
-    @Published public var showOverlay: Bool = false
-    @Published public var progress: Double = 0.0
-    @Published public var conversionStatus: String = "Bereit"
-    @Published public internal(set) var completedOutputURLs: [URL] = []
+    @Published public var runState = ConversionRunState()
+    public var isConverting: Bool { get { runState.isConverting } set { runState.isConverting = newValue } }
+    public var showOverlay: Bool { get { runState.showOverlay } set { runState.showOverlay = newValue } }
+    public var progress: Double { get { runState.progress } set { runState.progress = newValue } }
+    public var conversionStatus: String { get { runState.status } set { runState.status = newValue } }
+    public var conversionPhase: String { get { runState.phase } set { runState.phase = newValue } }
+    public internal(set) var completedOutputURLs: [URL] { get { runState.completedOutputs } set { runState.completedOutputs = newValue } }
     /// Ergebnis des letzten Konvertierungslaufs (nil = noch nicht beendet,
     /// true = erfolgreich, false = mit Fehler/abgebrochen). Erlaubt der CLI
     /// einen korrekten Exit-Code statt blind "Erfolg" zu melden.
-    public var lastConversionSucceeded: Bool?
+    public var lastConversionSucceeded: Bool? { get { runState.succeeded } set { runState.succeeded = newValue } }
 
     private nonisolated let conversionCoordinator = ConversionCoordinator()
     private nonisolated let conversionEventQueue = ConversionEventQueue()
@@ -692,7 +707,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     // Strukturierte Logs für GUI und Terminal
     @Published public var eventLogs: [LogEntry] = []
     @Published public var logString: String = "" // Für Legacy/Fallback
-    @Published public var segmentProgress: [Int: SegmentStatus] = [:]
+    public var segmentProgress: [Int: SegmentStatus] { get { runState.segments } set { runState.segments = newValue } }
 
     @Published public var titleCandidates: [TagCandidate] = []
     @Published public var authorCandidates: [TagCandidate] = []
@@ -832,6 +847,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
         case let .segmentReset(title, runID):
             guard isCurrentConversion(runID) else { return }
+            conversionPhase = title ?? "AAC-Encoding"
             segmentProgress = [:]
             if let title {
                 initSegmentProgress(index: 0, filename: title, runID: runID)
@@ -905,7 +921,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     }
 
     public func forceCloseOverlay() {
-        resetSession()
+        showOverlay = false
     }
 
     public func resetSession() {
@@ -919,6 +935,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
         self.eventLogs = []
         self.logString = ""
         self.segmentProgress = [:]
+        loadedProjectURL = nil; projectSources = []; projectSourceIssues = []
+        undoChapters = []; redoChapters = []; updateHistoryAvailability()
     }
 
     /// Kennung der zuletzt gestarteten Info-Abfrage. Der neue Werkzeugkontext
@@ -1020,6 +1038,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
     public func clearMetadata() {
         self.title = ""; self.author = ""; self.genre = "Hörbuch"
+        narrator = ""; series = ""; volumeNumber = ""; language = ""
         self.coverImage = nil; self.coverPath = nil; self.embeddedCoverData = nil
         self.isCoverSuppressed = false
         self.titleCandidates = []; self.authorCandidates = []
@@ -1259,7 +1278,9 @@ public final class ConversionSession: ObservableObject, Identifiable {
             addLog("📥 Importiere \(sourceCount) \(sourceLabel) mit \(newFiles.count) Kapiteln...")
         }
         let deduplicated = Self.deduplicateAudioFiles(audioFiles + newFiles)
-        self.audioFiles = deduplicated.files.sorted(by: Self.audioFileComesBefore)
+        let existingIDs = Set(audioFiles.map(\.id))
+        self.audioFiles = deduplicated.files.filter { existingIDs.contains($0.id) }
+            + deduplicated.files.filter { !existingIDs.contains($0.id) }.sorted(by: Self.audioFileComesBefore)
         for duplicate in deduplicated.discardedSources {
             // Derselbe Pfad in beiden Feldern heißt: Ein Drop hat diese Datei
             // mehrfach geliefert (z.B. Ordner plus eine Datei daraus). Die
@@ -2020,14 +2041,14 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
 }
 
-public struct AudioFile: Identifiable, Sendable {
+public struct AudioFile: Identifiable, Equatable, Sendable {
     enum AudioTrackAvailability: Sendable {
         case available
         case missing
         case unreadable
         case cancelled
     }
-    public let id = UUID()
+    public var id = UUID()
     /// Physische Lese-URL: die reguläre Datei, aus der AVFoundation und ffmpeg
     /// lesen. Bei einem Symlink ist das dessen aufgelöstes Ziel.
     public let url: URL

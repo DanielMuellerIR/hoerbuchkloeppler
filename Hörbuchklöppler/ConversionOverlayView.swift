@@ -90,6 +90,16 @@ struct ConversionOverlayView: View {
                 .shadow(color: Color.black.opacity(0.6), radius: 20, x: 0, y: 10)
                 .frame(maxWidth: 800, maxHeight: 550) // Flexible but capped
 
+                VStack(alignment: .leading) {
+                    Text("Phase: \(session.conversionPhase)")
+                    ProgressView("Gesamtfortschritt", value: session.progress)
+                    if !session.isConverting {
+                        Text(session.lastConversionSucceeded == true ? "Alle Ausgaben erfolgreich" : (session.completedOutputURLs.isEmpty ? "Keine erfolgreiche Ausgabe" : "Teilerfolg: Einige Ausgaben wurden erstellt"))
+                        ForEach(session.completedOutputURLs, id: \.self) { url in
+                            Button("Im Finder zeigen: \(url.lastPathComponent)") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                        }
+                    }
+                }.frame(maxWidth: 800).padding(.top)
                 // ACTION BAR
                 HStack {
                     Spacer()

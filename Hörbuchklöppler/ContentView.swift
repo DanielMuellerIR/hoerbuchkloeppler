@@ -6,52 +6,17 @@ import AppKit
 import AVFoundation
 import Combine
 
-/// Spielt zum Reinhören genau EINEN Kapitel-Abschnitt einer Datei ab.
-/// Funktioniert einheitlich für Einzeldateien (startTime 0, ganze Datei) und für
-/// interne m4b-Kapitel (Abschnitt [startTime, startTime+duration] der großen Datei).
-/// Es läuft immer nur ein Preview gleichzeitig.
-@MainActor
-final class ChapterPreviewPlayer: ObservableObject {
-    @Published var playingID: AudioFile.ID?
-    private var player: AVPlayer?
-    private var endObserver: NSObjectProtocol?
-
-    /// Startet den Abschnitt, oder stoppt ihn, wenn dieses Kapitel gerade läuft.
-    func toggle(_ file: AudioFile) {
-        if playingID == file.id { stop(); return }
-        stop()
-        guard file.duration > 0 else { return }
-        let item = AVPlayerItem(url: file.url)
-        // Nur bis zum Kapitel-Ende spielen (absolute Zeit in der Item-Zeitachse).
-        item.forwardPlaybackEndTime = CMTime(seconds: file.startTime + file.duration, preferredTimescale: 600)
-        let p = AVPlayer(playerItem: item)
-        // Am Kapitel-Ende Icon/Status zurücksetzen.
-        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.stop() }
-        }
-        player = p
-        playingID = file.id
-        Task {
-            await p.seek(to: CMTime(seconds: file.startTime, preferredTimescale: 600))
-            guard player === p else { return }
-            p.play()
-        }
-    }
-
-    func stop() {
-        player?.pause()
-        player = nil
-        if let obs = endObserver { NotificationCenter.default.removeObserver(obs); endObserver = nil }
-        if playingID != nil { playingID = nil }
-    }
-}
-
 struct ContentView: View {
+    @State private var previewPlan: ConversionPlan?
+    @State private var showingConversionPreview = false
     @State private var showingOverwriteAlert = false
     @State private var pendingPlan: ConversionPlan? = nil
     @State private var collidingOutputNames: [String] = []
     @StateObject var session = ConversionSession()
     @StateObject private var preview = ChapterPreviewPlayer()
+    @State private var selectedChapters: Set<UUID> = []
+    @State private var renamePrefix = "Kapitel"
+    @State private var projectError: String?
     @State private var showingSettings = false
     @State private var ffmpegStatus = "Prüfe..."
     @State private var miStatus = "Prüfe..."
@@ -110,14 +75,8 @@ struct ContentView: View {
                     outputURL: finalURL,
                     maxDurationHours: session.settings.maxDurationHours
                 )
-                let collisions = plan.outputURLsRequiringOverwriteConfirmation
-                if !collisions.isEmpty {
-                    self.pendingPlan = plan
-                    self.collidingOutputNames = collisions.map(\.lastPathComponent)
-                    self.showingOverwriteAlert = true
-                } else {
-                    startConversion(plan)
-                }
+                previewPlan = plan
+                showingConversionPreview = true
             }
         }
         // Kein Force-Unwrap auf NSApp.mainWindow (kann nil sein -> Crash).
@@ -148,9 +107,13 @@ struct ContentView: View {
                             Label("Titel", systemImage: "text.alignleft")
                             TextField("Hörbuch Titel", text: $session.title).textFieldStyle(.roundedBorder)
                             Label("Autor", systemImage: "person")
-                            TextField("Autor / Sprecher", text: $session.author).textFieldStyle(.roundedBorder)
+                            TextField("Autor", text: $session.author).textFieldStyle(.roundedBorder)
                             Label("Genre", systemImage: "music.note")
                             TextField("Genre", text: $session.genre).textFieldStyle(.roundedBorder)
+                            TextField("Sprecher", text: $session.narrator).textFieldStyle(.roundedBorder)
+                            TextField("Reihe", text: $session.series).textFieldStyle(.roundedBorder)
+                            TextField("Bandnummer", text: $session.volumeNumber).textFieldStyle(.roundedBorder)
+                            TextField("Sprache (z. B. de)", text: $session.language).textFieldStyle(.roundedBorder)
                         }.font(.system(size: 12, weight: .medium)).foregroundColor(.secondary)
                     }
                     .padding(.horizontal)
@@ -193,7 +156,22 @@ struct ContentView: View {
                                 }
                                     .foregroundColor(.red).buttonStyle(.bordered)
                             }.padding([.top, .horizontal])
-                            List {
+                            HStack {
+                                TextField("Titelpräfix", text: $renamePrefix).frame(width: 120)
+                                Button("Auswahl nummerieren") { session.renameChapters(ids: selectedChapters, prefix: renamePrefix) }
+                                    .disabled(selectedChapters.isEmpty)
+                                Button("↑") { moveSelection(by: -1) }.disabled(selectedChapters.count != 1)
+                                Button("↓") { moveSelection(by: 1) }.disabled(selectedChapters.count != 1)
+                                Button("Teilen") {
+                                    if let id = preview.playingID, let time = preview.absolutePlaybackTime {
+                                        preview.stop(); session.splitChapter(id: id, at: time)
+                                    }
+                                }.disabled(preview.playingID == nil).help("Kapitel an der aktuellen Abspielposition teilen")
+                                Button("Zusammenführen") {
+                                    if let id = selectedChapters.first { preview.stop(); session.mergeChapterWithNext(id: id) }
+                                }.disabled(selectedChapters.count != 1).help("Mit dem unmittelbar folgenden Zeitabschnitt derselben Quelle zusammenführen")
+                            }.padding(.horizontal)
+                            List(selection: $selectedChapters) {
                                 ForEach($session.audioFiles) { $file in
                                     VStack(alignment: .leading, spacing: 4) {
                                         HStack {
@@ -213,7 +191,9 @@ struct ContentView: View {
                                         Text(file.name).font(.system(size: 10)).foregroundColor(.gray).padding(.leading, 30)
                                     }
                                     .padding(.vertical, 4)
+                                    .tag(file.id)
                                 }
+                                .onMove { offsets, destination in session.moveChapters(from: offsets, to: destination) }
                             }
                         }
                     }
@@ -298,6 +278,16 @@ struct ContentView: View {
         } message: {
             Text("Diese tatsächlichen Zieldateien existieren bereits:\n\(collidingOutputNames.joined(separator: "\n"))\n\nMöchten Sie sie wirklich überklöppeln?")
         }
+        .sheet(isPresented: $showingConversionPreview) {
+            if let plan = previewPlan {
+                OutputPreviewView(preview: ConversionPreview(plan: plan, settings: session.settings), onCancel: { showingConversionPreview = false }, onStart: {
+                    showingConversionPreview = false
+                    let collisions = plan.outputURLsRequiringOverwriteConfirmation
+                    if collisions.isEmpty { startConversion(plan) }
+                    else { pendingPlan = plan; collidingOutputNames = collisions.map(\.lastPathComponent); showingOverwriteAlert = true }
+                })
+            }
+        }
         .sheet(isPresented: $session.showSelectionUI) { MetadataSelectionView(session: session) }
         .sheet(isPresented: $session.showInfoSheet) {
             VStack(spacing: 0) {
@@ -310,12 +300,22 @@ struct ContentView: View {
             .frame(width: 700, height: 500)
             .onDisappear { session.cancelRawMediaInfo() }
         }
+        .alert("Projekt", isPresented: Binding(get: { projectError != nil }, set: { if !$0 { projectError = nil } })) {
+            Button("OK", role: .cancel) { projectError = nil }
+        } message: { Text(projectError ?? "") }
         .toolbar {
+            Button("Projekt öffnen …") { projectPanel(save: false) }.keyboardShortcut("o", modifiers: [.command, .shift]).disabled(session.isConverting)
+            Button("Projekt speichern …") { projectPanel(save: true) }.keyboardShortcut("s", modifiers: .command).disabled(session.isConverting || session.isImporting)
+            Button("Rückgängig") { preview.stop(); session.undoChapterEdit() }.keyboardShortcut("z", modifiers: .command).disabled(!session.canUndoChapters || session.isConverting)
+            Button("Wiederholen") { preview.stop(); session.redoChapterEdit() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!session.canRedoChapters || session.isConverting)
             Button("Dateien oder Ordner hinzufügen …", action: chooseImportSources)
                 .keyboardShortcut("o", modifiers: .command)
                 .disabled(session.isConverting)
         }
         .safeAreaInset(edge: .bottom) {
+            VStack(alignment: .leading) {
+                ForEach(session.projectSourceIssues) { issue in Text("\(issue.reason): \(issue.path)").foregroundColor(.red).textSelection(.enabled) }
+            }
             if session.isImporting {
                 HStack {
                     ProgressView(value: Double(session.importCompletedItems), total: Double(max(1, session.importTotalItems)))
@@ -330,8 +330,32 @@ struct ContentView: View {
         }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             guard !session.isConverting else { return false }
-            handleDroppedProviders(providers)
+            ImportCoordinator.importProviders(providers, session: session)
             return true
+        }
+    }
+
+    private func moveSelection(by offset: Int) {
+        guard let id = selectedChapters.first, let index = session.audioFiles.firstIndex(where: { $0.id == id }) else { return }
+        let target = index + offset
+        guard session.audioFiles.indices.contains(target) else { return }
+        session.moveChapters(from: IndexSet(integer: index), to: offset > 0 ? target + 1 : target)
+    }
+
+    private func projectPanel(save: Bool) {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+        if save {
+            let panel = NSSavePanel(); panel.nameFieldStringValue = "Hörbuch.hkproject"
+            panel.beginSheetModal(for: window) { response in
+                guard response == .OK, let url = panel.url else { return }
+                do { try session.saveProject(to: url) } catch { projectError = error.localizedDescription }
+            }
+        } else {
+            let panel = NSOpenPanel(); panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+            panel.beginSheetModal(for: window) { response in
+                guard response == .OK, let url = panel.url else { return }
+                do { preview.stop(); try session.openProject(from: url) } catch { projectError = error.localizedDescription }
+            }
         }
     }
 
@@ -351,74 +375,19 @@ struct ContentView: View {
                 await session.runImportTask(token) {
                     for url in urls {
                         guard !Task.isCancelled else { return }
-                        await Self.processDroppedURL(url, session: session, importToken: token)
+                        await ImportCoordinator.processURL(url, session: session, importToken: token)
                     }
                 }
             }
         }
-    }
-
-    private func handleDroppedProviders(_ providers: [NSItemProvider]) {
-        let importToken = session.beginImport(expectedItemCount: providers.count)
-        let currentSession = session
-        let providerCount = providers.count
-        for (index, provider) in providers.enumerated() {
-            _ = provider.loadObject(ofClass: URL.self) { url, error in
-                let errorDescription = error?.localizedDescription
-                let providerFailed = error != nil || url == nil
-                Task { @MainActor in
-                    guard !providerFailed, let url else {
-                        currentSession.stageProviderLoadFailure(
-                            position: index + 1,
-                            total: providerCount,
-                            errorDescription: errorDescription,
-                            importToken: importToken
-                        )
-                        await currentSession.finishImport(importToken)
-                        return
-                    }
-                    await currentSession.runImportTask(importToken) {
-                        await Self.processDroppedURL(
-                            url,
-                            session: currentSession,
-                            importToken: importToken
-                        )
-                    }
-                }
-            }
-        }
-    }
-
-    @MainActor
-    private static func processDroppedURL(
-        _ url: URL,
-        session: ConversionSession,
-        importToken: ImportToken
-    ) async {
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
-            let scanned = await session.scanFolder(url, importToken: importToken)
-            session.stageScannedFolder(scanned, importToken: importToken)
-            await session.finishImport(importToken)
-        } else {
-            await processSingleFile(url, session: session, importToken: importToken)
-        }
-    }
-
-    @MainActor
-    private static func processSingleFile(
-        _ url: URL,
-        session: ConversionSession,
-        importToken: ImportToken
-    ) async {
-        if let found = ConversionSession.foundFile(at: url) {
-            let loaded = await session.loadAudioFiles(from: found, importToken: importToken)
-            session.stageAudioLoadResult(loaded, importToken: importToken)
-        }
-        await session.finishImport(importToken)
     }
 
     private func startConversion(_ plan: ConversionPlan) {
+        session.refreshProjectSourceIssues()
+        guard session.projectSourceIssues.isEmpty else {
+            projectError = "Projektquellen fehlen oder wurden verändert."
+            return
+        }
         switch FFmpegWrapper.convert(session: session, plan: plan) {
         case .started:
             conversionStartError = nil

@@ -158,3 +158,21 @@ abschließenden Metadatenübernahme ist Abbrechen deaktiviert.
 
 Regression: `userCancellationPreservesExistingBook` prüft Teilfortschritt,
 Task-Abbruch, erhaltene Bearbeitung und verspätete Beiträge vor/nach Neustart.
+
+## Projekt- und JSON-Regression
+
+`swift test -Xswiftc -warnings-as-errors` enthält Roundtrips, fehlende und
+veränderte Quellen, FIFO-Abweisung, Versionsvalidierung, Nachimportreihenfolge
+und Kapitel-Undo/Redo einschließlich Entfernen des letzten Kapitels.
+
+```sh
+swift build --package-path HoerbuchkloepplerCore
+python3 test_project_cli.py
+```
+
+Das Skript erzeugt zwei reale WAVs und ein Projekt, prüft explizite Dateifolge,
+JSON-Parsing ohne Diagnosen auf stdout, schreibfreies Inspect mit nicht
+existierendem Zielordner und Fehler ohne Ausgabedatei bei veränderter Quelle.
+Die Standard-Konvertierung wird vollständig dekodiert; bei 32 kHz werden
+höchstens 100 ms AAC-Randabweichung zugelassen. Fixtures bleiben zur Diagnose
+im genannten temporären Ordner. Format und Grenzen: [Projekte](projects.md).

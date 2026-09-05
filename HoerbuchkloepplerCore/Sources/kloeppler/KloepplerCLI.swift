@@ -161,6 +161,10 @@ private func makeInterruptHandler(
 /// wechselt anschließend auf den Main Actor.
 private struct CLIOptions: Sendable {
     let folderPath: String
+    let project: String?
+    let files: [String]
+    let inspect: Bool
+    let format: String
     let mode: String?
     let bitrate: String?
     let samplerate: Int?
@@ -247,7 +251,19 @@ struct KloepplerCLI: AsyncParsableCommand {
     )
 
     @Argument(help: "Der absolute Pfad zum Ordner, der die Audiodateien enthält.")
-    var folderPath: String
+    var folderPath: String?
+
+    @Option(name: .long, help: "Versioniertes .hkproject mit bearbeiteter Reihenfolge öffnen.")
+    var project: String?
+
+    @Option(name: .customLong("file"), parsing: .singleValue, help: "Audiodatei in expliziter Reihenfolge; Option je Datei wiederholen.")
+    var files: [String] = []
+
+    @Flag(name: .long, help: "Quellen analysieren und Ausgabeplanung anzeigen, ohne Dateien anzulegen.")
+    var inspect = false
+
+    @Option(name: .long, help: "Ausgabeformat text oder json; Konvertierungen liefern mit json versionierte JSON-Laufereignisse.")
+    var format = "text"
 
     @Option(name: .shortAndLong, help: "Der Kodierungsmodus: 'parallel' (Performance) oder 'standard' (Sequenziell).")
     var mode: String?
@@ -294,6 +310,10 @@ struct KloepplerCLI: AsyncParsableCommand {
     // Eingaben früh prüfen (läuft vor run()), damit klare Fehler entstehen statt
     // erst später eine kryptische ffmpeg-Meldung — wichtig für den Skript-/Agent-Einsatz.
     func validate() throws {
+        guard ["text", "json"].contains(format) else { throw ValidationError("--format erwartet text oder json.") }
+        guard (folderPath != nil ? 1 : 0) + (project != nil ? 1 : 0) + (!files.isEmpty ? 1 : 0) == 1 else {
+            throw ValidationError("Genau einen Ordner, --project oder eine Folge von --file angeben.")
+        }
         if let mode = mode, !["parallel", "standard"].contains(mode.lowercased()) {
             throw ValidationError("Ungültiger --mode '\(mode)'. Erlaubt: 'parallel' oder 'standard'.")
         }
@@ -316,7 +336,8 @@ struct KloepplerCLI: AsyncParsableCommand {
 
     mutating func run() async throws {
         let options = CLIOptions(
-            folderPath: folderPath,
+            folderPath: folderPath ?? "",
+            project: project, files: files, inspect: inspect, format: format,
             mode: mode,
             bitrate: bitrate,
             samplerate: samplerate,
@@ -353,9 +374,20 @@ struct KloepplerCLI: AsyncParsableCommand {
         let verbose = options.verbose
         let force = options.force
 
-        let sourceURL = URL(fileURLWithPath: folderPath)
+        let machineOutput = options.format == "json"
+        func print(_ message: String, terminator: String = "\n") {
+            if machineOutput { FileHandle.standardError.write(Data((message + terminator).utf8)) }
+            else { Swift.print(message, terminator: terminator) }
+        }
+        func emitJSON<T: Encodable>(_ value: T) throws {
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            FileHandle.standardOutput.write(try encoder.encode(value))
+            FileHandle.standardOutput.write(Data([10]))
+        }
+        let sourceURL = URL(fileURLWithPath: options.project ?? options.files.first ?? folderPath)
         var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: folderPath, isDirectory: &isDir), isDir.boolValue else {
+        guard options.project != nil || !options.files.isEmpty || (FileManager.default.fileExists(atPath: folderPath, isDirectory: &isDir) && isDir.boolValue) else {
+            if machineOutput && !options.inspect { try emitJSON(RunReport(event: "failed", phase: "input", progress: 0, success: false)) }
             throw reportedFailure("Fehler: Der Pfad \(folderPath) existiert nicht oder ist kein Ordner.")
         }
         // Nach der Existenzprüfung den physischen Ordner festhalten. Sonst kann
@@ -363,7 +395,7 @@ struct KloepplerCLI: AsyncParsableCommand {
         // Standard-Ausgabeziel unbemerkt auf einen anderen Datenträger lenken.
         let url = sourceURL.standardizedFileURL.resolvingSymlinksInPath()
 
-        FFmpegWrapper.cleanupOldTempDirectories()
+        if !options.inspect { FFmpegWrapper.cleanupOldTempDirectories() }
         // CLI-Aufrufe sind reproduzierbar: nicht gesetzte Optionen verwenden die
         // dokumentierten Defaults und hängen nicht von GUI-settings.json ab.
         let session = ConversionSession(settings: AudioSettings())
@@ -371,7 +403,7 @@ struct KloepplerCLI: AsyncParsableCommand {
         // Ab hier gehört das Terminal dem Renderer: Alle Session-Logs laufen über
         // ihn, damit sie nicht in die Pacman-Fortschrittsanzeige hineinschreiben.
         let renderer = TerminalRenderer()
-        session.logSink = { renderer.emitLog($0) }
+        session.logSink = { if machineOutput { writeStandardError($0) } else { renderer.emitLog($0) } }
 
         // SIGINT (Ctrl+C) und SIGTERM benutzen denselben geordneten Abbruchpfad.
         // `InterruptState` verhindert dabei, dass der Abschluss dem Handler
@@ -398,7 +430,7 @@ struct KloepplerCLI: AsyncParsableCommand {
 
         func emitInterruptIfNeeded() {
             guard let receivedSignal = interruptState.takeUnannouncedSignal() else { return }
-            renderer.emitLog("⚠️ \(signalName(receivedSignal)) empfangen. Lauf wird geordnet abgebrochen …")
+            print("⚠️ \(signalName(receivedSignal)) empfangen. Lauf wird geordnet abgebrochen …")
         }
 
         func throwIfInterrupted() throws {
@@ -419,10 +451,34 @@ struct KloepplerCLI: AsyncParsableCommand {
             // Ein ausdrückliches Cover oder --no-cover gewinnt ohnehin. In
             // diesen Fällen weder eingebettete Bilder noch Ordnerbilder vorab
             // dekodieren.
-            await session.prepareFolder(
-                url,
-                analyzeArtwork: cover == nil && !noCover
-            )
+            if let projectPath = options.project {
+                try session.openProject(from: URL(fileURLWithPath: projectPath))
+            } else if !options.files.isEmpty {
+                let token = session.beginImport(expectedItemCount: options.files.count)
+                await session.runImportTask(token) {
+                    for path in options.files {
+                        guard !Task.isCancelled else { return }
+                        let source = URL(fileURLWithPath: path)
+                        if let found = ConversionSession.foundFile(at: source) {
+                            let result = await session.loadAudioFiles(from: found, importToken: token)
+                            session.stageAudioLoadResult(result, importToken: token)
+                        } else {
+                            session.stageAudioLoadResult(.failure(AudioImportFailure(sourceURL: source, reason: .analysisFailed)), importToken: token)
+                        }
+                        await session.finishImport(token)
+                    }
+                }
+                // Core-Import dedupliziert nach gemeinsamer Dateiidentität. Nur
+                // die verbleibenden Kapitel werden nach der CLI-Folge geordnet.
+                let ranks = Dictionary(options.files.enumerated().map { (URL(fileURLWithPath: $0.element).standardizedFileURL, $0.offset) }, uniquingKeysWith: min)
+                session.audioFiles.sort {
+                    let left = ranks[$0.sourceURL.standardizedFileURL] ?? Int.max
+                    let right = ranks[$1.sourceURL.standardizedFileURL] ?? Int.max
+                    return left == right ? $0.startTime < $1.startTime : left < right
+                }
+            } else {
+                await session.prepareFolder(url, analyzeArtwork: cover == nil && !noCover)
+            }
 
             try throwIfInterrupted()
 
@@ -484,7 +540,8 @@ struct KloepplerCLI: AsyncParsableCommand {
             let outputFile = try resolveOutputFile(
                 option: output,
                 sourceURL: sourceURL,
-                title: finalTitle
+                title: finalTitle,
+                createDirectories: !options.inspect
             )
 
             let conversionPlan = FFmpegWrapper.makeConversionPlan(
@@ -504,6 +561,19 @@ struct KloepplerCLI: AsyncParsableCommand {
                 )
                 throw ExitCode.failure
             }
+            session.refreshProjectSourceIssues()
+            if options.inspect {
+                if machineOutput { try emitJSON(await InspectionReport(session: session, outputs: conversionPlan.outputURLs)) }
+                else {
+                    print("\(session.audioFiles.count) Kapitel, \(session.audioFiles.reduce(0) { $0 + $1.duration }) Sekunden")
+                    conversionPlan.outputURLs.forEach { print($0.path) }
+                    session.projectSourceIssues.forEach { print("\($0.reason): \($0.path)") }
+                }
+                if !session.projectSourceIssues.isEmpty { throw ExitCode.failure }
+                throw ExitCode.success
+            }
+            guard session.projectSourceIssues.isEmpty else { throw reportedFailure("Projektquellen fehlen oder wurden verändert.") }
+            if machineOutput { try emitJSON(RunReport(event: "started", phase: "preparing", progress: 0, outputs: conversionPlan.outputURLs)) }
             print("Starte Konvertierung...")
             print(conversionPlan.outputURLs.count == 1 ? "Zieldatei:" : "Zieldateien:")
             conversionPlan.outputURLs.forEach { print("  \($0.path)") }
@@ -583,7 +653,8 @@ struct KloepplerCLI: AsyncParsableCommand {
                     }
                 }
 
-                renderer.drawBlock(output)
+                if machineOutput { try emitJSON(RunReport(event: "progress", phase: session.conversionPhase, progress: session.progress)) }
+                else { renderer.drawBlock(output) }
             }
 
             // Fortschrittsanzeige abräumen — die Schlussmeldung soll allein stehen.
@@ -619,6 +690,10 @@ struct KloepplerCLI: AsyncParsableCommand {
         // zeitlich hinterherlaufen.
         let receivedSignal = interruptState.finishExecution()
         emitInterruptIfNeeded()
+        if machineOutput && !options.inspect {
+            let event = receivedSignal != nil ? "cancelled" : (executionError != nil ? "failed" : "finished")
+            try emitJSON(RunReport(event: event, phase: session.conversionPhase, progress: session.progress, outputs: session.completedOutputURLs, success: receivedSignal == nil && executionError == nil && session.lastConversionSucceeded == true))
+        }
         if let receivedSignal { throw ExitCode(128 + receivedSignal) }
         if let executionError { throw executionError }
     }
@@ -634,7 +709,8 @@ struct KloepplerCLI: AsyncParsableCommand {
     private static func resolveOutputFile(
         option: String?,
         sourceURL: URL,
-        title: String
+        title: String,
+        createDirectories: Bool = true
     ) throws -> URL {
         guard let option else {
             let sourceParent = sourceURL.standardizedFileURL
@@ -658,10 +734,9 @@ struct KloepplerCLI: AsyncParsableCommand {
         }
         let target = URL(fileURLWithPath: option).standardizedFileURL
         do {
-            try FileManager.default.createDirectory(
-                at: target.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
+            if createDirectories {
+                try FileManager.default.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
+            }
         } catch {
             throw reportedFailure(
                 "❌ Ausgabeordner konnte nicht angelegt werden: \(error.localizedDescription)"
