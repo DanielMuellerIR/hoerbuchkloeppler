@@ -179,6 +179,7 @@ private struct CLIOptions: Sendable {
     let output: String?
     let verbose: Bool
     let force: Bool
+    let workers: Int?
 }
 
 /// Hält den Pacman-Statusblock am unteren Rand des Terminals und trennt ihn
@@ -307,6 +308,9 @@ struct KloepplerCLI: AsyncParsableCommand {
     @Flag(name: .shortAndLong, help: "Überschreibt die Ausgabedatei ohne Nachfrage.")
     var force: Bool = false
 
+    @Option(name: .long, help: "Maximale Encoding-Prozesse (1–32); automatisch höchstens vier.")
+    var workers: Int?
+
     // Eingaben früh prüfen (läuft vor run()), damit klare Fehler entstehen statt
     // erst später eine kryptische ffmpeg-Meldung — wichtig für den Skript-/Agent-Einsatz.
     func validate() throws {
@@ -314,6 +318,7 @@ struct KloepplerCLI: AsyncParsableCommand {
         guard (folderPath != nil ? 1 : 0) + (project != nil ? 1 : 0) + (!files.isEmpty ? 1 : 0) == 1 else {
             throw ValidationError("Genau einen Ordner, --project oder eine Folge von --file angeben.")
         }
+        if let workers, !(1...32).contains(workers) { throw ValidationError("--workers erwartet 1–32.") }
         if let mode = mode, !["parallel", "standard"].contains(mode.lowercased()) {
             throw ValidationError("Ungültiger --mode '\(mode)'. Erlaubt: 'parallel' oder 'standard'.")
         }
@@ -351,7 +356,8 @@ struct KloepplerCLI: AsyncParsableCommand {
             stereo: stereo,
             output: output,
             verbose: verbose,
-            force: force
+            force: force,
+            workers: workers
         )
         try await Self.execute(options)
     }
@@ -494,6 +500,7 @@ struct KloepplerCLI: AsyncParsableCommand {
                 throw reportedFailure("Fehler: Keine gültigen Audiodateien im Ordner gefunden.")
             }
 
+            if let workers = options.workers { session.settings.workerLimit = workers }
             if let mode = mode {
                 session.settings.useParallelEncoding = (mode.lowercased() == "parallel")
             }

@@ -76,6 +76,7 @@ Symbolnamen als Anker (bewusst **ohne** Zeilennummern — die driften bei jeder
 
 | Datei | Zuständigkeit | Schlüssel-Symbole |
 |---|---|---|
+| `ConversionPlan.swift` | Gemeinsamer Split-/Zielplan und Quell-/Ziel-Snapshot-Validierung | `ConversionPlan` · `makeConversionPlan` · `validateConversionPlan` · `splitAudioFilesIfNeeded` |
 | `FFmpegWrapper.swift` | Kodierpipeline und Laufsteuerung: Ausgabeplan, laufbezogener Besitz von Prozessen und Zwischendateien, Segment- und Muxing-Schritte | `ConversionPlan` · `ConversionContext` · `ConversionJob` · `makeConversionPlan` · `validateConversionPlan` · `convert(session:plan:)` · `performSequentialConversion` · `performParallelConversion` · `runFinalProcess` · `splitAudioFilesIfNeeded` |
 | `ProcessTermination.swift` | Prozess-Lebenszyklus: Werkzeugprozesse starten, ihre Ausgabe lesen, zweistufig (TERM→KILL) samt Prozessgruppe beenden, Tool-Auflösung | `ProcessTerminator` · `wait(upTo:while:)` · `terminateAndWait` · `ToolProcessContext` · `ProcessPipeReader` · `getBinaryURL` · `runCapturedProcess` |
 | `OutputStaging.swift` | Dateisystem-Sicherheitsgrenze: Eintrag über Gerät und Inode wiedererkennen, exklusiv anlegen, prozessübergreifend sperren, atomar ins Ziel tauschen, nur nachweislich Eigenes bereinigen | `FileSystemIdentity` · `StagingOwnership` · `OutputLeaseSet` · `acquireOutputLeases` · `createProtectedStagingOutput` · `commitStagedOutput` · `removeOrphanedStagedOutputs` · `removeOwnedTempDirectory` |

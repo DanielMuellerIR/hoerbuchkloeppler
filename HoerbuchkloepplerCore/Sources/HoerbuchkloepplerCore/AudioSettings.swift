@@ -9,6 +9,12 @@ public struct AudioSettings: Codable, Equatable, Sendable {
     public var maxDurationHours: Int? = nil
     public var useParallelEncoding: Bool = true
     public var isVerbose: Bool = false
+    /// nil begrenzt automatisch auf höchstens vier Prozesse.
+    public var workerLimit: Int? = nil
+
+    public var effectiveWorkerLimit: Int {
+        max(1, min(32, workerLimit ?? 4, max(1, ProcessInfo.processInfo.activeProcessorCount)))
+    }
 
     public init(
         isMono: Bool = true,
@@ -16,7 +22,8 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         sampleRate: Int = 32000,
         maxDurationHours: Int? = nil,
         useParallelEncoding: Bool = true,
-        isVerbose: Bool = false
+        isVerbose: Bool = false,
+        workerLimit: Int? = nil
     ) {
         self.isMono = isMono
         self.bitrate = bitrate
@@ -24,6 +31,7 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         self.maxDurationHours = maxDurationHours
         self.useParallelEncoding = useParallelEncoding
         self.isVerbose = isVerbose
+        self.workerLimit = workerLimit
     }
 
     /// Liest jedes Feld unabhängig. Eine alte oder von Hand bearbeitete Datei
@@ -39,6 +47,7 @@ public struct AudioSettings: Codable, Equatable, Sendable {
             ?? defaults.maxDurationHours
         useParallelEncoding = (try? values.decode(Bool.self, forKey: .useParallelEncoding))
             ?? defaults.useParallelEncoding
+        workerLimit = try? values.decodeIfPresent(Int.self, forKey: .workerLimit)
         isVerbose = (try? values.decode(Bool.self, forKey: .isVerbose)) ?? defaults.isVerbose
     }
 
@@ -71,6 +80,7 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         if let hours = result.maxDurationHours, hours <= 0 {
             result.maxDurationHours = defaults.maxDurationHours
         }
+        if let limit = result.workerLimit, !(1...32).contains(limit) { result.workerLimit = nil }
         return result
     }
 }

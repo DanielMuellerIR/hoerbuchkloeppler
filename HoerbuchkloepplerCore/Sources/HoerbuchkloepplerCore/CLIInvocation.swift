@@ -27,6 +27,7 @@ public struct CLIInvocation: Sendable {
             "--samplerate", String(settings.sampleRate),
             settings.isMono ? "--mono" : "--stereo"
         ]
+        if let limit = settings.workerLimit { arguments += ["--workers", String(limit)] }
         if let maxDurationHours = settings.maxDurationHours {
             arguments += ["--max-duration", String(maxDurationHours)]
         }

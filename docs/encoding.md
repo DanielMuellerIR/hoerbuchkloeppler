@@ -127,3 +127,24 @@ Original bleibt bis zum atomaren Commit erhalten.
   AVFoundation-Ladevorgängen aus. Beim Encoding wartet es auf das vollständige
   Temp-/Partial-Cleanup. Ein Signal nach dem letzten atomaren Commit ändert
   einen erfolgreichen Exit nicht mehr.
+
+## Ressourcen und Segmentfehler (2026-09-05)
+
+Beide Modi starten automatisch höchstens vier Encoding-/Slice-Prozesse;
+`--workers` beziehungsweise `workerLimit` setzt 1–32, zusätzlich begrenzt auf
+verfügbare Kerne. Die Dispatch-Warteschlange hält keine unbeschränkte Menge
+wartender Segmentaufträge. Ein fataler Segmentfehler sperrt weitere Prozessstarts
+unter derselben Sperre wie der Prozessstart und beendet laufende Prozesse über
+den bestehenden TERM/KILL-Vertrag. Das Ergebnis bleibt ein Fehler, kein
+Benutzerabbruch.
+
+`ProcessPipeReader` speichert bei ffmpeg-Diagnosen nur die letzten 256 KiB und
+kennzeichnet eine Kürzung. Der Fortschrittsparser erhält weiterhin jeden Chunk.
+Vollständige Versions-/MediaInfo-Ausgaben erhalten eine getrennte 32-MiB-Grenze;
+bei Überschreitung liefert der Runner einen ausdrücklichen Fehler.
+Kapitelextraktion besitzt weiterhin ihre eigene begrenzte Vollausgabe.
+
+Segmentfortschritt wird nach Audiodauer gewichtet; ein abgeschlossenes
+10-Sekunden-Kapitel eines 100-Sekunden-Buchs zählt 10 Prozent der Segmentphase.
+Messungen und Entscheidung gegen einen unbeschränkten Filtergraphen ohne WAV:
+[performance-measurements.md](performance-measurements.md).
