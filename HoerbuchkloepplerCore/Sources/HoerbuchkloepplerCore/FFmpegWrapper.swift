@@ -53,6 +53,7 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
     private let lock = NSCondition()
     private let log: @Sendable (UUID, String) -> Void
     private var cancelled = false
+    private var segmentFailure = false
     private var finished = false
     private var cancellationCleanupInProgress = false
     private var processes = Set<Process>()
@@ -75,7 +76,7 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
     /// bereits gewonnener Abbruch verhindert den Start vollständig.
     func run(_ process: Process) throws -> Bool {
         lock.lock()
-        guard !cancelled else {
+        guard !cancelled && !segmentFailure else {
             lock.unlock()
             return false
         }
@@ -90,6 +91,23 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
             lock.unlock()
             throw error
         }
+    }
+
+    var hasSegmentFailure: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return segmentFailure
+    }
+
+    /// Stoppt nach einem fatalen Fehler alle besessenen Prozesse, ohne einen
+    /// Benutzerabbruch vorzutäuschen. Neue Starts prüfen dieselbe Sperre.
+    func failSegments() {
+        lock.lock()
+        guard !segmentFailure else { lock.unlock(); return }
+        segmentFailure = true
+        let running = Array(processes)
+        lock.unlock()
+        ProcessTerminator.terminateAndWait(running)
     }
 
     func unregister(_ process: Process) {
@@ -1090,6 +1108,7 @@ public struct FFmpegWrapper {
     private static func runParallelTasks(group: [AudioFile], tempDir: URL, session: ConversionSession, context: ConversionContext,
                                          progressBase: Double, progressWeight: Double,
                                          extensionStr: String, showIndividualPacmans: Bool,
+                                         workerLimit: Int,
                                          inputSnapshots: [String: OutputDestinationSnapshot],
                                          argsProvider: @escaping @Sendable (Int, AudioFile, URL) -> [String]) -> [String]? {
         // ffmpeg einmal vorab auflösen. Fehlt es, die Ursache klar benennen und
@@ -1103,8 +1122,7 @@ public struct FFmpegWrapper {
             )
             return nil
         }
-        let cores = ProcessInfo.processInfo.activeProcessorCount
-        let maxConcurrent = max(1, cores - 1)
+        let maxConcurrent = max(1, min(workerLimit, group.count))
         let semaphore = DispatchSemaphore(value: maxConcurrent)
         let groupQueue = DispatchQueue(label: "com.hoerbuchkloppler.parallel", attributes: .concurrent)
         let completionGroup = DispatchGroup()
@@ -1119,13 +1137,17 @@ public struct FFmpegWrapper {
         )
 
         for (idx, file) in group.enumerated() {
+            // Vor dem Einreihen warten: auch die Dispatch-Warteschlange bleibt begrenzt.
+            semaphore.wait()
+            if context.isCancelled || context.hasSegmentFailure { semaphore.signal(); break }
             completionGroup.enter()
             groupQueue.async {
-                semaphore.wait()
+                var succeeded = false
                 defer {
                     semaphore.signal()
                     completionGroup.leave()
                 }
+                defer { if !succeeded && !context.isCancelled { context.failSegments() } }
 
                 if context.isCancelled {
                     return
@@ -1237,6 +1259,7 @@ public struct FFmpegWrapper {
                         }
                         
                         if fileIsValid {
+                            succeeded = true
                             let finishedCount = results.store(segmentURL.path, at: idx)
                             let totalProgress = tracker.update(
                                 index: idx,
@@ -1443,7 +1466,7 @@ public struct FFmpegWrapper {
         progressBase: Double,
         progressScale: Double
     ) -> Bool {
-        let wavPaths = runParallelTasks(group: group, tempDir: tempDir, session: session, context: context, progressBase: progressBase, progressWeight: progressScale * 0.2, extensionStr: "wav", showIndividualPacmans: false, inputSnapshots: job.plan.inputSnapshots) { _, file, url in
+        let wavPaths = runParallelTasks(group: group, tempDir: tempDir, session: session, context: context, progressBase: progressBase, progressWeight: progressScale * 0.2, extensionStr: "wav", showIndividualPacmans: false, workerLimit: job.settings.effectiveWorkerLimit, inputSnapshots: job.plan.inputSnapshots) { _, file, url in
             FFmpegWrapper.getArgsForStandardSlicing(
                 file: file,
                 url: url,
@@ -1487,7 +1510,7 @@ public struct FFmpegWrapper {
         progressBase: Double,
         progressScale: Double
     ) -> Bool {
-        let aacPaths = runParallelTasks(group: group, tempDir: tempDir, session: session, context: context, progressBase: progressBase, progressWeight: progressScale * 0.9, extensionStr: "m4a", showIndividualPacmans: true, inputSnapshots: job.plan.inputSnapshots) { _, file, url in
+        let aacPaths = runParallelTasks(group: group, tempDir: tempDir, session: session, context: context, progressBase: progressBase, progressWeight: progressScale * 0.9, extensionStr: "m4a", showIndividualPacmans: true, workerLimit: job.settings.effectiveWorkerLimit, inputSnapshots: job.plan.inputSnapshots) { _, file, url in
             FFmpegWrapper.getArgsForParallelEncoding(
                 file: file,
                 url: url,

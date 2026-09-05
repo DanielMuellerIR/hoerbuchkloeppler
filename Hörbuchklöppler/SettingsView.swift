@@ -53,8 +53,12 @@ struct SettingsView: View {
                 }
 
                 Section(header: Text("Performance & Optimierung").foregroundColor(.secondary)) {
+                    Picker("Maximale Prozesse", selection: $session.settings.workerLimit) {
+                        Text("Automatisch (höchstens 4)").tag(Int?.none)
+                        ForEach(1...32, id: \.self) { Text(String($0)).tag(Int?.some($0)) }
+                    }
                     Toggle("Paralleles Kodieren und Stream Copy", isOn: $session.settings.useParallelEncoding)
-                        .help("Nutzt alle CPU-Kerne parallel und fügt die Dateien ohne erneute Kodierung zusammen.")
+                        .help("Nutzt begrenzt mehrere Prozesse parallel und fügt die Dateien ohne erneute Kodierung zusammen.")
                 }
 
                 Section(header: Text("Maximale Dauer").foregroundColor(.secondary)) {

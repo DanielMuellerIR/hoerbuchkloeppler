@@ -224,9 +224,16 @@ final class ProcessPipeReader: @unchecked Sendable {
     private var started = false
     private var stopRequested = false
     private var output = Data()
+    private let maximumBytes: Int
+    private let requiresCompleteOutput: Bool
+    private var exceeded = false
 
-    init(handle: FileHandle) {
+    var exceededOutputLimit: Bool { queue.sync { exceeded } }
+
+    init(handle: FileHandle, maximumBytes: Int = 256 * 1024, requiresCompleteOutput: Bool = false) {
         self.handle = handle
+        self.maximumBytes = max(1, maximumBytes)
+        self.requiresCompleteOutput = requiresCompleteOutput
     }
 
     func start(onChunk: @escaping @Sendable (Data) -> Void = { _ in }) {
@@ -264,7 +271,18 @@ final class ProcessPipeReader: @unchecked Sendable {
                     break
                 }
                 let chunk = Data(buffer.prefix(count))
-                output.append(chunk)
+                // Fortschritt erhält weiterhin jedes Byte; nur die gespeicherte Diagnose ist begrenzt.
+                if requiresCompleteOutput {
+                    let remaining = max(0, maximumBytes - output.count)
+                    output.append(chunk.prefix(remaining))
+                    if chunk.count > remaining { exceeded = true }
+                } else {
+                    output.append(chunk)
+                    if output.count > maximumBytes {
+                        output.removeFirst(output.count - maximumBytes)
+                        exceeded = true
+                    }
+                }
                 onChunk(chunk)
             }
             completion.leave()
@@ -294,7 +312,12 @@ final class ProcessPipeReader: @unchecked Sendable {
         } else {
             completion.wait()
         }
-        return queue.sync { output }
+        return queue.sync {
+            if exceeded && !requiresCompleteOutput {
+                return Data("[Diagnose gekürzt; letzte \(maximumBytes) Bytes]\n".utf8) + output
+            }
+            return output
+        }
     }
 }
 
@@ -394,7 +417,7 @@ extension FFmpegWrapper {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
-        let reader = ProcessPipeReader(handle: pipe.fileHandleForReading)
+        let reader = ProcessPipeReader(handle: pipe.fileHandleForReading, maximumBytes: 32 * 1024 * 1024, requiresCompleteOutput: true)
         do {
             let started: Bool
             if let context {
@@ -438,6 +461,7 @@ extension FFmpegWrapper {
             }
             if context?.isCancelled == true { return .cancelled(output: output) }
             if timedOut { return .timedOut(output: output) }
+            if reader.exceededOutputLimit { return .failed("Werkzeugausgabe überschreitet 32 MiB; vollständige Analyse nicht möglich.") }
             return .completed(status: process.terminationStatus, output: output)
         } catch {
             return .failed(error.localizedDescription)

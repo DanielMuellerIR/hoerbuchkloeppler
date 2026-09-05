@@ -10,6 +10,7 @@
 | `maxDurationHours` | Int? | `nil` (unbegrenzt) |
 | `useParallelEncoding` | Bool | `true` |
 | `isVerbose` | Bool | `false` |
+| `workerLimit` | Int? | `nil` (höchstens 4, begrenzt auf verfügbare Kerne) |
 
 Der bewusst niedrige Default **mono / 48k / 32 kHz** ist für Sprach-Hörbücher
 gewählt (kleine Dateien, praktisch unhörbar vs. hohe Qualität) — Begründung in
@@ -37,3 +38,6 @@ gewählt (kleine Dateien, praktisch unhörbar vs. hohe Qualität) — Begründun
 
 Parallel-Encoding ist beim App-Start **immer AN**. Lässt sich nur temporär in
 einer Session abschalten und fällt beim Neustart auf AN zurück.
+
+`workerLimit` erlaubt 1–32; ungültige gespeicherte Werte fallen auf Auto zurück.
+CLI: `--workers N`. Beide Modi begrenzen auch die Zahl wartender Segmentaufträge.
