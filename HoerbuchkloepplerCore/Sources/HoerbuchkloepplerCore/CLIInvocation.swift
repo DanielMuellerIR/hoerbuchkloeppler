@@ -15,7 +15,8 @@ public struct CLIInvocation: Sendable {
         author: String,
         genre: String = "Hörbuch",
         coverPath: String? = nil,
-        suppressCover: Bool = false
+        suppressCover: Bool = false,
+        narrator: String = "", series: String = "", volumeNumber: String = "", language: String = ""
     ) {
         self.executable = executable
         self.folderURL = folderURL
@@ -40,6 +41,11 @@ public struct CLIInvocation: Sendable {
         if !genre.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             arguments += ["--genre", genre]
         }
+        for (key, value) in [("--narrator", narrator), ("--series", series), ("--volume-number", volumeNumber), ("--language", language)] where !value.isEmpty {
+            arguments += [key, value]
+        }
+        if settings.analyzeLoudness { arguments.append("--analyze-loudness") }
+        if settings.normalizeLoudness { arguments.append("--normalize-loudness") }
         if suppressCover {
             arguments.append("--no-cover")
         } else if let coverPath {

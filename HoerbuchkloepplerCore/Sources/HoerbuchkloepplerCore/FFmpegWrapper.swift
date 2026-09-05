@@ -449,7 +449,12 @@ private struct ConversionJob: Sendable {
     let title: String
     let author: String
     let genre: String
+    let narrator: String
+    let series: String
+    let volumeNumber: String
+    let language: String
     let coverData: Data?
+    var loudnessGain: Double = 0
 }
 
 /// Behält genug Byte-Kontext, um einen ffmpeg-Zeitwert auch dann zu erkennen,
@@ -613,6 +618,11 @@ public struct FFmpegWrapper {
         session: ConversionSession,
         plan: ConversionPlan
     ) -> ConversionStartResult {
+        let outputLanguage: String
+        do {
+            outputLanguage = try BookMetadata.outputLanguage(session.language)
+            try BookMetadata.validateVolumeNumber(session.volumeNumber)
+        } catch { return .rejected(error.localizedDescription) }
         session.refreshProjectSourceIssues()
         guard session.projectSourceIssues.isEmpty else {
             return .rejected("Projektquellen fehlen oder wurden verändert.")
@@ -650,6 +660,8 @@ public struct FFmpegWrapper {
             title: session.title,
             author: session.author,
             genre: session.genre,
+            narrator: session.narrator, series: session.series,
+            volumeNumber: session.volumeNumber, language: outputLanguage,
             // Ein manuell gewähltes Cover wird ausschließlich aus dem beim
             // Auswählen gelesenen Snapshot kodiert. Der sichtbare Pfad bleibt
             // nur UI-Metadatum und darf den Inhalt später nicht austauschen.
@@ -695,6 +707,7 @@ public struct FFmpegWrapper {
         session.addLog("Technik: \(modeName) via \(codecInfo)", type: .info)
 
         DispatchQueue.global(qos: .userInitiated).async {
+            var job = job
             let heldOutputLeases = job.outputLeases
             defer { withExtendedLifetime(heldOutputLeases) {} }
             // Verfolgt, ob ALLE Gruppen erfolgreich waren -- nur dann ist der Lauf
@@ -706,7 +719,17 @@ public struct FFmpegWrapper {
             // Datei hätten keine garantierte Reihenfolge gegenüber dem Abschluss.
             var committedOutputs: [URL] = []
 
-            for (groupIndex, fileGroup) in job.plan.groups.enumerated() {
+            if job.settings.analyzeLoudness || job.settings.normalizeLoudness {
+                do {
+                    let measurement = try analyzeBookLoudness(job: job, session: session, context: context)
+                    job.loudnessGain = job.settings.normalizeLoudness ? measurement.gainDB : 0
+                    session.enqueueLog(measurement.description + (job.settings.normalizeLoudness ? "; gemeinsamer Gain: \(job.loudnessGain) dB" : "; Analyse ohne Pegeländerung"), type: .info, runID: context.id)
+                } catch {
+                    overallSuccess = false
+                    if !context.isCancelled { session.enqueueLog("Lautheitsanalyse fehlgeschlagen: \(error.localizedDescription)", type: .highlight, runID: context.id) }
+                }
+            }
+            for (groupIndex, fileGroup) in (overallSuccess ? job.plan.groups : []).enumerated() {
                 if context.isCancelled {
                     overallSuccess = false
                     break
@@ -1223,6 +1246,7 @@ public struct FFmpegWrapper {
             "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", listFile.path,
             "-i", metaFile.path
         ]
+        if audioCodecArguments.contains("copy") { arguments += ["-copyts"] }
         if let coverInput { arguments += ["-i", coverInput] }
         arguments += audioCodecArguments
         arguments += [
@@ -1230,7 +1254,12 @@ public struct FFmpegWrapper {
             "-metadata", "title=\(job.title)",
             "-metadata", "album=\(job.title)",
             "-metadata", "artist=\(job.author)",
-            "-metadata", "genre=\(job.genre)"
+            "-metadata", "genre=\(job.genre)",
+            "-metadata", "composer=\(job.narrator)",
+            "-metadata", "grouping=\(job.series)",
+            "-metadata", "disc=\(job.volumeNumber)",
+            "-metadata", "language=\(job.language)",
+            "-metadata:s:a:0", "language=\(job.language)"
         ]
         if coverInput != nil {
             arguments += ["-map", "2:0", "-c:v", "copy", "-disposition:v", "attached_pic"]
@@ -1344,7 +1373,7 @@ public struct FFmpegWrapper {
                 "-b:a", job.settings.bitrate,
                 "-ar", "\(job.settings.sampleRate)",
                 "-ac", job.settings.isMono ? "1" : "2"
-            ],
+            ] + loudnessFilterArguments(gainDB: job.loudnessGain),
             logMessage: "🛠️ Starte komplette Apple CVBR Kodierung...",
             pacmanTitle: "Apple AAC Encoding"
         )
@@ -1366,7 +1395,8 @@ public struct FFmpegWrapper {
             FFmpegWrapper.getArgsForParallelEncoding(
                 file: file,
                 url: url,
-                settings: job.settings
+                settings: job.settings,
+                gainDB: job.loudnessGain
             )
         }
         guard let validPaths = aacPaths else { return false }
@@ -1636,34 +1666,44 @@ public struct FFmpegWrapper {
 }
 
 extension FFmpegWrapper {
-    static func ffmpegTimeArgument(_ seconds: TimeInterval) -> String {
-        String(
-            format: "%.6f",
-            locale: Locale(identifier: "en_US_POSIX"),
-            seconds
-        )
-    }
+}
 
-    static func getArgsForStandardSlicing(
-        file: AudioFile,
-        url: URL,
-        settings: AudioSettings
-    ) -> [String] {
-        // Zwischen-WAV direkt auf die Ziel-Abtastrate slicen statt hart auf 44100.
-        // Sonst würde z.B. bei Ziel 48000 zweimal resampelt (Quelle→44100 beim
-        // Slicen, 44100→48000 beim finalen Encode) — unnötiger Qualitätsverlust.
-        // Ebenso auf die Ziel-KANALZAHL slicen (nicht hart Stereo): unkomprimiertes
-        // WAV ist der Temp-Treiber (Standard-Modus hält ALLE Slices gleichzeitig),
-        // und für ein Mono-Hörbuch (Default) halbiert Mono-Slicing den Temp-Bedarf.
-        // Der finale `-ac`-Downmix bleibt identisch, nur eben schon beim Slicen.
-        return ["-nostdin", "-y", "-ss", ffmpegTimeArgument(file.startTime), "-t", ffmpegTimeArgument(file.duration), "-i", file.url.path, "-vn", "-acodec", "pcm_s16le", "-ar", "\(settings.sampleRate)", "-ac", settings.isMono ? "1" : "2", url.path]
-    }
-
-    static func getArgsForParallelEncoding(
-        file: AudioFile,
-        url: URL,
-        settings: AudioSettings
-    ) -> [String] {
-        return ["-nostdin", "-y", "-ss", ffmpegTimeArgument(file.startTime), "-t", ffmpegTimeArgument(file.duration), "-i", file.url.path, "-vn", "-c:a", "aac_at", "-aac_at_mode", "cvbr", "-b:a", settings.bitrate, "-ar", "\(settings.sampleRate)", "-ac", settings.isMono ? "1" : "2", url.path]
+extension FFmpegWrapper {
+    private static func analyzeBookLoudness(job: ConversionJob, session: ConversionSession, context: ConversionContext) throws -> LoudnessMeasurement {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("HB_Loudness_\(UUID().uuidString)")
+        try createOwnedTempDirectory(folder)
+        context.registerTempDirectory(folder)
+        defer { context.removeTempDirectory(folder) }
+        session.enqueueLog("Lautheitsanalyse: zusätzlicher vollständiger Dekodier- und Analysepass für das gesamte Buch; temporärer WAV-Bestand.", type: .info, runID: context.id)
+        let files = job.plan.groups.flatMap { $0 }
+        guard let paths = runParallelTasks(group: files, tempDir: folder, session: session, context: context, progressBase: 0, progressWeight: 0, extensionStr: "wav", showIndividualPacmans: false, workerLimit: job.settings.effectiveWorkerLimit, inputSnapshots: job.plan.inputSnapshots, argsProvider: { _, file, url in
+            getArgsForStandardSlicing(file: file, url: url, settings: job.settings)
+        }), let executable = getBinaryURL(name: "ffmpeg") else {
+            throw NSError(domain: "Loudness", code: 2, userInfo: [NSLocalizedDescriptionKey: "Buchdekodierung fehlgeschlagen oder abgebrochen."])
+        }
+        session.enqueueSegmentReset(title: "Buchlautheit messen", runID: context.id)
+        let list = folder.appendingPathComponent("analysis.txt")
+        // Die erzeugten Segmentnamen liegen ausschließlich im eigenen UUID-Ordner.
+        try paths.map { "file '\($0.replacingOccurrences(of: "'", with: "'\\''"))'" }.joined(separator: "\n").write(to: list, atomically: true, encoding: .utf8)
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["-nostdin", "-hide_banner", "-nostats", "-f", "concat", "-safe", "0", "-i", list.path, "-af", "loudnorm=I=-18:TP=-1:LRA=50:print_format=json", "-f", "null", "-"]
+        let pipe = Pipe()
+        process.standardError = pipe
+        process.standardOutput = FileHandle.nullDevice
+        let reader = ProcessPipeReader(handle: pipe.fileHandleForReading)
+        defer { context.unregister(process) }
+        guard try context.run(process) else { throw CancellationError() }
+        try? pipe.fileHandleForWriting.close()
+        reader.start()
+        process.waitUntilExit()
+        let background = ProcessTerminator.terminateRemainingOwnedGroup(process)
+        let data = reader.waitUntilEOF(timeout: 0.25) { ProcessTerminator.terminateAndWait([process]) }
+        if context.isCancelled { throw CancellationError() }
+        guard process.terminationStatus == 0, !background else {
+            throw NSError(domain: "Loudness", code: 3, userInfo: [NSLocalizedDescriptionKey: "ffmpeg-Lautheitsanalyse fehlgeschlagen: \(String(decoding: data, as: UTF8.self))"])
+        }
+        try validateInputSnapshots(for: files, expected: job.plan.inputSnapshots)
+        return try LoudnessMeasurement.parse(data)
     }
 }

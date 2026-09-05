@@ -180,6 +180,12 @@ private struct CLIOptions: Sendable {
     let verbose: Bool
     let force: Bool
     let workers: Int?
+    let analyzeLoudness: Bool
+    let normalizeLoudness: Bool
+    let narrator: String?
+    let series: String?
+    let volumeNumber: String?
+    let language: String?
 }
 
 /// Hält den Pacman-Statusblock am unteren Rand des Terminals und trennt ihn
@@ -311,9 +317,24 @@ struct KloepplerCLI: AsyncParsableCommand {
     @Option(name: .long, help: "Maximale Encoding-Prozesse (1–32); automatisch höchstens vier.")
     var workers: Int?
 
+    @Flag(name: .long, help: "Buchlautheit messen; zusätzlicher vollständiger Dekodier-/Analysepass und temporäre WAV-Dateien.")
+    var analyzeLoudness = false
+    @Flag(name: .long, help: "Buchweit auf -18 LUFS angleichen, durch Spitzenreserve begrenzt; impliziert Analyse.")
+    var normalizeLoudness = false
+    @Option(name: .long, help: "Sprecher; wird als MP4-Komponist gespeichert.")
+    var narrator: String?
+    @Option(name: .long, help: "Hörbuchreihe; wird als MP4-Gruppierung gespeichert.")
+    var series: String?
+    @Option(name: .long, help: "Bandnummer (1–65535).")
+    var volumeNumber: String?
+    @Option(name: .long, help: "Audiosprache als ISO-639-Code, z.B. deu oder eng.")
+    var language: String?
+
     // Eingaben früh prüfen (läuft vor run()), damit klare Fehler entstehen statt
     // erst später eine kryptische ffmpeg-Meldung — wichtig für den Skript-/Agent-Einsatz.
     func validate() throws {
+        if let language { _ = try BookMetadata.outputLanguage(language) }
+        if let volumeNumber { try BookMetadata.validateVolumeNumber(volumeNumber) }
         guard ["text", "json"].contains(format) else { throw ValidationError("--format erwartet text oder json.") }
         guard (folderPath != nil ? 1 : 0) + (project != nil ? 1 : 0) + (!files.isEmpty ? 1 : 0) == 1 else {
             throw ValidationError("Genau einen Ordner, --project oder eine Folge von --file angeben.")
@@ -357,7 +378,8 @@ struct KloepplerCLI: AsyncParsableCommand {
             output: output,
             verbose: verbose,
             force: force,
-            workers: workers
+            workers: workers, analyzeLoudness: analyzeLoudness, normalizeLoudness: normalizeLoudness,
+            narrator: narrator, series: series, volumeNumber: volumeNumber, language: language
         )
         try await Self.execute(options)
     }
@@ -500,6 +522,12 @@ struct KloepplerCLI: AsyncParsableCommand {
                 throw reportedFailure("Fehler: Keine gültigen Audiodateien im Ordner gefunden.")
             }
 
+            if options.analyzeLoudness { session.settings.analyzeLoudness = true }
+            if options.normalizeLoudness { session.settings.normalizeLoudness = true }
+            if let narrator = options.narrator { session.narrator = narrator }
+            if let series = options.series { session.series = series }
+            if let volume = options.volumeNumber { session.volumeNumber = volume }
+            if let language = options.language { session.language = language }
             if let workers = options.workers { session.settings.workerLimit = workers }
             if let mode = mode {
                 session.settings.useParallelEncoding = (mode.lowercased() == "parallel")

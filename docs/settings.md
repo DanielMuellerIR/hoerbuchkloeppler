@@ -55,3 +55,7 @@ AAC-Segmente im Performance-Modus. Die Zielschätzung enthält 25 Prozent
 CVBR-/Containerreserve und 32 MiB Coverreserve je Ausgabe. Temp- und Zielbedarf
 sind bei gemeinsamem Volume zu addieren. Freier Platz ist eine Momentaufnahme,
 die Schätzung keine Garantie.
+
+`analyzeLoudness` und `normalizeLoudness` sind Bool-Werte mit Default `false`.
+Die Angleichung impliziert den zusätzlichen Analysepass. Details, Zielpegel und
+WAV-Speicherbedarf stehen in [encoding.md](encoding.md#optionale-buchlautheit-2026-09-05).

@@ -11,6 +11,8 @@ public struct AudioSettings: Codable, Equatable, Sendable {
     public var isVerbose: Bool = false
     /// nil begrenzt automatisch auf höchstens vier Prozesse.
     public var workerLimit: Int? = nil
+    public var analyzeLoudness: Bool = false
+    public var normalizeLoudness: Bool = false
 
     public var effectiveWorkerLimit: Int {
         max(1, min(32, workerLimit ?? 4, max(1, ProcessInfo.processInfo.activeProcessorCount)))
@@ -23,7 +25,9 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         maxDurationHours: Int? = nil,
         useParallelEncoding: Bool = true,
         isVerbose: Bool = false,
-        workerLimit: Int? = nil
+        workerLimit: Int? = nil,
+        analyzeLoudness: Bool = false,
+        normalizeLoudness: Bool = false
     ) {
         self.isMono = isMono
         self.bitrate = bitrate
@@ -32,6 +36,8 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         self.useParallelEncoding = useParallelEncoding
         self.isVerbose = isVerbose
         self.workerLimit = workerLimit
+        self.analyzeLoudness = analyzeLoudness
+        self.normalizeLoudness = normalizeLoudness
     }
 
     /// Liest jedes Feld unabhängig. Eine alte oder von Hand bearbeitete Datei
@@ -48,6 +54,8 @@ public struct AudioSettings: Codable, Equatable, Sendable {
         useParallelEncoding = (try? values.decode(Bool.self, forKey: .useParallelEncoding))
             ?? defaults.useParallelEncoding
         workerLimit = try? values.decodeIfPresent(Int.self, forKey: .workerLimit)
+        analyzeLoudness = (try? values.decode(Bool.self, forKey: .analyzeLoudness)) ?? false
+        normalizeLoudness = (try? values.decode(Bool.self, forKey: .normalizeLoudness)) ?? false
         isVerbose = (try? values.decode(Bool.self, forKey: .isVerbose)) ?? defaults.isVerbose
     }
 

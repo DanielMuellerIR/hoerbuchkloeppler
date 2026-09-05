@@ -65,6 +65,13 @@ struct SettingsView: View {
                         .font(.caption)
                 }
 
+                Section(header: Text("Lautheit pro Buch")) {
+                    Toggle("Lautheit analysieren", isOn: $session.settings.analyzeLoudness)
+                    Toggle("Auf −18 LUFS angleichen", isOn: $session.settings.normalizeLoudness)
+                    Text("Zusätzlicher vollständiger Dekodier- und Analysepass mit WAV-Zwischenbestand. Ein gemeinsamer Pegel für alle Kapitel und Split-Dateien; Spitzenbegrenzung auf −1 dBTP kann das Ziel verhindern. Dynamik bleibt erhalten. Standardmäßig aus.")
+                        .font(.caption)
+                }
+
                 Section(header: Text("Maximale Dauer").foregroundColor(.secondary)) {
                     Toggle("Unlimitiert", isOn: Binding(
                         get: { self.isUnlimited },

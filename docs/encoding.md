@@ -148,3 +148,45 @@ Segmentfortschritt wird nach Audiodauer gewichtet; ein abgeschlossenes
 10-Sekunden-Kapitel eines 100-Sekunden-Buchs zählt 10 Prozent der Segmentphase.
 Messungen und Entscheidung gegen einen unbeschränkten Filtergraphen ohne WAV:
 [performance-measurements.md](performance-measurements.md).
+
+## Optionale Buchlautheit (2026-09-05)
+
+`analyzeLoudness` misst die wahrgenommene Lautheit in LUFS und den True Peak
+(geschätzte Spitzen zwischen Samples, dBTP). `normalizeLoudness` aktiviert die
+Analyse ebenfalls und wendet anschließend **einen konstanten Gain auf das ganze
+Buch** an, auch über Split-Dateien hinweg. Beide Optionen sind standardmäßig aus.
+Der Gain ist das Minimum aus `−18 − LUFS` und `−1 − dBTP`: die Dynamik bleibt
+unverändert; bei hohen Spitzen kann das Buch das Lautheitsziel nicht erreichen.
+Das ist keine kapitelweise Normalisierung und kein Dynamikkompressor.
+
+Vor dem ersten Ausgabeschritt dekodieren begrenzte Worker alle gewählten
+Abschnitte in WAV mit Zielkanälen und Zielabtastrate. Ein concat-Analyseprozess
+liest sie der Reihe nach; er öffnet keinen Filtergraphen mit allen Quellen.
+Dieser zusätzliche vollständige Dekodier- und Analysepass braucht Laufzeit und
+kurzzeitig PCM-Speicher für das **gesamte Buch**, auch im Performance-Modus.
+Die Ausgabevorschau berücksichtigt diesen höheren Spitzenbedarf. Vor dem
+Encoding wird dieser Bestand über die bestehende Besitzprüfung bereinigt.
+Stille und sehr kurze Inhalte ohne endliche Messung ergeben einen expliziten
+Fehler; es entsteht keine Ausgabe mit einem geratenen Gain.
+
+AAC kann Spitzen geringfügig verschieben: −1 dBTP bezeichnet die Grenze der
+linearen Verstärkung vor dem verlustbehafteten Encoder, keine garantierte
+nachträgliche AAC-Spitze. Die normale AAC-Toleranz gilt auch für LUFS.
+
+Prüfung mit realen CLI-Läufen, M5, Mono/48k/32 kHz, 2026-09-05:
+
+| Quelle | Standard LUFS / dBTP | Performance LUFS / dBTP | Laufzeit inkl. anschließender Messung |
+|---|---|---|---|
+| Sprache | −18,04 / −2,02 | −18,03 / −2,00 | 1,77 / 1,49 s |
+| Musik | −17,97 / −9,77 | −17,97 / −9,80 | 1,48 / 1,46 s |
+| Bereits angeglichene Sprache | −18,03 / −2,94 | −18,02 / −2,94 | 1,47 / 1,47 s |
+
+Alle sechs Läufe endeten mit Exit 0; Messung erfolgte durch vollständiges
+Dekodieren. Diese kurzen Fixtures messen keine Langbuch-Performance.
+
+Zusätzliche M4B-Metadaten nutzen native MP4-Tags: Sprecher als `composer`,
+Reihe als `grouping`, Bandnummer als `disc`, Sprache am Audiostream
+(dreistelliger ISO-639-2-Code, z. B. `deu`). Das Projekt behält die benannten
+Felder unabhängig davon. Reader-Unterstützung für diese Zuordnung variiert.
+`use_metadata_tags` wurde mit echten Ausgaben verworfen: Es erhielt zwar freie
+Tags, entfernte aber in beiden Modi das eingebettete Cover.

@@ -176,3 +176,13 @@ existierendem Zielordner und Fehler ohne Ausgabedatei bei veränderter Quelle.
 Die Standard-Konvertierung wird vollständig dekodiert; bei 32 kHz werden
 höchstens 100 ms AAC-Randabweichung zugelassen. Fixtures bleiben zur Diagnose
 im genannten temporären Ordner. Format und Grenzen: [Projekte](projects.md).
+
+## Sprecher und Lautheit
+
+`--narrator`, `--series`, `--volume-number` (1–65535) und `--language`
+(z. B. `deu`, `eng`; gebräuchliche Zweibuchstabencodes werden erweitert)
+überschreiben die jeweiligen importierten Projektwerte.
+`--analyze-loudness` misst das vollständige Buch; `--normalize-loudness`
+impliziert die Analyse und wendet einen gemeinsamen linearen Pegel an.
+Zusätzlicher Dekodier-/Analysepass und temporärer WAV-Bestand werden vorab
+in der GUI erklärt und im Lauf protokolliert. Beide Optionen sind standardmäßig aus.

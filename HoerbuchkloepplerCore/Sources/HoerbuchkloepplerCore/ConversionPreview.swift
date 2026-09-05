@@ -33,7 +33,9 @@ public struct ConversionPreview: Sendable {
         let tempRate = normalized.useParallelEncoding
             ? bitrate / 8 * 1.25
             : Double(normalized.sampleRate * (normalized.isMono ? 1 : 2) * 2)
-        tempBytes = Self.bytes(largestGroup * tempRate + 32 * 1024 * 1024)
+        let analysisBytes = normalized.analyzeLoudness || normalized.normalizeLoudness
+            ? duration * Double(normalized.sampleRate * (normalized.isMono ? 1 : 2) * 2) : 0
+        tempBytes = Self.bytes(max(largestGroup * tempRate, analysisBytes) + 32 * 1024 * 1024)
     }
 
     private static func bytes(_ value: Double) -> Int64 {

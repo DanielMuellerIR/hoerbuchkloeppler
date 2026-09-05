@@ -426,7 +426,8 @@ struct ContentView: View {
             author: session.author,
             genre: session.genre,
             coverPath: session.coverPath,
-            suppressCover: session.isCoverSuppressed
+            suppressCover: session.isCoverSuppressed,
+            narrator: session.narrator, series: session.series, volumeNumber: session.volumeNumber, language: session.language
         )
 
         NSPasteboard.general.clearContents()
