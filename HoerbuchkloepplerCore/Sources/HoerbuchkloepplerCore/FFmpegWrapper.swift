@@ -487,14 +487,19 @@ final class FFmpegProgressParser: @unchecked Sendable {
     }
 }
 
-private final class ParallelProgressTracker: @unchecked Sendable {
+final class ParallelProgressTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var progresses: [Int: Double] = [:]
+    private let durations: [Double]
+    init(durations: [Double]) { self.durations = durations }
 
     func update(index: Int, progress: Double, itemCount: Int) -> Double {
         lock.lock()
-        progresses[index] = progress
-        let total = progresses.values.reduce(0, +) / Double(max(1, itemCount))
+        progresses[index] = max(progresses[index] ?? 0, min(1, max(0, progress)))
+        let duration = durations.reduce(0, +)
+        let total = duration > 0 ? progresses.reduce(0.0) { sum, item in
+            sum + item.value * durations[item.key] / duration
+        } : 0
         lock.unlock()
         return total
     }
@@ -1128,7 +1133,7 @@ public struct FFmpegWrapper {
         let completionGroup = DispatchGroup()
         
         let results = ParallelResults(count: group.count)
-        let tracker = ParallelProgressTracker()
+        let tracker = ParallelProgressTracker(durations: group.map(\.duration))
         let itemCount = group.count
 
         session.enqueueSegmentReset(

@@ -30,6 +30,15 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             Text("Audio Kodierung").font(.headline).padding()
             Form {
+                Section(header: Text("Qualitätsprofil")) {
+                    Menu("Profil anwenden") {
+                        ForEach(AudioQualityProfile.allCases) { profile in
+                            Button(profile.title) { session.settings = profile.applying(to: session.settings) }
+                        }
+                    }
+                    Text("Profile setzen Kanäle, Bitrate und Abtastrate. Alle Werte bleiben danach einzeln änderbar.")
+                        .font(.caption)
+                }
                 Section(header: Text("Kanal & Qualität").foregroundColor(.secondary)) {
                     Picker("Modus", selection: $session.settings.isMono) {
                         Text("Mono").tag(true); Text("Stereo").tag(false)
@@ -37,14 +46,6 @@ struct SettingsView: View {
 
                     Picker("Bitrate", selection: $session.settings.bitrate) {
                         ForEach(visibleBitrates, id: \.self) { Text($0).tag($0) }
-                    }
-                    // Alte Ein-Parameter-onChange-Signatur (statt der Sonoma-
-                    // Formen), damit macOS 13 als Deployment-Target reicht.
-                    .onChange(of: session.settings.isMono) { _ in
-                        let currentList = session.settings.isMono ? monoBitrates : stereoBitrates
-                        if !currentList.contains(session.settings.bitrate) {
-                            session.settings.bitrate = currentList.first ?? "48k"
-                        }
                     }
 
                     Picker("Abtastrate", selection: $session.settings.sampleRate) {
@@ -58,7 +59,10 @@ struct SettingsView: View {
                         ForEach(1...32, id: \.self) { Text(String($0)).tag(Int?.some($0)) }
                     }
                     Toggle("Paralleles Kodieren und Stream Copy", isOn: $session.settings.useParallelEncoding)
-                        .help("Nutzt begrenzt mehrere Prozesse parallel und fügt die Dateien ohne erneute Kodierung zusammen.")
+                    Text(session.settings.useParallelEncoding
+                         ? "Performance: Kapitel einzeln als AAC kodieren, dann ohne erneute Kodierung verbinden. Weniger temporärer Speicher; AAC-Padding kann Übergänge verschieben."
+                         : "Standard: Abschnitte als WAV vorbereiten, danach einmal durchgehend als AAC kodieren. Mehr temporärer Speicher; geeignet für durchgehende Musik.")
+                        .font(.caption)
                 }
 
                 Section(header: Text("Maximale Dauer").foregroundColor(.secondary)) {

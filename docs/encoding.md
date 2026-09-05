@@ -143,3 +143,8 @@ kennzeichnet eine Kürzung. Der Fortschrittsparser erhält weiterhin jeden Chunk
 Vollständige Versions-/MediaInfo-Ausgaben erhalten eine getrennte 32-MiB-Grenze;
 bei Überschreitung liefert der Runner einen ausdrücklichen Fehler.
 Kapitelextraktion besitzt weiterhin ihre eigene begrenzte Vollausgabe.
+
+Segmentfortschritt wird nach Audiodauer gewichtet; ein abgeschlossenes
+10-Sekunden-Kapitel eines 100-Sekunden-Buchs zählt 10 Prozent der Segmentphase.
+Messungen und Entscheidung gegen einen unbeschränkten Filtergraphen ohne WAV:
+[performance-measurements.md](performance-measurements.md).

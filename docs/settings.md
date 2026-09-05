@@ -41,3 +41,17 @@ einer Session abschalten und fällt beim Neustart auf AN zurück.
 
 `workerLimit` erlaubt 1–32; ungültige gespeicherte Werte fallen auf Auto zurück.
 CLI: `--workers N`. Beide Modi begrenzen auch die Zahl wartender Segmentaufträge.
+
+## Qualitätsprofile und manuelle Werte
+
+Sprache kompakt setzt Mono/48k/32000, Sprache detailreich Mono/96k/44100,
+Musik und Hörspiel Stereo/192k/48000. Profile verändern nur diese drei Werte.
+Beim anschließenden Kanalwechsel bleibt die Bitrate erhalten, auch wenn sie
+nicht in der kurzen Vorschlagsliste des anderen Kanals steht.
+
+`ConversionPreview` berechnet die Schätzung aus dem tatsächlichen Split-Plan:
+WAV-Bedarf der größten gleichzeitig bearbeiteten Gruppe im Standardmodus;
+AAC-Segmente im Performance-Modus. Die Zielschätzung enthält 25 Prozent
+CVBR-/Containerreserve und 32 MiB Coverreserve je Ausgabe. Temp- und Zielbedarf
+sind bei gemeinsamem Volume zu addieren. Freier Platz ist eine Momentaufnahme,
+die Schätzung keine Garantie.
