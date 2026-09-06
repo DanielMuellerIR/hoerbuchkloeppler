@@ -169,6 +169,52 @@ struct CoverSelectionTests {
         #expect(session.embeddedCoverData == expectedEmbeddedArtwork)
     }
 
+    /// Regression für den CLI-`--file`-Pfad: Das Cover muss direkt nach dem
+    /// Import feststehen — ohne Polling auf eine Hintergrundsuche, weil
+    /// `--inspect` und die Konvertierung genau so weiterarbeiten.
+    @Test("CLI-Dateiimport bestimmt das eingebettete Cover synchron")
+    func fileImportResolvesEmbeddedArtworkSynchronously() async throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let audio = directory.appendingPathComponent("cli-mit-cover.m4a")
+        let expectedArtwork = try onePixelPNGData()
+        try writeAudioWithEmbeddedCover(
+            to: audio,
+            coverData: expectedArtwork,
+            in: directory
+        )
+        let expectedEmbeddedArtwork = try #require(
+            await AudioFile.extractEmbeddedArtwork(from: audio)
+        )
+
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        session.title = "Titel"
+        session.author = "Autor"
+        session.beginPreparation()
+        let token = session.beginImport(expectedItemCount: 1)
+        // Derselbe Ablauf wie in `KloepplerCLI` für `--file`.
+        await session.runImportTask(token) {
+            guard let found = ConversionSession.foundFile(at: audio) else { return }
+            let results = await session.loadAudioFiles(from: [found], importToken: token)
+            for result in results { session.stageAudioLoadResult(result, importToken: token) }
+            let loadedFiles = results.flatMap { result -> [AudioFile] in
+                if case .success(let files, _) = result { return files }
+                return []
+            }
+            let artwork = await session.analyzeImportArtwork(for: loadedFiles)
+            session.stageImportArtwork(artwork, importToken: token)
+            for _ in results { await session.finishImport(token, countingProgress: false) }
+        }
+
+        // Kein Warten: Der Import ist vorbei, das Cover muss schon da sein und
+        // keine Hintergrundsuche mehr laufen.
+        #expect(!session.isPreparingArtwork)
+        #expect(session.coverImage != nil)
+        #expect(session.embeddedCoverData == expectedEmbeddedArtwork)
+        #expect(!session.showSelectionUI)
+    }
+
     @Test("Ein verworfener Zusatz-Drop startet die entwertete Artwork-Suche neu")
     func rejectedAdditionalDropRestartsArtworkSearch() async throws {
         let source = URL(fileURLWithPath: "/tmp/bestehendes-kapitel.m4a")

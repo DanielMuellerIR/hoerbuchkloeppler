@@ -1,6 +1,11 @@
 # Vollständig dekodierte AAC-Übergänge; toleriert nur Encoder-Vorlauf und Frame-Padding.
 import pathlib,tempfile,subprocess,json,math,array,hashlib,uuid,wave,struct
 repo=pathlib.Path(__file__).resolve().parents[1];cli=repo/'HoerbuchkloepplerCore/.build/debug/kloeppler';ff=repo/'HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/Resources/bin/ffmpeg';r=pathlib.Path(tempfile.mkdtemp(prefix='kloeppler-transitions-'));rate=32000
+# Voraussetzungen vorab prüfen: ffmpeg liegt nicht im Repo (./build.sh --deps-only), die CLI kommt aus swift build, ffprobe aus dem PATH.
+import shutil
+assert ff.exists(),f'ffmpeg fehlt: {ff} — vorher ./build.sh --deps-only ausführen'
+assert cli.exists(),f'kloeppler fehlt: {cli} — vorher swift build --package-path HoerbuchkloepplerCore ausführen'
+assert shutil.which('ffprobe'),'ffprobe fehlt im PATH (z. B. brew install ffmpeg)'
 sources=[];sections=[];lengths=[.6,.7,.8];freqs=[660,440,880]
 for i,freq in enumerate(freqs):
  p=r/f'{i}.wav'

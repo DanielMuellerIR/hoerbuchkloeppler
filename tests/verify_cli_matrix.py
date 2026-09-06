@@ -3,6 +3,9 @@ import pathlib,tempfile,subprocess,json,time,os,signal,selectors
 REPO=pathlib.Path(__file__).resolve().parents[1]
 CLI=REPO/'HoerbuchkloepplerCore/.build/debug/kloeppler'
 FF=REPO/'HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/Resources/bin/ffmpeg'
+# Voraussetzungen vorab prüfen: ffmpeg liegt nicht im Repo (./build.sh --deps-only), die CLI kommt aus swift build.
+assert FF.exists(),f'ffmpeg fehlt: {FF} — vorher ./build.sh --deps-only ausführen'
+assert CLI.exists(),f'kloeppler fehlt: {CLI} — vorher swift build --package-path HoerbuchkloepplerCore ausführen'
 ROOT=pathlib.Path(tempfile.mkdtemp(prefix='hk-final-matrix-'))
 REPORT=[]
 def tool(*args):

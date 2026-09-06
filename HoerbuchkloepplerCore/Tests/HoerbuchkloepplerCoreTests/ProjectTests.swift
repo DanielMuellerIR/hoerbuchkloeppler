@@ -109,6 +109,74 @@ struct ProjectTests {
         #expect(session.audioFiles.count == 1)
     }
 
+    @Test("Undo einer Kapiteländerung erhält zwischenzeitlich getippte Metadaten")
+    func undoKeepsLaterMetadata() {
+        let source = URL(fileURLWithPath: "/tmp/source.wav")
+        let session = ConversionSession(settings: AudioSettings())
+        let first = AudioFile(url: source, startTime: 0, duration: 10, chapterTitle: "Kapitel")
+        session.audioFiles = [first]
+        session.splitChapter(id: first.id, at: 5)
+        // Nach der Kapiteländerung werden Metadaten eingegeben …
+        session.title = "Nachträglich"; session.narrator = "Sprecherin"
+        // … und ein Undo darf nur die Kapitel zurücknehmen.
+        session.undoChapterEdit()
+        #expect(session.audioFiles.count == 1)
+        #expect(session.title == "Nachträglich")
+        #expect(session.narrator == "Sprecherin")
+        session.redoChapterEdit()
+        #expect(session.audioFiles.count == 2)
+        #expect(session.title == "Nachträglich")
+        // Das Entfernen des letzten Kapitels löscht die Metadaten; hier stellt
+        // Undo sie weiterhin aus dem Snapshot wieder her.
+        session.audioFiles = []
+        #expect(session.title.isEmpty)
+        session.undoChapterEdit()
+        #expect(session.audioFiles.count == 2)
+        #expect(session.title == "Nachträglich")
+    }
+
+    @Test("Zeichenweise Titeleingabe belegt nur einen Undo-Schritt")
+    func chapterTitleTypingCoalesces() {
+        let source = URL(fileURLWithPath: "/tmp/source.wav")
+        let session = ConversionSession(settings: AudioSettings())
+        let first = AudioFile(url: source, startTime: 0, duration: 10, chapterTitle: "Kapitel")
+        session.audioFiles = [first]
+        for typed in ["N", "Ne", "Neu"] { session.audioFiles[0].chapterTitle = typed }
+        session.undoChapterEdit()
+        #expect(session.audioFiles[0].chapterTitle == "Kapitel")
+        // Danach liegt nur noch der Eintrag der leeren Ausgangsliste vor.
+        session.undoChapterEdit()
+        #expect(session.audioFiles.isEmpty)
+        #expect(!session.canUndoChapters)
+    }
+
+    @Test("Ältere Projektdateien ohne neue Felder werden tolerant gelesen")
+    func tolerantDecoding() throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("alt.hkproject")
+        try Data(#"{"sources":[],"sections":[],"metadata":{"title":"Alt"},"settings":{}}"#.utf8).write(to: url)
+        let project = try AudiobookProject.read(from: url)
+        #expect(project.formatVersion == AudiobookProject.currentVersion)
+        #expect(project.metadata.title == "Alt")
+        #expect(project.metadata.genre == "Hörbuch")
+        #expect(project.metadata.language.isEmpty)
+        #expect(!project.coverSuppressed)
+        #expect(project.coverData == nil)
+    }
+
+    @Test("Fremde Projektversion liefert die dokumentierte Meldung")
+    func foreignVersionMessage() throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("zukunft.hkproject")
+        try Data(#"{"formatVersion":2,"chapters":[]}"#.utf8).write(to: url)
+        do {
+            _ = try AudiobookProject.read(from: url)
+            Issue.record("Fremde Version wurde akzeptiert")
+        } catch let error as ProjectError {
+            #expect(error.errorDescription == "Projektversion 2 wird nicht unterstützt.")
+        }
+    }
+
     @Test("Nachimport hängt sortierte neue Kapitel an die manuelle Reihenfolge")
     func appendPreservesOrder() async {
         let session = ConversionSession(settings: AudioSettings())

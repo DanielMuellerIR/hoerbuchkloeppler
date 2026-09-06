@@ -128,6 +128,14 @@ Deshalb laufen alle Terminal-Ausgaben der CLI über `TerminalRenderer` in
 ## Bekannte Test-Lücken / offen
 
 - Stream-Copy-Merge mit verschiedenen Codecs.
+- Lautheitssteuerung (`FFmpegWrapper.convert`): nur der Erfolgsfall mit
+  `normalizeLoudness` ist getestet. Offen sind reine Analyse ohne Pegeländerung
+  (Gain muss 0 bleiben), ein Fehlschlag der Analyse (keine Gruppe wird kodiert,
+  Abschluss `false`) und ein Abbruch währenddessen. Dafür fehlt ein
+  Injektionspunkt für `analyzeBookLoudness` (Review 2026-09-06).
+- Fehlschlag von `mediainfo` beim Import ist nicht injizierbar
+  (`getBinaryURL` bevorzugt das Bundle); die Regel „leere Auswahl nur bei
+  leerem Titel/Autor“ ist deshalb nur über den prozessfreien Pfad getestet.
 - Extrem große/kleine Segmente.
 - UI-Responsiveness bei schwerem parallelem Encoding.
 - **Voll-Buch (>20 Kapitel) maschinell verifiziert (2026-07-16):** reales
@@ -191,7 +199,11 @@ in der GUI erklärt und im Lauf protokolliert. Beide Optionen sind standardmäß
 
 ## Erweiterte Abnahme
 
-Nach `swift test` im Core:
+Voraussetzungen: `ffmpeg` in `Resources/bin/` (`./build.sh --deps-only`, liegt
+nicht im Repo), die Debug-CLI aus `swift build` und für
+`verify_audio_transitions.py` zusätzlich `ffprobe` im PATH (Homebrew). Die
+Skripte brechen mit klarer Meldung ab, wenn etwas fehlt. Danach, nach
+`swift test` im Core:
 
 ```sh
 python3 test_project_cli.py

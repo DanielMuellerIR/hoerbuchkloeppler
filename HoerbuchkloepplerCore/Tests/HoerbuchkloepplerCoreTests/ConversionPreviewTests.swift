@@ -5,9 +5,9 @@ import Testing
 struct ConversionPreviewTests {
     @Test func durationWeightsProgress() {
         let tracker = ParallelProgressTracker(durations: [10, 90])
-        #expect(abs(tracker.update(index: 0, progress: 1, itemCount: 2) - 0.1) < 0.0001)
-        #expect(abs(tracker.update(index: 1, progress: 0.5, itemCount: 2) - 0.55) < 0.0001)
-        #expect(abs(tracker.update(index: 1, progress: 0.1, itemCount: 2) - 0.55) < 0.0001)
+        #expect(abs(tracker.update(index: 0, progress: 1) - 0.1) < 0.0001)
+        #expect(abs(tracker.update(index: 1, progress: 0.5) - 0.55) < 0.0001)
+        #expect(abs(tracker.update(index: 1, progress: 0.1) - 0.55) < 0.0001)
     }
 
     @Test func previewUsesActualSplitAndLargestTemporaryGroup() {

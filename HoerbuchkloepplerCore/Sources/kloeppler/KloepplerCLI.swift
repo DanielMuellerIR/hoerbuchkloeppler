@@ -486,6 +486,10 @@ struct KloepplerCLI: AsyncParsableCommand {
             // dekodieren.
             if let projectPath = options.project {
                 try session.openProject(from: URL(fileURLWithPath: projectPath))
+                // Das Projekt ersetzt die kompletten Einstellungen. Die oben vor
+                // dem Import gesetzte Worker-Zahl der CLI muss deshalb hier
+                // erneut gewinnen.
+                if let workers = options.importWorkers { session.settings.importWorkerLimit = workers }
             } else if !options.files.isEmpty {
                 if cover != nil || noCover { session.removeCover() }
                 let token = session.beginImport(expectedItemCount: options.files.count)
@@ -502,6 +506,21 @@ struct KloepplerCLI: AsyncParsableCommand {
                     let results = await session.loadAudioFiles(from: foundFiles, importToken: token)
                     for result in results {
                         session.stageAudioLoadResult(result, importToken: token)
+                    }
+                    // Das eingebettete Cover wie im Ordnerscan synchron bestimmen,
+                    // bevor der Batch übernommen wird. Sonst startete `finishImport`
+                    // eine Hintergrundsuche, deren Ergebnis weder --inspect noch
+                    // die Konvertierung abwarten: Das Cover fehlte dann je nach
+                    // Zeitablauf. Bei --cover/--no-cover ist die Suche wirkungslos.
+                    if cover == nil && !noCover {
+                        let loadedFiles = results.flatMap { result -> [AudioFile] in
+                            if case .success(let files, _) = result { return files }
+                            return []
+                        }
+                        let artwork = await session.analyzeImportArtwork(for: loadedFiles)
+                        session.stageImportArtwork(artwork, importToken: token)
+                    }
+                    for _ in results {
                         await session.finishImport(token, countingProgress: false)
                     }
                 }
@@ -531,7 +550,6 @@ struct KloepplerCLI: AsyncParsableCommand {
                 throw reportedFailure("Fehler: Keine gültigen Audiodateien im Ordner gefunden.")
             }
 
-            if let workers = options.importWorkers { session.settings.importWorkerLimit = workers }
             if options.analyzeLoudness { session.settings.analyzeLoudness = true }
             if options.normalizeLoudness { session.settings.normalizeLoudness = true }
             if let narrator = options.narrator { session.narrator = narrator }
@@ -698,7 +716,9 @@ struct KloepplerCLI: AsyncParsableCommand {
                     }
                 }
 
-                if machineOutput { try emitJSON(RunReport(event: "progress", phase: session.conversionPhase, progress: session.progress)) }
+                // Auch Fortschrittsereignisse nennen die Zielpfade, wie in
+                // docs/projects.md für jedes Ereignis zugesagt.
+                if machineOutput { try emitJSON(RunReport(event: "progress", phase: session.conversionPhase, progress: session.progress, outputs: conversionPlan.outputURLs)) }
                 else { renderer.drawBlock(output) }
             }
 

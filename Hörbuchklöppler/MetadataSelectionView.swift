@@ -21,7 +21,7 @@ struct MetadataSelectionView: View {
             SelectionSection(label: "Gefundene Titel", candidates: session.titleCandidates) { session.title = $0 }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("Autor / Sprecher").font(.system(size: 14, weight: .bold))
+                Text("Autor").font(.system(size: 14, weight: .bold))
                 TextField("Autor manuell eingeben", text: $session.author).textFieldStyle(.roundedBorder)
             }
             SelectionSection(label: "Gefundene Autoren", candidates: session.authorCandidates) { session.author = $0 }

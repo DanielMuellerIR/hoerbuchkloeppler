@@ -66,7 +66,6 @@ public final class AudioImportService: @unchecked Sendable {
         set { lock.withLock { configuredWorkers = min(8, max(1, newValue)) } }
     }
     public var metrics: ImportAnalysisMetrics { lock.withLock { counters } }
-    public func resetMetrics() { lock.withLock { counters = ImportAnalysisMetrics() } }
     func recordChapterRequest() { lock.withLock { counters.chapterProcessRequests += 1 } }
 
     func analyze(_ file: FoundFile) async -> SourceAnalysisResult {
@@ -140,11 +139,14 @@ public final class AudioImportService: @unchecked Sendable {
     }
 
     static func bookMetadata(from items: [AVMetadataItem]) async -> [String: String] {
+        // Neben Klarnamen und MP4-Atomen auch die ID3-Frame-IDs von MP3-Quellen
+        // (AVFoundation liefert dort `TCOM`/`TIT1`/`TPOS` als Key), damit
+        // Sprecher, Reihe und Band je Container gleich gelesen werden.
         let aliases = [
             "narrator": "narrator", "narration": "narrator", "reader": "narrator",
-            "composer": "narrator", "%a9wrt": "narrator", "©wrt": "narrator",
-            "series": "series", "grouping": "series", "%a9grp": "series", "©grp": "series",
-            "volume_number": "volume_number", "disc": "volume_number", "disk": "volume_number",
+            "composer": "narrator", "%a9wrt": "narrator", "©wrt": "narrator", "tcom": "narrator",
+            "series": "series", "grouping": "series", "%a9grp": "series", "©grp": "series", "tit1": "series",
+            "volume_number": "volume_number", "disc": "volume_number", "disk": "volume_number", "tpos": "volume_number",
             "series_part": "volume_number", "language": "language"
         ]
         var result: [String: String] = [:]
@@ -156,7 +158,14 @@ public final class AudioImportService: @unchecked Sendable {
                 .compactMap { $0?.lowercased().split(whereSeparator: { $0 == "/" || $0 == ":" }).last.map(String.init) }
             guard let key = names.compactMap({ aliases[$0] }).first, result[key] == nil else { continue }
             if let value = try? await item.load(.stringValue), !value.isEmpty {
-                result[key] = value
+                // Text-Bandnummern wie „2/5" (ID3 TPOS, Vorbis DISCNUMBER)
+                // nennen hinter dem Schrägstrich die Gesamtzahl; nur der Band
+                // selbst ist die Nummer.
+                if key == "volume_number", let number = value.split(separator: "/").first {
+                    result[key] = number.trimmingCharacters(in: .whitespaces)
+                } else {
+                    result[key] = value
+                }
             } else if key == "volume_number", names.contains("disk"),
                       let data = try? await item.load(.dataValue), data.count >= 4 {
                 // Das native MP4-disk-Atom speichert die Nummer als UInt16 in

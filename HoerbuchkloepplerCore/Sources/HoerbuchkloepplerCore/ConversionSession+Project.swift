@@ -35,8 +35,11 @@ extension ConversionSession {
             if let existing = ids[file.sourceURL] { id = existing }
             else {
                 id = UUID(); ids[file.sourceURL] = id
+                // `resolve` liefert standardisierte URLs; die Quell-URL deshalb
+                // ebenso normalisieren, sonst findet ein Pfad mit `..` oder
+                // doppeltem Schrägstrich seinen Fingerprint nicht wieder.
                 let prior = loadedProjectURL.flatMap { loadedURL in
-                    projectSources.first { $0.location.resolve(from: loadedURL) == file.sourceURL }
+                    projectSources.first { $0.location.resolve(from: loadedURL) == file.sourceURL.standardizedFileURL }
                 }
                 sources.append(ProjectSource(id: id,
                     location: ProjectLocation(url: file.sourceURL, projectURL: url),
@@ -111,7 +114,9 @@ extension ConversionSession {
 
     public func refreshProjectSourceIssues() {
         guard let url = loadedProjectURL else { projectSourceIssues = []; return }
-        let activeURLs = Set(audioFiles.map(\.sourceURL))
+        // Wie in `makeProject`: beide Seiten standardisiert vergleichen, damit
+        // eine veränderte Quelle nicht wegen Schreibweise des Pfads unbemerkt bleibt.
+        let activeURLs = Set(audioFiles.map { $0.sourceURL.standardizedFileURL })
         projectSourceIssues = projectSources.compactMap { source in
             let visible = source.location.resolve(from: url)
             guard activeURLs.contains(visible) else { return nil }
@@ -136,6 +141,18 @@ extension ConversionSession {
 
     func recordChapterEdit(previous: [AudioFile]) {
         guard !restoringChapters, previous != audioFiles else { return }
+        // Das Kapiteltitel-Feld schreibt bei jedem Tastendruck in `audioFiles`.
+        // Folgt eine Titeländerung desselben Kapitels direkt auf eine weitere
+        // Titeländerung desselben Kapitels, bleibt der ältere Undo-Eintrag
+        // stehen: Ein Undo nimmt dann den ganzen getippten Titel zurück statt
+        // ein einzelnes Zeichen, und die Historie füllt sich nicht mit Zeichen.
+        if let last = undoChapters.last,
+           let edited = Self.singleTitleEdit(from: previous, to: audioFiles),
+           Self.singleTitleEdit(from: last.files, to: previous) == edited {
+            redoChapters.removeAll()
+            updateHistoryAvailability()
+            return
+        }
         undoChapters.append(chapterSnapshot(files: previous))
         if undoChapters.count > 100 { undoChapters.removeFirst() }
         redoChapters.removeAll()
@@ -146,6 +163,20 @@ extension ConversionSession {
         canUndoChapters = !undoChapters.isEmpty; canRedoChapters = !redoChapters.isEmpty
     }
 
+    /// Liefert die Kapitel-ID, wenn sich beide Listen ausschließlich im Titel
+    /// genau eines Kapitels unterscheiden; sonst `nil`.
+    static func singleTitleEdit(from old: [AudioFile], to new: [AudioFile]) -> UUID? {
+        guard old.count == new.count else { return nil }
+        var changed: UUID?
+        for (before, after) in zip(old, new) where before != after {
+            var retitled = before
+            retitled.chapterTitle = after.chapterTitle
+            guard retitled == after, changed == nil else { return nil }
+            changed = before.id
+        }
+        return changed
+    }
+
     private func chapterSnapshot(files: [AudioFile]? = nil) -> ChapterEditSnapshot {
         ChapterEditSnapshot(files: files ?? audioFiles, metadata: bookMetadata,
             coverData: embeddedCoverData ?? coverImage?.tiffRepresentation,
@@ -154,17 +185,24 @@ extension ConversionSession {
 
     private func restoreChapterSnapshot(_ snapshot: ChapterEditSnapshot) {
         restoringChapters = true
+        // Gegenstand von Undo/Redo ist nur die Kapitelliste. Buchmetadaten und
+        // Cover kommen ausschließlich dann aus dem Snapshot zurück, wenn die
+        // Liste gerade leer war: `clearMetadata` hat sie beim Entfernen des
+        // letzten Kapitels gelöscht (und die Cover-Suche beendet). In jedem
+        // anderen Fall bleiben zwischenzeitlich eingetippte Metadaten und ein
+        // gewähltes Cover erhalten, statt still zurückgesetzt zu werden.
+        let wasCleared = audioFiles.isEmpty
         audioFiles = snapshot.files
-        bookMetadata = snapshot.metadata
-        if snapshot.coverSuppressed { removeCover() }
-        else {
-            // `clearMetadata` beendet bei leerer Liste die Cover-Suche. Durch
-            // den Snapshot stellt Undo exakt den zuvor sichtbaren Stand her.
-            embeddedCoverData = snapshot.coverData
-            coverImage = snapshot.coverData.flatMap(NSImage.init(data:))
-            coverPath = snapshot.coverPath
+        if wasCleared {
+            bookMetadata = snapshot.metadata
+            if snapshot.coverSuppressed { removeCover() }
+            else {
+                embeddedCoverData = snapshot.coverData
+                coverImage = snapshot.coverData.flatMap(NSImage.init(data:))
+                coverPath = snapshot.coverPath
+            }
+            isCoverSuppressed = snapshot.coverSuppressed
         }
-        isCoverSuppressed = snapshot.coverSuppressed
         restoringChapters = false
         updateHistoryAvailability()
     }

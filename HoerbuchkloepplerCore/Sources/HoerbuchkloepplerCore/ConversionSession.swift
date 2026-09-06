@@ -464,6 +464,10 @@ public final class ConversionSession: ObservableObject, Identifiable {
     private var pendingImportFailures: [AudioImportFailure] = []
     private var pendingImportWasCancelled = false
     private var pendingImportRequiresArtworkSearch = false
+    /// Der CLI-`--file`-Pfad sucht das eingebettete Cover synchron im Import
+    /// (siehe `stageImportArtwork`). Dann darf `finishImport` keine zweite,
+    /// asynchrone Suche starten, deren Ergebnis die CLI nicht abwarten würde.
+    private var pendingImportArtworkAnalyzed = false
     private var pendingImportShouldResumeArtworkSearch = false
     private var pendingImportFolderURL: URL?
     private var pendingImportCanRepresentFolder = false
@@ -1106,6 +1110,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         pendingImportFailures = []
         pendingImportWasCancelled = false
         pendingImportRequiresArtworkSearch = false
+        pendingImportArtworkAnalyzed = false
         pendingImportShouldResumeArtworkSearch = shouldResumeArtworkSearch
         pendingImportFolderURL = nil
         pendingImportCanRepresentFolder = expectedItemCount == 1
@@ -1138,7 +1143,11 @@ public final class ConversionSession: ObservableObject, Identifiable {
         let stagedImageURLs = pendingImportImageURLs
         let stagedArtwork = pendingImportArtwork
         let stagedWarnings = pendingImportWarnings
+        // Hat der Import das Cover bereits synchron bestimmt (CLI `--file`),
+        // ist die asynchrone Suche überflüssig — und für die CLI sogar falsch,
+        // weil sie deren Ergebnis nicht abwartet.
         let requiresArtworkSearch = pendingImportRequiresArtworkSearch
+            && !pendingImportArtworkAnalyzed
         let sourceFolder = pendingImportCanRepresentFolder ? pendingImportFolderURL : nil
         // Auch ein erfolgreich verbuchter Batch kann leer bleiben (eine
         // übersprungene Nicht-Audiodatei, ein Ordner ohne Audiodateien). Er
@@ -1248,6 +1257,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         pendingImportFailures = []
         pendingImportWasCancelled = false
         pendingImportRequiresArtworkSearch = false
+        pendingImportArtworkAnalyzed = false
         pendingImportShouldResumeArtworkSearch = false
         pendingImportFolderURL = nil
         pendingImportCanRepresentFolder = false
@@ -1437,9 +1447,15 @@ public final class ConversionSession: ObservableObject, Identifiable {
     ) async {
         let preparation = currentPreparationContext()
         let fileURL = file.url
+        // Der mediainfo-Prozess liefert ausschließlich Titel-/Autor-Kandidaten.
+        // Sind beide schon gesetzt (etwa nur Sprecher/Reihe/Band/Sprache
+        // fehlen), kann er nichts mehr beitragen und entfällt — sonst öffnete
+        // ein fehlgeschlagener Lauf eine leere Auswahl in der GUI.
+        let needsTitleAuthorCandidates = title.isEmpty || author.isEmpty
         let candidates = await Task.detached {
             var result: (titles: [TagCandidate], authors: [TagCandidate])?
-            if preparation?.isCancelled != true,
+            if needsTitleAuthorCandidates,
+               preparation?.isCancelled != true,
                let miURL = FFmpegWrapper.getBinaryURL(name: "mediainfo") {
                 let processResult = FFmpegWrapper.runCapturedProcess(
                     executableURL: miURL,
@@ -1468,6 +1484,9 @@ public final class ConversionSession: ObservableObject, Identifiable {
             if volumeNumber.isEmpty { volumeNumber = metadata["volume_number"] ?? "" }
             if language.isEmpty { language = metadata["language"] ?? "" }
         }
+        // Titel und Autor stehen fest: Die Kandidatenlisten bleiben unberührt
+        // und es gibt nichts auszuwählen.
+        guard needsTitleAuthorCandidates else { return }
         guard let candidates else {
             // Kandidaten gehören immer genau zum aktuellen Import. Andernfalls
             // könnte die Auswahl nach einem MediaInfo-Fehler Werte des vorherigen
@@ -1911,6 +1930,31 @@ public final class ConversionSession: ObservableObject, Identifiable {
         case .skipped:
             break
         }
+    }
+
+    /// Sucht wie der Ordnerscan synchron das erste dekodierbare eingebettete
+    /// Cover der übergebenen Dateien. Für den CLI-`--file`-Pfad: Die CLI liest
+    /// das Cover direkt nach dem Import für Bericht und Konvertierung, deshalb
+    /// darf es nicht erst in einer nicht abgewarteten Hintergrundsuche entstehen.
+    /// Bei laufbezogenem Abbruch liefert die Suche `nil`.
+    public nonisolated func analyzeImportArtwork(for files: [AudioFile]) async -> Data? {
+        for audioFile in Self.uniqueArtworkCandidates(files) {
+            if preparationCancellationRequested() { return nil }
+            if let artworkData = await importService.artwork(at: audioFile.url),
+               NSImage(data: artworkData) != nil {
+                return artworkData
+            }
+        }
+        return nil
+    }
+
+    /// Meldet dem laufenden Import ein bereits synchron gesuchtes Cover
+    /// (`analyzeImportArtwork`). Auch `nil` zählt als abgeschlossene Suche:
+    /// `finishImport` startet dann keine zweite, asynchrone Suche mehr.
+    public func stageImportArtwork(_ artwork: Data?, importToken: ImportToken) {
+        guard isCurrentImport(importToken) else { return }
+        if pendingImportArtwork == nil { pendingImportArtwork = artwork }
+        pendingImportArtworkAnalyzed = true
     }
 
     /// Ein fehlgeschlagener NSItemProvider ist kein absichtlicher leerer Drop.

@@ -13,6 +13,37 @@ public struct AudiobookProject: Codable, Sendable {
     public var coverData: Data?
     public var coverSuppressed: Bool
 
+    public init(formatVersion: Int = currentVersion, sources: [ProjectSource], sections: [ProjectSection],
+                metadata: BookMetadata, settings: AudioSettings, coverData: Data?, coverSuppressed: Bool) {
+        self.formatVersion = formatVersion; self.sources = sources; self.sections = sections
+        self.metadata = metadata; self.settings = settings
+        self.coverData = coverData; self.coverSuppressed = coverSuppressed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case formatVersion, sources, sections, metadata, settings, coverData, coverSuppressed
+    }
+
+    /// Tolerant wie `AudioSettings.init(from:)`: Ein fehlendes optionales Feld
+    /// (etwa aus einer älteren oder von Hand geschriebenen Datei) bekommt seinen
+    /// Default, statt die ganze Projektdatei unlesbar zu machen. Quellen und
+    /// Abschnitte bleiben Pflicht — ohne sie gibt es kein Projekt.
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        formatVersion = try values.decodeIfPresent(Int.self, forKey: .formatVersion) ?? Self.currentVersion
+        sources = try values.decode([ProjectSource].self, forKey: .sources)
+        sections = try values.decode([ProjectSection].self, forKey: .sections)
+        metadata = try values.decodeIfPresent(BookMetadata.self, forKey: .metadata) ?? BookMetadata()
+        settings = try values.decodeIfPresent(AudioSettings.self, forKey: .settings) ?? AudioSettings()
+        coverData = try values.decodeIfPresent(Data.self, forKey: .coverData)
+        coverSuppressed = try values.decodeIfPresent(Bool.self, forKey: .coverSuppressed) ?? false
+    }
+
+    /// Nur die Versionsnummer lesen, bevor die vollständige Struktur dekodiert
+    /// wird. So bekommt eine Datei einer künftigen Version mit geänderten
+    /// Feldern die dokumentierte Meldung statt eines Decoding-Fehlers.
+    private struct VersionProbe: Decodable { var formatVersion: Int? }
+
     public func write(to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -22,8 +53,10 @@ public struct AudiobookProject: Codable, Sendable {
     public static func read(from url: URL) throws -> Self {
         let values = try url.resourceValues(forKeys: [.fileSizeKey])
         guard (values.fileSize ?? 0) <= 48 * 1024 * 1024 else { throw ProjectError.invalid("Projektdatei überschreitet 48 MiB.") }
-        let project = try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
-        guard project.formatVersion == currentVersion else { throw ProjectError.invalid("Projektversion \(project.formatVersion) wird nicht unterstützt.") }
+        let data = try Data(contentsOf: url)
+        let declaredVersion = (try? JSONDecoder().decode(VersionProbe.self, from: data))?.formatVersion ?? currentVersion
+        guard declaredVersion == currentVersion else { throw ProjectError.invalid("Projektversion \(declaredVersion) wird nicht unterstützt.") }
+        let project = try JSONDecoder().decode(Self.self, from: data)
         let ids = Set(project.sources.map(\.id))
         guard ids.count == project.sources.count,
               Set(project.sections.map(\.id)).count == project.sections.count,
@@ -44,6 +77,24 @@ public struct BookMetadata: Codable, Equatable, Sendable {
     public var volumeNumber = ""
     public var language = ""
     public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case title, author, genre, narrator, series, volumeNumber, language
+    }
+
+    /// Jedes Feld einzeln mit Default lesen: Eine additive Erweiterung der
+    /// Metadaten darf bestehende `.hkproject`-Dateien nicht unlesbar machen.
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = BookMetadata()
+        title = try values.decodeIfPresent(String.self, forKey: .title) ?? defaults.title
+        author = try values.decodeIfPresent(String.self, forKey: .author) ?? defaults.author
+        genre = try values.decodeIfPresent(String.self, forKey: .genre) ?? defaults.genre
+        narrator = try values.decodeIfPresent(String.self, forKey: .narrator) ?? defaults.narrator
+        series = try values.decodeIfPresent(String.self, forKey: .series) ?? defaults.series
+        volumeNumber = try values.decodeIfPresent(String.self, forKey: .volumeNumber) ?? defaults.volumeNumber
+        language = try values.decodeIfPresent(String.self, forKey: .language) ?? defaults.language
+    }
 }
 
 public struct ProjectSection: Codable, Sendable {

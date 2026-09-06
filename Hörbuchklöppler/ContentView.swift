@@ -251,7 +251,7 @@ struct ContentView: View {
         .sheet(isPresented: $flow.showingConversionPreview) {
             if let plan = flow.previewPlan {
                 OutputPreviewView(preview: ConversionPreview(plan: plan, settings: session.settings), onCancel: { flow.showingConversionPreview = false }, onStart: {
-                    flow.showingConversionPreview = false
+                    // `confirmPreview` schließt die Vorschau selbst.
                     flow.confirmPreview(plan, session: session)
                 })
             }

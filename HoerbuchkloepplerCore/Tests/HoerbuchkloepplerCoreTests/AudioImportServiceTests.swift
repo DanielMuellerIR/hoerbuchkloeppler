@@ -102,6 +102,21 @@ struct AudioImportServiceTests {
         #expect(result["series"] == nil)
     }
 
+    @Test("ID3-Frames liefern Sprecher, Reihe und Bandnummer ohne Gesamtzahl")
+    func id3BookMetadata() async {
+        func frame(_ key: String, _ value: String) -> AVMetadataItem {
+            let item = AVMutableMetadataItem()
+            item.keySpace = .id3
+            item.key = key as NSString
+            item.value = value as NSString
+            return item
+        }
+        let result = await AudioImportService.bookMetadata(from: [
+            frame("TCOM", "Ada Beispiel"), frame("TIT1", "Testreihe"), frame("TPOS", "2/5")
+        ])
+        #expect(result == ["narrator": "Ada Beispiel", "series": "Testreihe", "volume_number": "2"])
+    }
+
     @Test("Native MP4-Tags liefern Sprecher, Reihe und binäre Bandnummer")
     func nativeBookMetadata() async {
         let composer = AVMutableMetadataItem()

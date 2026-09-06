@@ -3,6 +3,30 @@ import AVFoundation
 import Combine
 import HoerbuchkloepplerCore
 
+/// Hält das Observer-Token des NotificationCenters außerhalb des Main Actors.
+/// Ein `@MainActor`-Objekt darf in seinem (nicht isolierten) `deinit` nicht auf
+/// nicht-Sendable-Eigenschaften zugreifen; die Box dagegen meldet den Observer
+/// beim eigenen Freigeben ab. Der Player ist ihr einziger Besitzer, sie stirbt
+/// also genau mit ihm — auch wenn ein Fenster während laufender Vorschau
+/// geschlossen wird und `stop()` nie mehr aufgerufen wird.
+// `nonisolated`: Das App-Target isoliert Typen standardmäßig auf den Main
+// Actor; die Box muss aber aus jedem `deinit` heraus erreichbar sein.
+nonisolated private final class EndObserverToken: @unchecked Sendable {
+    private let lock = NSLock()
+    private var token: NSObjectProtocol?
+
+    /// Meldet einen vorhandenen Observer ab und merkt sich den neuen (oder nil).
+    func replace(with newToken: NSObjectProtocol?) {
+        lock.lock()
+        let old = token
+        token = newToken
+        lock.unlock()
+        if let old { NotificationCenter.default.removeObserver(old) }
+    }
+
+    deinit { replace(with: nil) }
+}
+
 /// Spielt zum Reinhören genau EINEN Kapitel-Abschnitt einer Datei ab.
 /// Funktioniert einheitlich für Einzeldateien (startTime 0, ganze Datei) und für
 /// interne m4b-Kapitel (Abschnitt [startTime, startTime+duration] der großen Datei).
@@ -11,7 +35,7 @@ import HoerbuchkloepplerCore
 final class ChapterPreviewPlayer: ObservableObject {
     @Published var playingID: AudioFile.ID?
     private var player: AVPlayer?
-    private var endObserver: NSObjectProtocol?
+    private let endObserver = EndObserverToken()
 
     /// Startet den Abschnitt, oder stoppt ihn, wenn dieses Kapitel gerade läuft.
     func toggle(_ file: AudioFile) {
@@ -23,9 +47,9 @@ final class ChapterPreviewPlayer: ObservableObject {
         item.forwardPlaybackEndTime = CMTime(seconds: file.startTime + file.duration, preferredTimescale: 600)
         let p = AVPlayer(playerItem: item)
         // Am Kapitel-Ende Icon/Status zurücksetzen.
-        endObserver = NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
+        endObserver.replace(with: NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.stop() }
-        }
+        })
         player = p
         playingID = file.id
         Task {
@@ -40,7 +64,7 @@ final class ChapterPreviewPlayer: ObservableObject {
     func stop() {
         player?.pause()
         player = nil
-        if let obs = endObserver { NotificationCenter.default.removeObserver(obs); endObserver = nil }
+        endObserver.replace(with: nil)
         if playingID != nil { playingID = nil }
     }
 }

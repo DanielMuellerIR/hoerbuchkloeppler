@@ -28,6 +28,12 @@ Textneubau bei bloßen Fortschrittsupdates. Beides ist keine offene Optimierung.
   Messreihen; die Ergebnisse erlauben keine entsprechende Leistungszusage.
 - Lautheitsangleichung verwendet einen gemeinsamen linearen Pegel. Die
   Spitzenbegrenzung kann das Ziel −18 LUFS verhindern; Dynamik wird erhalten.
+- ⌘Z/⇧⌘Z liegen als `keyboardShortcut` auf den Toolbar-Buttons „Rückgängig“/
+  „Wiederholen“, während das SwiftUI-Standardmenü „Bearbeiten“ dieselben Tasten
+  für den Text-Undo belegt. Mit Fokus in einem Textfeld gewinnt das Feld; das
+  Verhalten ohne Fokus ist nicht dokumentiert. Sauber wäre
+  `CommandGroup(replacing: .undoRedo)` in `.commands` der `WindowGroup`, was den
+  Session-Zugriff aus der App-Struktur erfordert (Review 2026-09-06, offen).
 - Visuelle GUI-Abnahme und subjektive Hörprüfung sind von automatischer
   Kompilierung, Koordinationstests und vollständigem Dekodieren zu unterscheiden.
 

@@ -480,7 +480,9 @@ final class ParallelProgressTracker: @unchecked Sendable {
     private let durations: [Double]
     init(durations: [Double]) { self.durations = durations }
 
-    func update(index: Int, progress: Double, itemCount: Int) -> Double {
+    /// Gesamtfortschritt nach Dauer gewichtet; die Anzahl der Segmente
+    /// spielt seit der Umstellung auf Dauergewichtung keine Rolle mehr.
+    func update(index: Int, progress: Double) -> Double {
         lock.lock()
         progresses[index] = max(progresses[index] ?? 0, min(1, max(0, progress)))
         let duration = durations.reduce(0, +)
@@ -1073,8 +1075,7 @@ public struct FFmpegWrapper {
                                 let p = min(1, max(0, currentSeconds / file.duration))
                                 let totalP = tracker.update(
                                     index: idx,
-                                    progress: p,
-                                    itemCount: itemCount
+                                    progress: p
                                 )
                                 session.enqueueProgress(
                                     mappedProgress(
@@ -1102,6 +1103,11 @@ public struct FFmpegWrapper {
                         ProcessTerminator.terminateAndWait([process])
                     }
                     if context.isCancelled { return }
+                    // Ein anderes Segment ist bereits fatal gescheitert und hat
+                    // dieses per SIGTERM beendet (`failSegments`). Der so
+                    // erzwungene Exit ist keine eigene Ursache und würde das Log
+                    // nur mit Folgefehlern samt stderr-Auszug füllen.
+                    if context.hasSegmentFailure { return }
                     if hadBackgroundProcesses {
                         session.enqueueLog(
                             "❌ Segment \(idx+1) ließ nach dem Werkzeug-Exit Hintergrundprozesse zurück; der Batch wird verworfen.",
@@ -1138,8 +1144,7 @@ public struct FFmpegWrapper {
                             let finishedCount = results.store(segmentURL.path, at: idx)
                             let totalProgress = tracker.update(
                                 index: idx,
-                                progress: 1,
-                                itemCount: itemCount
+                                progress: 1
                             )
                             session.enqueueProgress(
                                 mappedProgress(
@@ -1246,6 +1251,11 @@ public struct FFmpegWrapper {
             "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", listFile.path,
             "-i", metaFile.path
         ]
+        // Parallelmodus: Die fertig kodierten Segmente werden per concat nur
+        // noch kopiert (`-c:a copy`). Ohne `-copyts` setzt ffmpeg die Zeitstempel
+        // je Segment neu auf und die Kapitelmarken aus der FFMETADATA-Datei
+        // verschieben sich gegen den Ton. Abnahme der Kapitelstarts beider Modi:
+        // tests/verify_audio_transitions.py.
         if audioCodecArguments.contains("copy") { arguments += ["-copyts"] }
         if let coverInput { arguments += ["-i", coverInput] }
         arguments += audioCodecArguments
@@ -1665,8 +1675,6 @@ public struct FFmpegWrapper {
     }
 }
 
-extension FFmpegWrapper {
-}
 
 extension FFmpegWrapper {
     private static func analyzeBookLoudness(job: ConversionJob, session: ConversionSession, context: ConversionContext) throws -> LoudnessMeasurement {
