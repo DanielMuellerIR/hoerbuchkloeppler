@@ -64,7 +64,14 @@ struct ContentView: View {
                 // --- Linke Sidebar (Cover & Metadaten) ---
                 VStack(spacing: 20) {
                     VStack {
-                        CoverView(image: $session.coverImage, onDropped: { url in session.selectCover(url: url) })
+                        CoverView(image: $session.coverImage, onDropped: { url in
+                            // `selectCover` meldet über den Rückgabewert, dass die
+                            // Datei kein lesbares Bild ist. Verworfen sah der Drop
+                            // wie ein Erfolg aus, und das Buch blieb ohne Cover.
+                            if !session.selectCover(url: url) {
+                                cliHandoffError = "Diese Datei ist kein lesbares Bild: \(url.lastPathComponent)"
+                            }
+                        })
                             .frame(width: 180, height: 180).shadow(radius: 5)
                         if session.coverImage != nil || session.coverPath != nil {
                             Button(action: { session.removeCover() }) {
@@ -122,9 +129,11 @@ struct ContentView: View {
                                 Spacer()
                                 Button("Alle löschen") {
                                     preview.stop()
+                                    selectedChapters.removeAll()
                                     session.audioFiles.removeAll()
                                 }
                                     .foregroundColor(.red).buttonStyle(.bordered)
+                                    .disabled(session.isImporting)
                             }.padding([.top, .horizontal])
                             HStack {
                                 TextField("Titelpräfix", text: $renamePrefix).frame(width: 120)
@@ -140,7 +149,10 @@ struct ContentView: View {
                                 Button("Zusammenführen") {
                                     if let id = selectedChapters.first { preview.stop(); session.mergeChapterWithNext(id: id) }
                                 }.disabled(selectedChapters.count != 1).help("Mit dem unmittelbar folgenden Zeitabschnitt derselben Quelle zusammenführen")
-                            }.padding(.horizontal)
+                            }
+                            .padding(.horizontal)
+                            // Solange ein Import läuft, gehört die Liste ihm.
+                            .disabled(session.isImporting)
                             List(selection: $selectedChapters) {
                                 ForEach($session.audioFiles) { $file in
                                     VStack(alignment: .leading, spacing: 4) {
@@ -237,11 +249,16 @@ struct ContentView: View {
             message: $cliHandoffError,
             fallback: "Das Terminal konnte nicht geöffnet werden."
         )
+        .errorAlert(
+            "Vorschau nicht möglich",
+            message: $preview.unplayableFile,
+            fallback: "Die Quelldatei ließ sich nicht abspielen."
+        )
         .onAppear { checkTools() }
         .frame(minWidth: 850, minHeight: 650) // Fenster etwas höher gemacht (650 statt 550)
         .sheet(isPresented: $showingSettings) { SettingsView(session: session, isPresented: $showingSettings) }
         .alert("Datei existiert bereits", isPresented: $flow.showingOverwriteAlert) {
-            Button("Abbrechen", role: .cancel) { }
+            Button("Abbrechen", role: .cancel) { flow.cancelOverwrite() }
             Button("Drüberklöppeln", role: .destructive) {
                 if let plan = flow.pendingPlan { flow.start(plan, session: session) }
             }
@@ -249,8 +266,11 @@ struct ContentView: View {
             Text("Diese tatsächlichen Zieldateien existieren bereits:\n\(flow.collidingOutputNames.joined(separator: "\n"))\n\nMöchten Sie sie wirklich überklöppeln?")
         }
         .sheet(isPresented: $flow.showingConversionPreview) {
-            if let plan = flow.previewPlan {
-                OutputPreviewView(preview: ConversionPreview(plan: plan, settings: session.settings), onCancel: { flow.showingConversionPreview = false }, onStart: {
+            if let plan = flow.previewPlan, let preview = flow.preview {
+                OutputPreviewView(preview: preview, onCancel: {
+                    flow.showingConversionPreview = false
+                    flow.preview = nil
+                }, onStart: {
                     // `confirmPreview` schließt die Vorschau selbst.
                     flow.confirmPreview(plan, session: session)
                 })
@@ -274,13 +294,20 @@ struct ContentView: View {
         .toolbar {
             Button("Projekt öffnen …") { projectPanel(save: false) }.keyboardShortcut("o", modifiers: [.command, .shift]).disabled(session.isConverting)
             Button("Projekt speichern …") { projectPanel(save: true) }.keyboardShortcut("s", modifiers: .command).disabled(session.isConverting || session.isImporting)
-            Button("Rückgängig") { preview.stop(); session.undoChapterEdit() }.keyboardShortcut("z", modifiers: .command).disabled(!session.canUndoChapters || session.isConverting)
-            Button("Wiederholen") { preview.stop(); session.redoChapterEdit() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!session.canRedoChapters || session.isConverting)
+            // Auch während eines Imports gesperrt: Ein Undo, das die Liste leert,
+            // löst über `audioFiles.didSet` ein `invalidateImportWork()` aus und
+            // bricht den laufenden Import lautlos ab.
+            Button("Rückgängig") { preview.stop(); session.undoChapterEdit() }.keyboardShortcut("z", modifiers: .command).disabled(!session.canUndoChapters || session.isConverting || session.isImporting)
+            Button("Wiederholen") { preview.stop(); session.redoChapterEdit() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!session.canRedoChapters || session.isConverting || session.isImporting)
             Button("Dateien oder Ordner hinzufügen …", action: chooseImportSources)
                 .keyboardShortcut("o", modifiers: .command)
                 .disabled(session.isConverting)
         }
         .safeAreaInset(edge: .bottom) {
+            // Ein Container ist nötig: Zwei Geschwister-Views aus einem
+            // ViewBuilder werden nicht untereinander, sondern deckungsgleich
+            // gestapelt — Quellenprobleme und Importfortschritt lägen übereinander.
+            VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading) {
                 ForEach(session.projectSourceIssues) { issue in Text("\(issue.reason): \(issue.path)").foregroundColor(.red).textSelection(.enabled) }
             }
@@ -294,6 +321,7 @@ struct ContentView: View {
                     Button("Import abbrechen") { session.cancelImport() }
                         .disabled(!session.canCancelImport)
                 }.padding(8)
+            }
             }
         }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
@@ -310,17 +338,27 @@ struct ContentView: View {
         session.moveChapters(from: IndexSet(integer: index), to: offset > 0 ? target + 1 : target)
     }
 
+    /// Zeigt ein Panel als Sheet, wenn es ein Fenster gibt, sonst modal. Ein
+    /// stilles `return` ohne Fenster hieße: Der Menübefehl tut bei minimiertem
+    /// Fenster kommentarlos nichts — der Ausgabepfad kann das schon länger.
+    private static func present(_ panel: NSSavePanel, then handle: @escaping (NSApplication.ModalResponse) -> Void) {
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first {
+            panel.beginSheetModal(for: window, completionHandler: handle)
+        } else {
+            handle(panel.runModal())
+        }
+    }
+
     private func projectPanel(save: Bool) {
-        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
         if save {
             let panel = NSSavePanel(); panel.nameFieldStringValue = "Hörbuch.hkproject"
-            panel.beginSheetModal(for: window) { response in
+            Self.present(panel) { response in
                 guard response == .OK, let url = panel.url else { return }
                 Task { do { try await session.saveProjectAsync(to: url) } catch { projectError = error.localizedDescription } }
             }
         } else {
             let panel = NSOpenPanel(); panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
-            panel.beginSheetModal(for: window) { response in
+            Self.present(panel) { response in
                 guard response == .OK, let url = panel.url else { return }
                 Task { do { preview.stop(); try await session.openProjectAsync(from: url) } catch { projectError = error.localizedDescription } }
             }
@@ -334,9 +372,10 @@ struct ContentView: View {
         panel.allowsMultipleSelection = true
         panel.prompt = "Importieren"
         panel.message = "Audiodateien oder Ordner auswählen"
-        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
-        panel.beginSheetModal(for: window) { response in
-            guard response == .OK else { return }
+        Self.present(panel) { response in
+            // Eine bestätigte Auswahl ohne Dateien darf keinen leeren Batch
+            // starten: Der entwertete dann die laufende Cover-Suche.
+            guard response == .OK, !panel.urls.isEmpty else { return }
             let urls = panel.urls
             Task { @MainActor in
                 await ImportCoordinator.importURLs(urls, session: session)
@@ -352,8 +391,10 @@ struct ContentView: View {
     }
 
     private func copyAndOpenCLI() {
+        // Über `addLog` allein wäre die Meldung unsichtbar: Das Protokoll zeigt
+        // nur das Konvertierungs-Overlay, und das ist beim CLI-Handoff nie offen.
         guard let folderURL = session.cliFolderIfRepresentable else {
-            session.addLog("⚠️ CLI-Übergabe nicht möglich: Die aktuelle Liste stammt nicht vollständig aus einem einzelnen Ordner-Import.")
+            cliHandoffError = "Die aktuelle Liste stammt nicht vollständig aus einem einzelnen Ordner-Import."
             return
         }
         // Beim Klick erneut auflösen: Der beim Start gemerkte Pfad kann
@@ -361,7 +402,7 @@ struct ContentView: View {
         // Suchkosten problemlos.
         guard let kloepplerURL = Self.resolveKloepplerURL() else {
             self.kloepplerURL = nil
-            session.addLog("⚠️ CLI-Übergabe nicht möglich: Das Programm „kloeppler“ wurde nicht gefunden.")
+            cliHandoffError = "Das Programm „kloeppler\u{201C} wurde nicht gefunden."
             return
         }
         self.kloepplerURL = kloepplerURL

@@ -6,7 +6,7 @@
     "token_budget": 3000000,
     "status": "active",
     "started_at": "2026-09-10T10:16:35+02:00",
-    "tokens_spent": 484296
+    "tokens_spent": 531781
   },
   "campaign_history": [
     {
@@ -325,54 +325,21 @@
       "risk": "medium",
       "priority": 9,
       "reason": "Breite Querschnittstests für Laufzeit, Import, Einstellungen und Tool-Auflösung",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260903T102818420748+0200",
-        "completed_at": "2026-09-03T10:53:52+02:00",
-        "observed_head": "70356e917db36b67f238223c425ca34d7c35f3a0",
-        "content_sha256": "68749949f1b69aad8ed90803bacc5d433f82378fb241a46d268d8a1546ed89c0",
-        "file_count": 2,
+        "campaign_id": "20260910T101635358055+0200",
+        "completed_at": "2026-09-10T12:26:57+02:00",
+        "observed_head": "6af7d732859f8ccec64488d805e6534ec841a7d4",
+        "content_sha256": "f35d9e780a5ae9a450400e293229d98b2f98d8eacde4adbb12dd5e0a9a138b07",
+        "file_count": 13,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Wächter ergänzt: MARKETING_VERSION im Xcode-Projekt muss der VERSION-Datei entsprechen, sonst stempelt ein direkter Xcode-Build still eine falsche Version",
+        "summary": "Elf Zusicherungen geschärft, die eine echte Regression nicht gesehen hätten, darunter zwei Lücken, die diese Kampagne selbst verursacht hatte (Cover-Unterdrückung nach dem Handoff-Umbau, Abbruchbereinigung nach der Umstellung auf die Hintergrundqueue). LoudnessTests übersprang sich ohne gebündeltes ffmpeg still und nahm dabei die gesamte Abdeckung des echten Encodings mit. Skript-Gates: test_scripts.sh meldet jetzt, welche Prüfung brach; die CLI-Matrix läuft mit eigenem TMPDIR statt gegen den geteilten Systemordner; das Terminalskript räumt seine 86 MB auf. Doku richtiggestellt: test_scripts.sh ist kein Build-/Install-/Release-Wächter, und das reale Encoding ist entgegen der bisherigen Aussage abgedeckt. Offen und bewusst nicht angefasst: der FIFO-Test in ProjectTests würde bei einer Regression hängen statt fehlzuschlagen (Swift Testing hat kein Zeitlimit je Test), und das SIGINT-Timing der CLI-Matrix hängt an einem festen 150-ms-Schlaf.",
         "tests": [
-          "./test_scripts.sh grün; mit testweise abweichender VERSION Exit 1 mit beiden Werten in der Meldung"
-        ]
-      },
-      "pending_paths": [
-        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ReviewFixTests.swift",
-        "test_scripts.sh",
-        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ProjectTests.swift",
-        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ResourceLimitTests.swift",
-        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ConversionPreviewTests.swift",
-        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/AudioImportServiceTests.swift",
-        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/LoudnessTests.swift",
-        "test_project_cli.py",
-        "tests/verify_cli_matrix.py",
-        "tests/verify_audio_transitions.py",
-        "tests/experiments/encoding_without_wav.py",
-        "tests/verify_cli_terminal.py",
-        "tests/verify_gui_import.swift"
-      ],
-      "active_run": {
-        "campaign_id": "20260910T101635358055+0200",
-        "started_at": "2026-09-10T12:11:10+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": [
-          "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ReviewFixTests.swift",
-          "test_scripts.sh",
-          "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ProjectTests.swift",
-          "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ResourceLimitTests.swift",
-          "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ConversionPreviewTests.swift",
-          "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/AudioImportServiceTests.swift",
-          "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/LoudnessTests.swift",
-          "test_project_cli.py",
-          "tests/verify_cli_matrix.py",
-          "tests/verify_audio_transitions.py",
-          "tests/experiments/encoding_without_wav.py",
-          "tests/verify_cli_terminal.py",
-          "tests/verify_gui_import.swift"
+          "swift test -Xswiftc -warnings-as-errors: 252/252 passed",
+          "test_scripts.sh: passed, Gegenprobe mit verfälschter Erwartung meldet die Stelle",
+          "test_project_cli.py, tests/verify_cli_matrix.py, tests/verify_cli_terminal.py, tests/verify_audio_transitions.py: passed",
+          "xcodebuild -scheme Hörbuchklöppler Debug: BUILD SUCCEEDED"
         ]
       }
     },
@@ -394,7 +361,7 @@
       "risk": "medium",
       "priority": 10,
       "reason": "Dünne SwiftUI-Schicht, Datei-Drop, Exportplanung und Sitzungsdarstellung",
-      "state": "pending",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260903T102818420748+0200",
         "completed_at": "2026-09-03T10:43:51+02:00",
@@ -420,7 +387,26 @@
         "Hörbuchklöppler/ImportCoordinator.swift",
         "Hörbuchklöppler/OutputCoordinator.swift",
         "Hörbuchklöppler/OutputPreviewView.swift"
-      ]
+      ],
+      "active_run": {
+        "campaign_id": "20260910T101635358055+0200",
+        "started_at": "2026-09-10T12:27:40+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": [
+          "Hörbuchklöppler/ContentView.swift",
+          "Hörbuchklöppler/ConversionOverlayView.swift",
+          "Hörbuchklöppler/MetadataSelectionView.swift",
+          "Hörbuchklöppler/SettingsView.swift",
+          "Hörbuchklöppler/Hörbuchklöppler.swift",
+          "Hörbuchklöppler/info.plist",
+          "Hörbuchklöppler/ErrorAlert.swift",
+          "Hörbuchklöppler/ChapterPreviewPlayer.swift",
+          "Hörbuchklöppler/ImportCoordinator.swift",
+          "Hörbuchklöppler/OutputCoordinator.swift",
+          "Hörbuchklöppler/OutputPreviewView.swift"
+        ]
+      }
     },
     {
       "id": "xcode-config",

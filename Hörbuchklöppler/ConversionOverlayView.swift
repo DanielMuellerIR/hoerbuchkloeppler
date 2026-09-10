@@ -95,9 +95,17 @@ struct ConversionOverlayView: View {
                     ProgressView("Gesamtfortschritt", value: session.progress)
                     if !session.isConverting {
                         Text(session.lastConversionSucceeded == true ? "Alle Ausgaben erfolgreich" : (session.completedOutputURLs.isEmpty ? "Keine erfolgreiche Ausgabe" : "Teilerfolg: Einige Ausgaben wurden erstellt"))
-                        ForEach(session.completedOutputURLs, id: \.self) { url in
-                            Button("Im Finder zeigen: \(url.lastPathComponent)") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-                        }
+                        // Bei einem Auto-Split entstehen leicht ein Dutzend
+                        // Einträge. Ohne eigenen Rahmen drängten sie den
+                        // „Schließen"-Knopf aus dem Fenster — und das Overlay
+                        // hat keinen zweiten Ausweg.
+                        ScrollView {
+                            VStack(alignment: .leading) {
+                                ForEach(session.completedOutputURLs, id: \.self) { url in
+                                    Button("Im Finder zeigen: \(url.lastPathComponent)") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                        }.frame(maxHeight: 120)
                     }
                 }.frame(maxWidth: 800).padding(.top)
                 // ACTION BAR

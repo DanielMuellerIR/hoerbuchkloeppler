@@ -34,7 +34,12 @@ nonisolated private final class EndObserverToken: @unchecked Sendable {
 @MainActor
 final class ChapterPreviewPlayer: ObservableObject {
     @Published var playingID: AudioFile.ID?
+    /// Name einer Quelle, die sich nicht abspielen ließ; die Ansicht zeigt ihn
+    /// als Meldung und setzt ihn zurück.
+    @Published var unplayableFile: String?
     private var player: AVPlayer?
+    /// Der Player, dessen Sprung an den Kapitelanfang abgeschlossen ist.
+    private var seekedPlayer: AVPlayer?
     private let endObserver = EndObserverToken()
 
     /// Startet den Abschnitt, oder stoppt ihn, wenn dieses Kapitel gerade läuft.
@@ -46,24 +51,50 @@ final class ChapterPreviewPlayer: ObservableObject {
         // Nur bis zum Kapitel-Ende spielen (absolute Zeit in der Item-Zeitachse).
         item.forwardPlaybackEndTime = CMTime(seconds: file.startTime + file.duration, preferredTimescale: 600)
         let p = AVPlayer(playerItem: item)
-        // Am Kapitel-Ende Icon/Status zurücksetzen.
+        // Am Kapitel-Ende Icon/Status zurücksetzen — aber nur, wenn immer noch
+        // dieses Kapitel läuft. `removeObserver` holt einen bereits auf `.main`
+        // eingereihten Block nicht mehr zurück; ohne die Identitätsprüfung
+        // stoppte das Ende von Kapitel A das gerade gestartete Kapitel B.
+        let startedID = file.id
         endObserver.replace(with: NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.stop() }
+            Task { @MainActor in
+                guard self?.playingID == startedID else { return }
+                self?.stop()
+            }
         })
         player = p
         playingID = file.id
+        seekedPlayer = nil
         Task {
+            // Eine gelöschte, umbenannte oder auf einem ausgehängten Volume
+            // liegende Quelle spielt nie ab und meldet auch kein Ende. Ohne
+            // diese Prüfung bliebe das Icon dauerhaft auf „läuft".
+            let playable = (try? await AVURLAsset(url: file.url).load(.isPlayable)) ?? false
+            guard player === p else { return }
+            guard playable else {
+                stop()
+                unplayableFile = file.sourceURL.lastPathComponent
+                return
+            }
             await p.seek(to: CMTime(seconds: file.startTime, preferredTimescale: 600))
             guard player === p else { return }
+            seekedPlayer = p
             p.play()
         }
     }
 
-    var absolutePlaybackTime: Double? { player?.currentTime().seconds }
+    /// Erst nach dem Sprung an den Kapitelanfang ist die Abspielposition
+    /// aussagekräftig. Vorher lieferte sie 0, und ein „Teilen" auf einem
+    /// inneren m4b-Kapitel rechnete gegen dessen Startzeit ins Negative.
+    var absolutePlaybackTime: Double? {
+        guard let player, player === seekedPlayer else { return nil }
+        return player.currentTime().seconds
+    }
 
     func stop() {
         player?.pause()
         player = nil
+        seekedPlayer = nil
         endObserver.replace(with: nil)
         if playingID != nil { playingID = nil }
     }
