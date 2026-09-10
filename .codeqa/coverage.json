@@ -6,7 +6,7 @@
     "token_budget": 3000000,
     "status": "active",
     "started_at": "2026-09-10T10:16:35+02:00",
-    "tokens_spent": 531781
+    "tokens_spent": 566082
   },
   "campaign_history": [
     {
@@ -267,7 +267,7 @@
       "risk": "high",
       "priority": 7,
       "reason": "Download-Integrität externer Werkzeuge und reproduzierbarer Core-, CLI- und App-Build",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260830T095802250952+0200",
         "completed_at": "2026-08-30T09:59:36+02:00",
@@ -280,6 +280,13 @@
         "tests": [
           "Vollständiger ./build.sh-Lauf erzeugte Release-CLI und ad-hoc-signierte App 1.3.1; Plist-Version 1.3.1 und Projektdatei per plutil bestätigt; test_scripts.sh, bash -n und build.sh --help bestanden."
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260910T101635358055+0200",
+        "started_at": "2026-09-10T12:44:20+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
@@ -361,50 +368,21 @@
       "risk": "medium",
       "priority": 10,
       "reason": "Dünne SwiftUI-Schicht, Datei-Drop, Exportplanung und Sitzungsdarstellung",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260903T102818420748+0200",
-        "completed_at": "2026-09-03T10:43:51+02:00",
-        "observed_head": "8a1d743a8cd02e6bd9e1448a850fa4c22ee18bbf",
-        "content_sha256": "d6e823b40d2254328302156b9645f35e79affe978558bd2ae646c9b6e065d6de",
-        "file_count": 7,
-        "review": "delta-plus-boundaries",
-        "outcome": "reviewed-clean",
-        "summary": "Nachbuchung der im selben Lauf ergänzten ErrorAlert.swift: 26 Zeilen, ein View-Modifier ohne eigenen Zustand, vier Aufrufer geprüft",
-        "tests": [
-          "xcodebuild -configuration Release: BUILD SUCCEEDED"
-        ]
-      },
-      "pending_paths": [
-        "Hörbuchklöppler/ContentView.swift",
-        "Hörbuchklöppler/ConversionOverlayView.swift",
-        "Hörbuchklöppler/MetadataSelectionView.swift",
-        "Hörbuchklöppler/SettingsView.swift",
-        "Hörbuchklöppler/Hörbuchklöppler.swift",
-        "Hörbuchklöppler/info.plist",
-        "Hörbuchklöppler/ErrorAlert.swift",
-        "Hörbuchklöppler/ChapterPreviewPlayer.swift",
-        "Hörbuchklöppler/ImportCoordinator.swift",
-        "Hörbuchklöppler/OutputCoordinator.swift",
-        "Hörbuchklöppler/OutputPreviewView.swift"
-      ],
-      "active_run": {
         "campaign_id": "20260910T101635358055+0200",
-        "started_at": "2026-09-10T12:27:40+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": [
-          "Hörbuchklöppler/ContentView.swift",
-          "Hörbuchklöppler/ConversionOverlayView.swift",
-          "Hörbuchklöppler/MetadataSelectionView.swift",
-          "Hörbuchklöppler/SettingsView.swift",
-          "Hörbuchklöppler/Hörbuchklöppler.swift",
-          "Hörbuchklöppler/info.plist",
-          "Hörbuchklöppler/ErrorAlert.swift",
-          "Hörbuchklöppler/ChapterPreviewPlayer.swift",
-          "Hörbuchklöppler/ImportCoordinator.swift",
-          "Hörbuchklöppler/OutputCoordinator.swift",
-          "Hörbuchklöppler/OutputPreviewView.swift"
+        "completed_at": "2026-09-10T12:43:34+02:00",
+        "observed_head": "e014f7ad94d0059bcef4f41dc0380300ca3046ff",
+        "content_sha256": "b3461fed8f9ac72474914cf0742f23d9b074d8b207e85fb9891e71c4fd9ac34b",
+        "file_count": 11,
+        "review": "delta-plus-boundaries",
+        "outcome": "improved",
+        "summary": "Vierzehn Funde behoben, überwiegend stumme Fehlerpfade: Undo während eines Imports brach diesen lautlos ab, der Vorschauplayer stoppte beim Kapitelwechsel das falsche Kapitel und hinterließ bei einer nicht abspielbaren Quelle einen dauerhaft laufenden Zustand, der CLI-Handoff und der Cover-Drop verwarfen ihre Fehler, das Speichern-Panel erzeugte Buch.m4b.m4b, drei Menübefehle taten bei minimiertem Fenster nichts, und ConversionPreview machte vier synchrone Volume-Abfragen im SwiftUI-body. Nicht behoben und offen: Cmd+Z ist zwischen Kapitel-Undo und Textfeld-Undo doppelt belegt (Auflösungsreihenfolge nicht am Code belegbar), ein Provider ohne Antwort lässt den Import unbefristet stehen, und die info.plist deklariert weder Dokumententypen für .hkproject noch Audioendungen — beim Doppelklick im Finder öffnet die App also nicht. Beweislage: Für die GUI gibt es keine automatisierten Oberflächentests; belegt sind Übersetzbarkeit, die fensterlose Importprüfung und die Core-Suite, die Bedienfolgen sind aus dem Code hergeleitet.",
+        "tests": [
+          "xcodebuild -scheme Hörbuchklöppler Debug: BUILD SUCCEEDED",
+          "tests/verify_gui_import.swift: acht Provider, Fortschritt und Abbruch geprüft",
+          "swift test -Xswiftc -warnings-as-errors: 252/252 passed",
+          "test_scripts.sh, test_project_cli.py, tests/verify_cli_matrix.py, tests/verify_cli_terminal.py: passed"
         ]
       }
     },

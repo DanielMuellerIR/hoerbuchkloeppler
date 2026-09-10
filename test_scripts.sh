@@ -17,6 +17,25 @@ valid_three="$work_dir/version-three"
 invalid_empty="$work_dir/version-empty"
 invalid_suffix="$work_dir/version-suffix"
 invalid_path="$work_dir/version-path"
+# Syntaxprüfung aller Shell-Skripte. Vorher führte dieses Gate keines von ihnen
+# aus und prüfte auch keines — ein Tippfehler in `release.sh` oder
+# `notary-profile.sh` wäre erst beim Release aufgefallen, also genau dann, wenn
+# er am meisten kostet.
+for script in build.sh install.sh release.sh sign-bundle.sh notary-profile.sh \
+              script-helpers.sh test_scripts.sh; do
+  if [ ! -r "$script" ]; then
+    printf 'Fehler: Skript fehlt: %s\n' "$script" >&2
+    exit 1
+  fi
+  if ! bash -n "$script" 2>/tmp/hk-syntax.$$; then
+    printf 'Fehler: Syntaxfehler in %s:\n' "$script" >&2
+    cat /tmp/hk-syntax.$$ >&2
+    rm -f /tmp/hk-syntax.$$
+    exit 1
+  fi
+  rm -f /tmp/hk-syntax.$$
+done
+
 # Eine nackte `[ … ]`-Zeile beendet den Lauf unter `set -e` zwar korrekt, sagt
 # aber nicht, welche der Prüfungen brach. Diese Hülle nennt sie.
 assert_equal() {
