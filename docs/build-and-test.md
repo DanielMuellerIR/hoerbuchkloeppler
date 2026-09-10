@@ -83,7 +83,11 @@ cd .. && ./test_scripts.sh                    # Build-/Install-/Release-Wächter
 python3 test_project_cli.py                   # Projekt-CLI von Ende zu Ende
 python3 tests/verify_cli_matrix.py            # CLI-Abnahme: Optionen, Exit-Codes, Signale
 python3 tests/verify_cli_terminal.py          # ANSI-Endbild der CLI
+python3 tests/verify_audio_transitions.py     # Kapiteleinsätze im erzeugten m4b nachmessen
 ```
+
+`tests/experiments/encoding_without_wav.py` ist bewusst **kein** Test: Es misst
+und druckt, sichert aber nichts zu. Nicht in einen Gate-Lauf aufnehmen.
 
 Deckt die reine Kernlogik ab: FFMETADATA-Escaping/Parsing, Kapitel-Arithmetik
 (`buildChapterMetadata`), Auto-Split, Ausgabe-Dateinamen, Zeit-Parsing,
@@ -92,9 +96,19 @@ laufbezogenen Abbruch, Metadatenentscheidung, echte asynchrone
 AVFoundation-Analyse einer WAV-Datei, Symlink-Deduplizierung, Unterordner-
 Sortierung, atomaren Mehrdateien-Import, Video-only-Ablehnung,
 Prozessgruppen-Abbruch, Wrapper-Exit mit weiterlaufendem Hintergrundprozess,
-Staging-Namensgrenzen und shell-sicheren CLI-Handoff. `test_scripts.sh` prüft
-zusätzlich Versionssyntax und die Ein-Snapshot-Identität für Installationsprozesse.
-Bewusst **nicht** dabei: das reale Encoding-Ergebnis — dafür ist das Rezept oben da.
+Staging-Namensgrenzen und shell-sicheren CLI-Handoff. Ein reales Encoding ist
+dabei: `LoudnessTests` baut ein echtes Buch mit dem gebündelten ffmpeg, dekodiert
+es wieder und prüft integrierte Lautheit, Cover, Sprecher, Reihe, Band und
+Sprache — das setzt aber `Resources/bin/ffmpeg` voraus (`./build.sh --deps-only`);
+ohne die Binaries meldet der Test das ausdrücklich als Fehlschlag.
+
+`test_scripts.sh` prüft **nicht** die Skripte `build.sh`, `install.sh`,
+`release.sh`, `sign-bundle.sh` oder `notary-profile.sh` — es führt keines davon
+aus. Abgesichert sind die Versions-Syntaxtabelle, der Abgleich von `VERSION` mit
+`MARKETING_VERSION` im Xcode-Projekt und die Ein-Snapshot-Identität aus
+`script-helpers.sh`. Die Beenden-und-Ersetzen-Sequenz von `install.sh`, die
+DMG-/Notarisierungskette von `release.sh` und die Innen-nach-außen-Reihenfolge
+von `sign-bundle.sh` bleiben ungetestet.
 
 Die geprüften Funktionen sind `internal` statt `private`, damit `@testable
 import` drankommt. Das ist Absicht, kein vergessenes `private`.
@@ -102,7 +116,7 @@ import` drankommt. Das ist Absicht, kein vergessenes `private`.
 ## Terminal-Ausgabe prüfen (ohne vor dem Terminal zu sitzen)
 
 ```bash
-python3 tests/verify_cli_terminal.py   # läuft ~15 s, braucht ffmpeg + swift build
+python3 tests/verify_cli_terminal.py   # läuft ~3 s, braucht ffmpeg + swift build
 ```
 
 Das Skript erledigt das frühere Handrezept maschinell: Es startet die CLI an
@@ -146,7 +160,10 @@ Deshalb laufen alle Terminal-Ausgaben der CLI über `TerminalRenderer` in
   Testnaht entgegen; `LoudnessTests.analysisOnlyKeepsLevelAndSurvivesFailure`
   prüft damit die reine Analyse (Gain bleibt 0), den Fehlschlag der reinen
   Analyse (Konvertierung läuft weiter) und den Fehlschlag der Angleichung (Lauf
-  bricht ab). Offen bleibt ein Abbruch mitten im Messpass.
+  bricht ab). Ein SIGTERM direkt nach der Ankündigung des Messpasses prüft
+  `tests/verify_cli_matrix.py` (Exit 143, terminales `cancelled`, keine
+  `HB_Loudness_*`-Reste). Offen bleibt nur ein Signal tief im laufenden
+  loudnorm-Durchlauf.
 - Fehlschlag von `mediainfo` beim Import ist nicht injizierbar
   (`getBinaryURL` bevorzugt das Bundle); die Regel „leere Auswahl nur bei
   leerem Titel/Autor“ ist deshalb nur über den prozessfreien Pfad getestet.

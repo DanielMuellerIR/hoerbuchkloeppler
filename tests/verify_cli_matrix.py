@@ -7,11 +7,16 @@ FF=REPO/'HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/Resources/bin/ffmpe
 assert FF.exists(),f'ffmpeg fehlt: {FF} — vorher ./build.sh --deps-only ausführen'
 assert CLI.exists(),f'kloeppler fehlt: {CLI} — vorher swift build --package-path HoerbuchkloepplerCore ausführen'
 ROOT=pathlib.Path(tempfile.mkdtemp(prefix='hk-final-matrix-'))
+# Eigenes TMPDIR für alle CLI-Aufrufe: `leftovers()` globt sonst den geteilten
+# Systemordner und sieht dort auch HB_Temp_*-Ordner eines parallel laufenden
+# `swift test` — dann wird dieser Lauf ohne eigenes Verschulden rot.
+CLI_TMP=ROOT/'tmp';CLI_TMP.mkdir()
+ENV=dict(os.environ,TMPDIR=str(CLI_TMP))
 REPORT=[]
 def tool(*args):
     return subprocess.run([str(FF),'-v','error',*map(str,args)],capture_output=True,check=True)
 def run(args, expected=0):
-    start=time.monotonic();p=subprocess.run([str(CLI),*map(str,args)],capture_output=True,timeout=300)
+    start=time.monotonic();p=subprocess.run([str(CLI),*map(str,args)],capture_output=True,timeout=300,env=ENV)
     (ROOT/f'command-{len(REPORT)}.stderr').write_bytes(p.stderr)
     assert p.returncode==expected,(args,p.returncode,p.stderr.decode()[-3000:])
     REPORT.append(dict(args=list(map(str,args)),seconds=round(time.monotonic()-start,3),exit=p.returncode))
@@ -76,13 +81,14 @@ for mode in ['standard','parallel']:
         print(mode,path.name,'decodedSeconds',seconds,'metadata+cover reimport OK',flush=True)
 
 def leftovers():
+    # Nur der eigene Temp-Bereich; siehe CLI_TMP.
     temp=pathlib.Path(tempfile.gettempdir())
     return set(map(str,temp.glob('HB_Temp_*')))|set(map(str,temp.glob('HB_Loudness_*')))
 def abort(sig,analyze=False):
     before=leftovers();target=ROOT/('cancel-analysis.m4b' if analyze else 'cancel-encoding.m4b')
     args=[str(CLI),*map(str,files),'--no-cover','--mode','standard','--samplerate','48000','--format','json','--output',str(target)]
     if analyze:args+=['--analyze-loudness']
-    p=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    p=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=ENV)
     selector=selectors.DefaultSelector();selector.register(p.stderr,selectors.EVENT_READ,'err');selector.register(p.stdout,selectors.EVENT_READ,'out')
     buffers={'err':b'','out':b''};sent=None;deadline=time.monotonic()+60
     while p.poll() is None and time.monotonic()<deadline:
@@ -95,7 +101,12 @@ def abort(sig,analyze=False):
         if sent is None and marker in combined:
             if not analyze:time.sleep(.15)
             p.send_signal(sig);sent=time.monotonic()
-    if p.poll() is None:p.kill();raise AssertionError('Cancellation timeout')
+    if p.poll() is None:
+        p.kill();p.wait()
+        # Erst aufräumen lassen, dann melden: Ein `raise` an dieser Stelle ließ
+        # die Reste dieses Laufs im Temp-Bereich zurück, und der nächste Lauf
+        # zählte sie als vorbestehend.
+        assert False,('Cancellation timeout',buffers['err'].decode()[-2000:])
     out,err=p.communicate();buffers['out']+=out;buffers['err']+=err
     assert sent is not None,'Signal marker missing'
     assert p.returncode==128+sig,(p.returncode,buffers['err'].decode()[-3000:])
@@ -115,6 +126,9 @@ events=[json.loads(l) for l in p.stdout.splitlines()];assert events[-1]['event']
 p=run(['--file',ROOT/'gibtsnicht.wav','--inspect','--format','json'],1)
 events=[json.loads(l) for l in p.stdout.splitlines()]
 assert len(events)==1 and events[0]['event']=='failed' and events[0]['success'] is False,events
+# `--normalize-loudness` erreicht sonst nirgends das echte Binary: Der Swift-Test
+# durchsucht nur die selbst gebaute Argumentliste des GUI-Handoffs.
+run([ROOT/'leer','--normalize-loudness','--analyze-loudness'],1)
 print('inspect failure json OK',flush=True)
 # Eine Projektdatei mit nicht lesbarer Versionsangabe bekommt eine klare
 # Meldung statt eines rohen Decoding-Fehlers.

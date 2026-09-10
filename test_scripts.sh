@@ -17,14 +17,23 @@ valid_three="$work_dir/version-three"
 invalid_empty="$work_dir/version-empty"
 invalid_suffix="$work_dir/version-suffix"
 invalid_path="$work_dir/version-path"
+# Eine nackte `[ … ]`-Zeile beendet den Lauf unter `set -e` zwar korrekt, sagt
+# aber nicht, welche der Prüfungen brach. Diese Hülle nennt sie.
+assert_equal() {
+  if [ "$1" != "$2" ]; then
+    printf 'Fehler: %s (erwartet: %s, war: %s)\n' "$3" "$2" "$1" >&2
+    exit 1
+  fi
+}
+
 printf '1.4\n' > "$valid_two"
 printf '1.4.2\n' > "$valid_three"
 : > "$invalid_empty"
 printf '1.4.2-beta\n' > "$invalid_suffix"
 printf '../../fremd\n' > "$invalid_path"
 
-[ "$(hoerbuchkloeppler_read_version "$valid_two")" = "1.4" ]
-[ "$(hoerbuchkloeppler_read_version "$valid_three")" = "1.4.2" ]
+assert_equal "$(hoerbuchkloeppler_read_version "$valid_two")" "1.4" "Zweistellige Version wurde nicht gelesen"
+assert_equal "$(hoerbuchkloeppler_read_version "$valid_three")" "1.4.2" "Dreistellige Version wurde nicht gelesen"
 for invalid_version in "$invalid_empty" "$invalid_suffix" "$invalid_path" "$work_dir/fehlt"; do
   if hoerbuchkloeppler_read_version "$invalid_version" >/dev/null 2>&1; then
     echo "Fehler: Ungültige oder fehlende Release-Version wurde akzeptiert: $invalid_version" >&2
@@ -68,18 +77,18 @@ ps() {
   fi
 }
 captured="$(hoerbuchkloeppler_process_snapshot 12345)"
-[ "$captured" = "$snapshot" ]
-[ "$(wc -l < "$ps_calls" | tr -d ' ')" -eq 1 ]
+assert_equal "$captured" "$snapshot" "Prozess-Snapshot weicht von der ps-Ausgabe ab"
+assert_equal "$(wc -l < "$ps_calls" | tr -d ' ')" "1" "Snapshot darf ps genau einmal aufrufen"
 hoerbuchkloeppler_snapshot_targets_executable "$captured" "$target"
 
 : > "$ps_calls"
 hoerbuchkloeppler_process_matches_snapshot 12345 "$snapshot" "$target"
-[ "$(wc -l < "$ps_calls" | tr -d ' ')" -eq 1 ]
+assert_equal "$(wc -l < "$ps_calls" | tr -d ' ')" "1" "Abgleich darf ps genau einmal aufrufen"
 if hoerbuchkloeppler_process_matches_snapshot 12345 "$snapshot" "$target"; then
   echo "Fehler: Wiederverwendete PID mit neuer Identität wurde akzeptiert." >&2
   exit 1
 fi
-[ "$(wc -l < "$ps_calls" | tr -d ' ')" -eq 2 ]
+assert_equal "$(wc -l < "$ps_calls" | tr -d ' ')" "2" "Zweiter Abgleich muss ps erneut aufrufen"
 unset -f ps
 
 echo "Shell-Sicherheitstests bestanden."

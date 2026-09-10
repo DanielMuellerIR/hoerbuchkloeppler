@@ -84,7 +84,10 @@ struct AudioImportServiceTests {
         try FileManager.default.removeItem(at: url)
         try FileManager.default.moveItem(at: replacement, to: url)
         #expect(!analysis.isCurrent())
-        #expect(await service.artwork(from: analysis) == nil)
+        // Ein `artwork(from: analysis) == nil` stünde hier nur scheinbar für den
+        // Guard: Die Fixture trägt gar kein Cover, die Schleife liefe ohnehin
+        // leer. Den Weg über den Dienst nagelt `staleCacheEntryTriggersFreshAnalysis`
+        // an einem Zähler fest, der sich nicht zufällig erfüllt.
     }
 
     @Test("Ein veralteter Cache-Eintrag löst eine neue Analyse aus")

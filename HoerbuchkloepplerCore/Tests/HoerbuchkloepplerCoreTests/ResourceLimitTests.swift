@@ -9,9 +9,16 @@ struct ResourceLimitTests {
         #expect(try JSONDecoder().decode(AudioSettings.self, from: JSONEncoder().encode(settings)) == settings)
         #expect(AudioSettings(workerLimit: 0).normalized().workerLimit == nil)
         #expect(AudioSettings(workerLimit: 33).normalized().workerLimit == nil)
-        #expect(AudioSettings().effectiveWorkerLimit <= 4)
+        // `<= 4` galt immer, weil die 4 im Ausdruck selbst steht. Der Vertrag ist
+        // „Default 4, aber nie mehr als Kerne vorhanden sind".
+        #expect(AudioSettings().effectiveWorkerLimit
+            == min(4, ProcessInfo.processInfo.activeProcessorCount))
         let invocation = CLIInvocation(executable: "kloeppler", folderURL: URL(fileURLWithPath: "/tmp"), settings: settings, title: "", author: "", genre: "")
-        #expect(invocation.arguments.suffix(2) == ["--workers", "2"])
+        // Inhaltlich statt positionsabhängig: Eine künftige nachgestellte Option
+        // machte den Test sonst rot, ohne dass `--workers` kaputt wäre.
+        let workerIndex = invocation.arguments.firstIndex(of: "--workers")
+        #expect(workerIndex != nil)
+        if let workerIndex { #expect(invocation.arguments[workerIndex + 1] == "2") }
     }
 
     @Test func boundedDiagnosticStillDeliversEveryChunk() throws {
@@ -59,6 +66,9 @@ struct ResourceLimitTests {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sleep")
         process.arguments = ["30"]
+        // Ohne dieses Netz liefe der Schläfer bei genau der getesteten
+        // Regression 30 Sekunden in die restliche, parallel laufende Suite.
+        defer { if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) } }
         #expect(try context.run(process))
         context.failSegments()
         #expect(!process.isRunning)

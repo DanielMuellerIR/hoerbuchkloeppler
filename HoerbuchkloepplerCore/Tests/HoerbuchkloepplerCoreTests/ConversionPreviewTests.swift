@@ -20,11 +20,19 @@ struct ConversionPreviewTests {
         #expect(standard.chapterCount == 2)
         #expect(standard.duration == 7000)
         #expect(standard.outputURLs.count == 2)
-        #expect(standard.outputURLs == plan.outputURLs)
         #expect(standard.tempBytes == 3500 * 32000 * 2 + 32 * 1024 * 1024)
         #expect(parallel.tempBytes < standard.tempBytes)
         #expect(standard.targetBytes == parallel.targetBytes)
-        #expect(standard.sharesVolume)
+        // `outputURLs == plan.outputURLs` und `sharesVolume` sagten hier nichts:
+        // Ersteres ist eine Zuweisung im Initialisierer, Letzteres folgt daraus,
+        // dass die Testausgabe selbst im Temp-Verzeichnis liegt. Die Lautheits-
+        // analyse verlangt dagegen echten Zusatzplatz und war ungeprüft.
+        let analysing = ConversionPreview(
+            plan: plan,
+            settings: AudioSettings(useParallelEncoding: false, analyzeLoudness: true)
+        )
+        #expect(analysing.tempBytes == 7000 * 32000 * 2 + 32 * 1024 * 1024)
+        #expect(analysing.tempBytes > standard.tempBytes)
     }
 
     @Test func profilesKeepIndependentSettings() {
@@ -35,8 +43,8 @@ struct ConversionPreviewTests {
         #expect(settings.maxDurationHours == 5)
         #expect(settings.workerLimit == 2)
         #expect(!settings.useParallelEncoding)
-        var manual = AudioSettings(isMono: false, bitrate: "256k")
-        manual.isMono = true
+        let manual = AudioSettings(isMono: false, bitrate: "256k")
         #expect(manual.normalized().bitrate == "256k")
+        #expect(manual.bitsPerSecond == 256_000)
     }
 }

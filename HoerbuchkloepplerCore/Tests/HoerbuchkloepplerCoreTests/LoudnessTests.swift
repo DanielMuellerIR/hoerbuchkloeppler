@@ -16,7 +16,10 @@ struct LoudnessTests {
         }
     }
 
-    @Test func metadataAndLoudnessTravelThroughCLI() throws {
+    /// Prüft ausschließlich, was der GUI-Handoff BAUT. Dass der echte Parser
+    /// diese Optionen auch annimmt, prüft `tests/verify_cli_matrix.py` — ein
+    /// Umbenennen von `--normalize-loudness` bliebe hier sonst unbemerkt.
+    @Test func handoffCarriesMetadataAndLoudnessOptions() throws {
         #expect(try BookMetadata.outputLanguage("de") == "deu")
         #expect(try BookMetadata.outputLanguage("de-DE") == "deu")
         #expect(throws: (any Error).self) { try BookMetadata.outputLanguage("Deutsch") }
@@ -37,7 +40,13 @@ struct LoudnessTests {
     }
 
     @Test(arguments: [false, true]) @MainActor func realBookAnalysisInBothModes(split: Bool) async throws {
-        guard let ffmpeg = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else { return }
+        guard let ffmpeg = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else {
+            // Ohne Meldung verschwände hier die gesamte Abdeckung des echten
+            // Encodings spurlos: `Resources/bin/ffmpeg` ist nicht eingecheckt
+            // und entsteht erst durch `./build.sh --deps-only`.
+            Issue.record("ffmpeg fehlt — vorher ./build.sh --deps-only ausführen")
+            return
+        }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("LoudnessTest-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: folder) }
@@ -121,7 +130,10 @@ struct LoudnessTests {
     }
 
     @Test @MainActor func analysisOnlyKeepsLevelAndSurvivesFailure() async throws {
-        guard let ffmpeg = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else { return }
+        guard let ffmpeg = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else {
+            Issue.record("ffmpeg fehlt — vorher ./build.sh --deps-only ausführen")
+            return
+        }
         let folder = FileManager.default.temporaryDirectory
             .appendingPathComponent("LoudnessPolicy-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)

@@ -9,11 +9,13 @@ spielt den Strom durch einen Mini-Emulator nach.
 Erfolgskriterium: Jede geschriebene Logzeile steht im Endbild noch vollständig
 da — einschließlich der Abbruchmeldung.
 """
+import atexit
 import os
 import pathlib
 import pty
 import re
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -73,6 +75,9 @@ def render(stream: str) -> list[str]:
 
 
 root = pathlib.Path(tempfile.mkdtemp(prefix="hk-cli-terminal-"))
+# Die drei Quellen belegen zusammen rund 86 MB; ohne das Aufräumen wüchse der
+# Temp-Ordner mit jedem Lauf.
+atexit.register(shutil.rmtree, root, True)
 source = root / "quelle"
 source.mkdir()
 # Lang genug, damit das Encoding beim Signal noch läuft; 8000 Hz mono hält die

@@ -26,9 +26,10 @@ for name,start,duration in [('B',0.2,0.6),('A',0.1,0.7)]:
 project=dict(formatVersion=1,sources=sources,sections=sections,metadata=dict(title='Projektbuch',author='Autor',genre='Hörbuch',narrator='Sprecher',series='Reihe',volumeNumber='2',language='de'),settings={},coverSuppressed=True)
 path=root/'test.hkproject';path.write_text(json.dumps(project))
 r=json.loads(run(['--project',path,'--inspect','--format','json','--output',root/'another'/'out.m4b']).stdout)
-assert r['duration']==1.2999999999999998 or abs(r['duration']-1.3)<1e-9
+assert abs(r['duration']-1.3)<1e-9,r['duration']
 assert r['metadata']['narrator']=='Sprecher';assert not (root/'another').exists()
-for mode in ['standard']:
+# Nur der Standard-Modus: Den Parallel-Modus deckt tests/verify_cli_matrix.py ab.
+for mode in ['standard']:  # noqa: B007 - bewusst einelementig, siehe Kommentar
     output=root/f'{mode}.m4b'
     p=run(['--project',path,'--mode',mode,'--format','json','--output',output])
     events=[json.loads(l) for l in p.stdout.splitlines()]

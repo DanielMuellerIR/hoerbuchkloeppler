@@ -1147,6 +1147,9 @@ struct CancellationIsolationTests {
             mutationRan = true
         }
         #expect(committedBeforeCancel)
+        // Ohne diese Zeile käme ein `performCommit` durch, das Erfolg meldet,
+        // ohne die Übernahme überhaupt auszuführen.
+        #expect(mutationRan)
         #expect(!finishedContext.cancel())
     }
 
@@ -1180,6 +1183,31 @@ struct CancellationIsolationTests {
         try FFmpegWrapper.createOwnedTempDirectory(directory)
 
         #expect(FFmpegWrapper.temporaryDirectoryHasLiveOwner(directory))
+    }
+
+    /// Der Positivfall allein genügt nicht: Fiele die Lebendprüfung weg, bliebe
+    /// er grün, und verwaiste Temp-Verzeichnisse toter Läufe lägen für immer
+    /// als Gigabyte-Leichen herum.
+    @Test("Ohne Marke und mit totem Besitzer gilt ein Verzeichnis als verwaist")
+    func temporaryDirectoryRejectsMissingAndDeadOwner() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HB_Temp_Test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let unmarked = root.appendingPathComponent("ohne-marke")
+        try FileManager.default.createDirectory(at: unmarked, withIntermediateDirectories: true)
+        #expect(!FFmpegWrapper.temporaryDirectoryHasLiveOwner(unmarked))
+
+        let dead = root.appendingPathComponent("toter-besitzer")
+        try FFmpegWrapper.createOwnedTempDirectory(dead)
+        // Ein kurzlebiges Kind liefert eine PID, die beim Prüfen sicher tot ist.
+        let corpse = Process()
+        corpse.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try corpse.run()
+        corpse.waitUntilExit()
+        try Data(String(corpse.processIdentifier).utf8)
+            .write(to: dead.appendingPathComponent(".owner-pid"))
+        #expect(!FFmpegWrapper.temporaryDirectoryHasLiveOwner(dead))
     }
 }
 
@@ -1436,11 +1464,15 @@ struct MetadataAndCLITests {
             settings: AudioSettings(),
             title: "Buch",
             author: "Autor",
+            coverPath: "/tmp/Cover.jpg",
             suppressCover: true
         )
 
         #expect(invocation.arguments.contains("--no-cover"))
-        #expect(!invocation.arguments.contains("--cover"))
+        // Mit einem Cover-Pfad UND `suppressCover` konstruiert: Sonst könnte der
+        // Zweig, der `--cover=…` anhängt, gar nicht feuern, und die Zusicherung
+        // wäre wertlos. `hasPrefix`, weil der Wert an der Option klebt.
+        #expect(!invocation.arguments.contains { $0.hasPrefix("--cover") })
         // Default-Settings haben isVerbose == false — dann auch kein --verbose.
         #expect(!invocation.arguments.contains("--verbose"))
     }
@@ -2088,6 +2120,33 @@ struct SettingsPersistenceTests {
             try manager.saveSettings(AudioSettings())
         }
     }
+
+    /// Bisher war `saveSettings` ausschließlich im Fehlerfall geprüft. Damit
+    /// wäre unbemerkt geblieben, dass der Schreibpfad das Verzeichnis anlegt und
+    /// vor dem Schreiben normalisiert.
+    @Test("Speichern legt das Verzeichnis an, normalisiert und ist rundlauffähig")
+    func saveCreatesDirectoryAndNormalizes() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let target = directory
+            .appendingPathComponent("noch-nicht-da")
+            .appendingPathComponent("settings.json")
+        let manager = SettingsManager(settingsURL: target)
+
+        var broken = AudioSettings()
+        broken.bitrate = "999k"
+        broken.sampleRate = 7
+        try manager.saveSettings(broken)
+
+        #expect(FileManager.default.fileExists(atPath: target.path))
+        let written = try JSONDecoder().decode(
+            AudioSettings.self,
+            from: Data(contentsOf: target)
+        )
+        #expect(written.bitrate == AudioSettings().bitrate)
+        #expect(written.sampleRate == AudioSettings().sampleRate)
+        #expect(manager.loadSettings() == written)
+    }
 }
 
 @Suite("Review-Fixes 2026-08-17 – Symlinks und Staging-Bereinigung")
@@ -2317,6 +2376,10 @@ struct ReviewFixes20260817Tests {
         let context = ConversionContext()
         context.registerStagedOutput(staging)
         context.cancel()
+        // Ohne diese Barriere prüfte der Test, bevor die Bereinigung überhaupt
+        // gelaufen war: Seit sie im Hintergrund läuft, gewänne der Testthread
+        // das Rennen fast immer und ein rekursives Löschen bliebe unbemerkt.
+        #expect(context.waitForCancellationCleanup())
 
         #expect(FileManager.default.fileExists(atPath: inhalt.path))
     }
