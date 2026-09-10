@@ -26,7 +26,9 @@ public struct ConversionPreview: Sendable {
         availableTempBytes = Self.freeBytes(at: temp)
         availableTargetBytes = Self.freeBytes(at: target)
         let normalized = settings.normalized()
-        let bitrate = Double(normalized.bitrate.replacingOccurrences(of: "k", with: ""))! * (normalized.bitrate.hasSuffix("k") ? 1000 : 1)
+        // `normalized()` hat die Bitrate bereits auf eine gültige Form gebracht;
+        // der Default deckt den theoretischen Rest ab, statt hier abzustürzen.
+        let bitrate = Double(normalized.bitsPerSecond ?? AudioSettings().bitsPerSecond ?? 48_000)
         let largestGroup = plan.groups.map { $0.reduce(0) { $0 + $1.duration } }.max() ?? 0
         // CVBR und Container haben Spielraum; 32 MiB je Ausgabe decken das Cover.
         targetBytes = Self.bytes(duration * bitrate / 8 * 1.25 + Double(plan.groups.count) * 32 * 1024 * 1024)

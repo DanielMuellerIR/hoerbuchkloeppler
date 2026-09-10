@@ -33,24 +33,27 @@ public struct CLIInvocation: Sendable {
         if let maxDurationHours = settings.maxDurationHours {
             arguments += ["--max-duration", String(maxDurationHours)]
         }
-        if !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            arguments += ["--title", title]
-        }
-        if !author.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            arguments += ["--author", author]
-        }
-        if !genre.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            arguments += ["--genre", genre]
-        }
-        for (key, value) in [("--narrator", narrator), ("--series", series), ("--volume-number", volumeNumber), ("--language", language)] where !value.isEmpty {
-            arguments += [key, value]
+        // Freitext einheitlich in der `--option=wert`-Form und einheitlich
+        // getrimmt geprüft: In der getrennten Form liest der Argumentparser
+        // einen Wert mit führendem Bindestrich als Option, ein Buchtitel wie
+        // „-Aufzeichnungen" ließ den kopierten Befehl mit „Missing value for
+        // '--title'" abbrechen. Und ein Wert aus lauter Leerzeichen entfiel
+        // bisher beim Titel, wurde bei Sprecher und Reihe aber übergeben.
+        let freeText = [
+            ("--title", title), ("--author", author), ("--genre", genre),
+            ("--narrator", narrator), ("--series", series),
+            ("--volume-number", volumeNumber), ("--language", language)
+        ]
+        for (key, value) in freeText
+        where !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            arguments.append("\(key)=\(value)")
         }
         if settings.analyzeLoudness { arguments.append("--analyze-loudness") }
         if settings.normalizeLoudness { arguments.append("--normalize-loudness") }
         if suppressCover {
             arguments.append("--no-cover")
         } else if let coverPath {
-            arguments += ["--cover", coverPath]
+            arguments.append("--cover=\(coverPath)")
         }
         // Auch das ausführliche Logging reist mit — sonst verhält sich der
         // kopierte Befehl anders als die aktuelle GUI-Session.

@@ -1380,19 +1380,34 @@ struct MetadataAndCLITests {
             executable: executable.path,
             folderURL: URL(fileURLWithPath: "/tmp/Buch $HOME's"),
             settings: settings,
-            title: "Titel `printf nicht-ausführen`",
+            title: "-Aufzeichnungen `printf nicht-ausführen`",
             author: "O'Brien",
             genre: "Roman & Lesung",
             coverPath: "/tmp/Cover Bild.jpg"
         )
 
         #expect(invocation.arguments.contains("--max-duration"))
-        #expect(invocation.arguments.contains("--title"))
-        #expect(invocation.arguments.contains("--author"))
-        #expect(invocation.arguments.contains("--genre"))
-        #expect(invocation.arguments.contains("--cover"))
+        // Freitext in der `--option=wert`-Form: In der getrennten Form liest der
+        // Argumentparser einen Wert mit führendem Bindestrich als Option, und
+        // der kopierte Befehl bräche mit „Missing value for '--title'" ab.
+        #expect(invocation.arguments.contains("--title=-Aufzeichnungen `printf nicht-ausführen`"))
+        #expect(invocation.arguments.contains("--author=O'Brien"))
+        #expect(invocation.arguments.contains("--genre=Roman & Lesung"))
+        #expect(invocation.arguments.contains("--cover=/tmp/Cover Bild.jpg"))
         #expect(invocation.arguments.contains("--stereo"))
         #expect(invocation.arguments.contains("--verbose"))
+        // Ein Wert aus lauter Leerzeichen entfällt überall gleich.
+        let blank = CLIInvocation(
+            executable: "kloeppler",
+            folderURL: URL(fileURLWithPath: "/tmp"),
+            settings: AudioSettings(),
+            title: "",
+            author: "",
+            narrator: "  ",
+            series: "  "
+        )
+        #expect(!blank.arguments.contains { $0.hasPrefix("--narrator") })
+        #expect(!blank.arguments.contains { $0.hasPrefix("--series") })
 
         // Der echte Shell-Durchlauf prüft das beobachtbare Verhalten: Weder
         // Dollarzeichen noch Backticks, Apostrophe oder Leerzeichen dürfen die

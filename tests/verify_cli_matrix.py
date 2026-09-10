@@ -34,12 +34,19 @@ print('ROOT',ROOT,flush=True)
 for bad in [['--bitrate','999k'],['--bitrate','7k'],['--bitrate','48'],['--samplerate','7999'],
             ['--samplerate','48001'],['--mode','bogus'],['--max-duration','-1'],['--workers','0'],
             ['--import-workers','0'],['--mono','--stereo'],['--no-cover','--cover',ROOT/'cover.png'],
-            ['--language','xx1'],['--volume-number','70000']]:
+            ['--language','xx1'],['--volume-number','70000'],['--volume-number','+5'],
+            ['--volume-number','007'],['--volume-number','0']]:
     run([ROOT/'leer',*bad],64)
 # Gültige Randwerte dürfen NICHT abgelehnt werden; sie scheitern erst am leeren
 # Ordner (Exit 1), was die Grenzen von der Ordnerprüfung trennt.
 for good in [['--bitrate','8k'],['--bitrate','320k'],['--samplerate','8000'],['--samplerate','48000']]:
     run([ROOT/'leer',*good],1)
+# Der GUI-Handoff (CLIInvocation) gibt Freitext als `--option=wert`. Genau das
+# muss der echte Parser annehmen — in der getrennten Form läse er einen Wert mit
+# führendem Bindestrich als Option. Kein Swift-Test schickt einen Handoff durch
+# den echten Parser, deshalb steht die Probe hier.
+run([ROOT/'leer','--title=-Aufzeichnungen'],1)
+run([ROOT/'leer','--title','-Aufzeichnungen'],64)
 print('usage exits OK',flush=True)
 for index in [1,2]:
     tool('-f','lavfi','-i','anullsrc=r=8000:cl=mono','-t','1801','-c:a','flac','-metadata',f'title=Kapitel {index}',ROOT/f'{index}.flac')
@@ -109,6 +116,12 @@ p=run(['--file',ROOT/'gibtsnicht.wav','--inspect','--format','json'],1)
 events=[json.loads(l) for l in p.stdout.splitlines()]
 assert len(events)==1 and events[0]['event']=='failed' and events[0]['success'] is False,events
 print('inspect failure json OK',flush=True)
+# Eine Projektdatei mit nicht lesbarer Versionsangabe bekommt eine klare
+# Meldung statt eines rohen Decoding-Fehlers.
+(ROOT/'fremd.hkproject').write_text('{"formatVersion":"2","sources":[],"sections":[]}')
+p=run(['--project',ROOT/'fremd.hkproject','--inspect'],1)
+assert b'Projektversion ist keine Zahl' in p.stderr,p.stderr[-500:]
+print('project version diagnosis OK',flush=True)
 # Ohne --output benennt sich die Ausgabe nach dem Titel-Tag beziehungsweise dem
 # Quellnamen OHNE dessen Endung — nicht "1.flac.m4b".
 untagged=ROOT/'ohnetag';untagged.mkdir()

@@ -42,7 +42,21 @@ public struct AudiobookProject: Codable, Sendable {
     /// Nur die Versionsnummer lesen, bevor die vollständige Struktur dekodiert
     /// wird. So bekommt eine Datei einer künftigen Version mit geänderten
     /// Feldern die dokumentierte Meldung statt eines Decoding-Fehlers.
-    private struct VersionProbe: Decodable { var formatVersion: Int? }
+    private struct VersionProbe: Decodable {
+        let declared: Int?
+        let hasField: Bool
+
+        private enum ProbeKeys: String, CodingKey { case formatVersion }
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: ProbeKeys.self)
+            hasField = values.contains(.formatVersion)
+            // Ein vorhandener, aber nicht als Zahl lesbarer Wert stammt aus einem
+            // fremden oder neueren Format. Ohne die Unterscheidung fiele er auf
+            // „kompatibel" zurück und stürbe danach an einem rohen DecodingError.
+            declared = try? values.decode(Int.self, forKey: .formatVersion)
+        }
+    }
 
     public func write(to url: URL) throws {
         let encoder = JSONEncoder()
@@ -54,11 +68,18 @@ public struct AudiobookProject: Codable, Sendable {
         let values = try url.resourceValues(forKeys: [.fileSizeKey])
         guard (values.fileSize ?? 0) <= 48 * 1024 * 1024 else { throw ProjectError.invalid("Projektdatei überschreitet 48 MiB.") }
         let data = try Data(contentsOf: url)
-        let declaredVersion = (try? JSONDecoder().decode(VersionProbe.self, from: data))?.formatVersion ?? currentVersion
-        guard declaredVersion == currentVersion else { throw ProjectError.invalid("Projektversion \(declaredVersion) wird nicht unterstützt.") }
+        if let probe = try? JSONDecoder().decode(VersionProbe.self, from: data), probe.hasField {
+            guard let declaredVersion = probe.declared else {
+                throw ProjectError.invalid("Projektversion ist keine Zahl; die Datei stammt aus einem anderen Format.")
+            }
+            guard declaredVersion == currentVersion else {
+                throw ProjectError.invalid("Projektversion \(declaredVersion) wird nicht unterstützt.")
+            }
+        }
         let project = try JSONDecoder().decode(Self.self, from: data)
         let ids = Set(project.sources.map(\.id))
         guard ids.count == project.sources.count,
+              project.sources.allSatisfy({ $0.location.isWellFormed && $0.readLocation.isWellFormed }),
               Set(project.sections.map(\.id)).count == project.sections.count,
               project.sections.allSatisfy({ ids.contains($0.sourceID) && $0.start.isFinite && $0.start >= 0 && $0.duration.isFinite && $0.duration > 0 }),
               (project.coverData?.count ?? 0) <= 32 * 1024 * 1024 else {
@@ -122,6 +143,19 @@ public struct ProjectLocation: Codable, Sendable {
         isRelative ? projectURL.deletingLastPathComponent().appendingPathComponent(path).standardizedFileURL
             : URL(fileURLWithPath: path).standardizedFileURL
     }
+
+    /// Eine als absolut markierte Angabe muss auch absolut sein, sonst löste
+    /// `URL(fileURLWithPath:)` sie gegen das Arbeitsverzeichnis auf — dasselbe
+    /// Projekt fände je nach Startverzeichnis eine andere Datei. Eine relative
+    /// Angabe darf den Projektordner nicht verlassen.
+    var isWellFormed: Bool {
+        if isRelative {
+            return !path.hasPrefix("/")
+                && !path.split(separator: "/").contains("..")
+                && !path.isEmpty
+        }
+        return path.hasPrefix("/")
+    }
 }
 
 public struct ProjectSource: Codable, Sendable {
@@ -134,7 +168,10 @@ public struct ProjectSource: Codable, Sendable {
         // O_NONBLOCK verhindert, dass ein ausgetauschter FIFO schon beim
         // Öffnen hängen bleibt. Erst der geöffnete Descriptor beweist den Typ.
         let descriptor = Darwin.open(url.path, O_RDONLY | O_NONBLOCK)
-        guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        guard descriptor >= 0 else {
+            let reason = String(cString: strerror(errno))
+            throw ProjectError.invalid("Quelle kann nicht gelesen werden: \(url.lastPathComponent) (\(reason))")
+        }
         let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? handle.close() }
         var before = stat()
@@ -174,7 +211,13 @@ extension BookMetadata {
         let code = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().split(whereSeparator: { $0 == "-" || $0 == "_" }).first.map(String.init) ?? ""
         if code.isEmpty { return "" }
         let language = Locale.LanguageCode(code)
-        if language.isISOLanguage, let expanded = language.identifier(.alpha3) { return expanded }
+        // Auch das Ergebnis der Abbildung muss dreistellig sein: Ein leerer oder
+        // andersförmiger Rückgabewert landete sonst wortlos als
+        // `-metadata language=` im MP4, und die Sprache verschwände.
+        if language.isISOLanguage, let expanded = language.identifier(.alpha3),
+           expanded.range(of: "^[a-z]{3}$", options: .regularExpression) != nil {
+            return expanded
+        }
         guard code.range(of: "^[a-z]{3}$", options: .regularExpression) != nil else {
             throw ProjectError.invalid("Sprache als dreistelligen ISO-639-2-Code angeben, z. B. deu oder eng.")
         }
@@ -182,7 +225,14 @@ extension BookMetadata {
     }
 
     public static func validateVolumeNumber(_ value: String) throws {
-        guard value.isEmpty || (UInt16(value).map { $0 > 0 } ?? false) else {
+        // `UInt16(value)` allein ließe „+5" und „007" durch; geprüfter und
+        // gespeicherter Wert wären dann nicht derselbe, und im MP4 landete
+        // `disc=+5`.
+        let isPlainNumber = !value.isEmpty
+            && value.allSatisfy(\.isASCII)
+            && value.allSatisfy(\.isNumber)
+            && !value.hasPrefix("0")
+        guard value.isEmpty || (isPlainNumber && (UInt16(value).map { $0 > 0 } ?? false)) else {
             throw ProjectError.invalid("Bandnummer muss leer oder eine Zahl von 1 bis 65535 sein.")
         }
     }

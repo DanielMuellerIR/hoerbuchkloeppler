@@ -6,7 +6,7 @@
     "token_budget": 3000000,
     "status": "active",
     "started_at": "2026-09-10T10:16:35+02:00",
-    "tokens_spent": 391933
+    "tokens_spent": 437734
   },
   "campaign_history": [
     {
@@ -101,15 +101,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260910T101635358055+0200",
-        "completed_at": "2026-09-10T11:15:18+02:00",
-        "observed_head": "990a704dc89bf73b167bf9e10e226c161cce9ce3",
-        "content_sha256": "50a89e4c41589e5b07b5c0b0c70b7ca2cf6b60efb845c0f6a3cfb59f15b1b32a",
+        "completed_at": "2026-09-10T11:53:17+02:00",
+        "observed_head": "917da900982ee386a8cb26b38ad736ed256b35fa",
+        "content_sha256": "98ed2395c337ba051308d46fa9186b8bc8f1a76aff0dff5483b5cc45794bac5a",
         "file_count": 4,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Nachbuchung des Bereichs-Deltas aus dem conversion-engine-Commit: einziger Zusatz ist ConversionRunState.init(rejectedWith:), im selben Lauf geschrieben und über die Ablehnungspfade in FFmpegWrapper mitverifiziert.",
+        "summary": "Nachbuchung des Bereichs-Deltas aus dem audio-analysis-Commit: Analyse-Cache wird am Ende von finishImport auf den sichtbaren Bestand gestutzt, und der tote AudioTrackAvailability-Pfad ist entfernt. Beides im selben Lauf geschrieben und über die Artwork-Resume-Tests mitverifiziert.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 245/245 passed"
+          "swift test -Xswiftc -warnings-as-errors: 250/250 passed"
         ]
       }
     },
@@ -206,32 +206,21 @@
       "risk": "high",
       "priority": 5,
       "reason": "AVFoundation-Analyse, Kapitelimport und externe ffmpeg-Prozessgrenze",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260903T102818420748+0200",
-        "completed_at": "2026-09-03T10:52:27+02:00",
-        "observed_head": "ed4227b33129590125968fd4433d082e9c5179e8",
-        "content_sha256": "444b3b1847b819fb084a74655636c57a179eb8dd723ceefd0e1f4e66f3e4d2f4",
-        "file_count": 1,
-        "review": "delta-plus-boundaries",
-        "outcome": "reviewed-clean",
-        "summary": "Nachbuchung: waitForProcessExit nutzt jetzt ProcessTerminator.wait; Frist- und Klemmregel der Kapitelanalyse unverändert, restliche Datei im Projekt-Review 2026-09-03 vollständig gelesen",
-        "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 201/201 passed"
-        ]
-      },
-      "pending_paths": [
-        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift",
-        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioImportService.swift"
-      ],
-      "active_run": {
         "campaign_id": "20260910T101635358055+0200",
-        "started_at": "2026-09-10T11:37:50+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": [
-          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift",
-          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioImportService.swift"
+        "completed_at": "2026-09-10T11:53:09+02:00",
+        "observed_head": "917da900982ee386a8cb26b38ad736ed256b35fa",
+        "content_sha256": "66b70f8e9b37d30ae82bd0314001d5de10252b90bd6b50e409ef4b8aa142c8e5",
+        "file_count": 2,
+        "review": "delta-plus-boundaries",
+        "outcome": "improved",
+        "summary": "Sechs Korrektheitsfunde behoben: FFMETADATA-Fortsetzungszeile zerstörte Titel und konnte das Kapitelende überschreiben, END vor START wurde zu einem erfundenen Kapitel repariert, CRLF-Dateien lieferten gar keine Kapitel, ein veralteter Artwork-Cache-Eintrag verhinderte dauerhaft die Coversuche, falsche Fehlerursache vor dem Laden, unbegrenztes waitUntilExit nach der Kapitel-Frist. Dazu Analyse-Cache nach dem Import gestutzt und toten Audiostream-Prüfer entfernt. Offen und bewusst nicht angefasst: readFFMetadata und waitForProcessExit blockieren synchron einen Thread des Cooperative Pools (bis zu 30 s je Datei, bis zu workerLimit gleichzeitig); die Artwork-Größengrenze greift erst nach dem vollständigen Laden.",
+        "tests": [
+          "swift test -Xswiftc -warnings-as-errors: 250/250 passed",
+          "tests/verify_cli_matrix.py und tests/verify_cli_terminal.py: VERIFIED",
+          "test_scripts.sh und test_project_cli.py: passed",
+          "xcodebuild -scheme Hörbuchklöppler Debug: BUILD SUCCEEDED"
         ]
       }
     },
@@ -248,7 +237,7 @@
       "risk": "high",
       "priority": 6,
       "reason": "Persistierte Einstellungen, Normalisierung und vollständiger shell-sicherer GUI-zu-CLI-Vertrag",
-      "state": "pending",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260829T204240680364+0200",
         "completed_at": "2026-08-29T21:06:09+02:00",
@@ -271,7 +260,21 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudiobookProject.swift",
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionPreview.swift",
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/RunReport.swift"
-      ]
+      ],
+      "active_run": {
+        "campaign_id": "20260910T101635358055+0200",
+        "started_at": "2026-09-10T11:53:26+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": [
+          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioSettings.swift",
+          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/SettingsManager.swift",
+          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/CLIInvocation.swift",
+          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudiobookProject.swift",
+          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionPreview.swift",
+          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/RunReport.swift"
+        ]
+      }
     },
     {
       "id": "build-system",

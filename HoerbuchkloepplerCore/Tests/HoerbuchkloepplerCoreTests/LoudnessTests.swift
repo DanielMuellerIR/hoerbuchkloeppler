@@ -23,9 +23,8 @@ struct LoudnessTests {
         #expect(throws: (any Error).self) { try BookMetadata.validateVolumeNumber("70000") }
         let invocation = CLIInvocation(executable: "kloeppler", folderURL: URL(fileURLWithPath: "/tmp"), settings: AudioSettings(normalizeLoudness: true), title: "", author: "", narrator: "Ada", series: "Reihe", volumeNumber: "2", language: "deu")
         #expect(invocation.arguments.contains("--normalize-loudness"))
-        #expect(invocation.arguments.contains("--narrator"))
-        #expect(invocation.arguments.contains("Ada"))
-        #expect(invocation.arguments.contains("--volume-number"))
+        #expect(invocation.arguments.contains("--narrator=Ada"))
+        #expect(invocation.arguments.contains("--volume-number=2"))
     }
 
     @Test func defaultsAndRoundtrip() throws {

@@ -56,25 +56,35 @@ public struct AudioSettings: Codable, Equatable, Sendable {
             ?? defaults.maxDurationHours
         useParallelEncoding = (try? values.decode(Bool.self, forKey: .useParallelEncoding))
             ?? defaults.useParallelEncoding
-        importWorkerLimit = (try? values.decode(Int.self, forKey: .importWorkerLimit)) ?? 4
+        importWorkerLimit = (try? values.decode(Int.self, forKey: .importWorkerLimit))
+            ?? defaults.importWorkerLimit
         workerLimit = try? values.decodeIfPresent(Int.self, forKey: .workerLimit)
-        analyzeLoudness = (try? values.decode(Bool.self, forKey: .analyzeLoudness)) ?? false
-        normalizeLoudness = (try? values.decode(Bool.self, forKey: .normalizeLoudness)) ?? false
+        analyzeLoudness = (try? values.decode(Bool.self, forKey: .analyzeLoudness))
+            ?? defaults.analyzeLoudness
+        normalizeLoudness = (try? values.decode(Bool.self, forKey: .normalizeLoudness))
+            ?? defaults.normalizeLoudness
         isVerbose = (try? values.decode(Bool.self, forKey: .isVerbose)) ?? defaults.isVerbose
     }
 
-    public static func isValidBitrate(_ value: String) -> Bool {
-        guard value.range(of: "^[0-9]+k?$", options: .regularExpression) != nil else {
-            return false
-        }
+    /// Der Bitratenstring als Bit pro Sekunde, oder `nil`, wenn er nicht der
+    /// dokumentierten Form `<zahl>[k]` entspricht. Einzige Umrechnungsstelle:
+    /// Die Vorschau hatte eine eigene Fassung mit `replacingOccurrences(of: "k")`
+    /// und einem Force-Unwrap, die bei jeder Erweiterung des Formats gebrochen
+    /// wäre.
+    public var bitsPerSecond: Int? { Self.bitsPerSecond(bitrate) }
+
+    static func bitsPerSecond(_ value: String) -> Int? {
+        guard value.range(of: "^[0-9]+k?$", options: .regularExpression) != nil else { return nil }
         let digits = value.hasSuffix("k") ? String(value.dropLast()) : value
-        guard let number = Int(digits), number > 0 else { return false }
-        if value.hasSuffix("k") {
-            let bitsPerSecond = number.multipliedReportingOverflow(by: 1_000)
-            return !bitsPerSecond.overflow
-                && (8_000...320_000).contains(bitsPerSecond.partialValue)
-        }
-        return (8_000...320_000).contains(number)
+        guard let number = Int(digits), number > 0 else { return nil }
+        guard value.hasSuffix("k") else { return number }
+        let scaled = number.multipliedReportingOverflow(by: 1_000)
+        return scaled.overflow ? nil : scaled.partialValue
+    }
+
+    public static func isValidBitrate(_ value: String) -> Bool {
+        guard let bits = bitsPerSecond(value) else { return false }
+        return (8_000...320_000).contains(bits)
     }
 
     /// Korrupte oder manuell bearbeitete Persistenz darf keine ungültigen
