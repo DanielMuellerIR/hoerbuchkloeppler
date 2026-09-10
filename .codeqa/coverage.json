@@ -6,7 +6,7 @@
     "token_budget": 3000000,
     "status": "active",
     "started_at": "2026-09-10T10:16:35+02:00",
-    "tokens_spent": 126258
+    "tokens_spent": 320423
   },
   "campaign_history": [
     {
@@ -128,42 +128,21 @@
       "risk": "critical",
       "priority": 2,
       "reason": "Datenintegrität, externe Prozesse, Parallelität, Abbruch und atomare Ausgabedateien",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260903T102818420748+0200",
-        "completed_at": "2026-09-03T10:52:26+02:00",
-        "observed_head": "ed4227b33129590125968fd4433d082e9c5179e8",
-        "content_sha256": "d34acc4d5933b445c6ca4ff70c46d81fba76c5ef49b00f9ff92a44c7dfe35f36",
-        "file_count": 2,
-        "review": "delta-plus-boundaries",
-        "outcome": "reviewed-clean",
-        "summary": "Nachbuchung des Querschnitts-Diffs: vier Fristschleifen durch ProcessTerminator.wait ersetzt, Testprozess auf Schlafschleife umgestellt — beides in diesem Lauf verifiziert",
-        "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 201/201 passed"
-        ]
-      },
-      "pending_paths": [
-        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift",
-        "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/FFmpegWrapperTests.swift",
-        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ProcessTermination.swift",
-        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/OutputStaging.swift",
-        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionPlan.swift",
-        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegArguments.swift",
-        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/LoudnessMeasurement.swift"
-      ],
-      "active_run": {
         "campaign_id": "20260910T101635358055+0200",
-        "started_at": "2026-09-10T10:40:14+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": [
-          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift",
-          "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/FFmpegWrapperTests.swift",
-          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ProcessTermination.swift",
-          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/OutputStaging.swift",
-          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionPlan.swift",
-          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegArguments.swift",
-          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/LoudnessMeasurement.swift"
+        "completed_at": "2026-09-10T11:14:09+02:00",
+        "observed_head": "0b01cbc48e858e72aa5cc223a59808ad1406b77e",
+        "content_sha256": "28e540862e865661937e3b910c1fb13158ef2c755db072b1a60a4427ef7a6cb5",
+        "file_count": 7,
+        "review": "delta-plus-boundaries",
+        "outcome": "improved",
+        "summary": "Acht Korrektheitsfunde behoben, darunter drei mit Datenverlust- oder Blockadefolge: die wirkungslose Leerheitsprüfung des Cleanup-Ordners (dup teilt den Verzeichnis-Offset), das Verwerfen der fertigen Ausgabe nach einem Finder-Tag an der Altdatei, und der Totalverlust eines Laufs durch eine fehlgeschlagene rein informative Lautheitsanalyse. Dazu toter Code entfernt und die dokumentierte Lautheits-Testlücke über eine Testnaht geschlossen.",
+        "tests": [
+          "swift test -Xswiftc -warnings-as-errors: 245/245 passed",
+          "test_scripts.sh: passed",
+          "test_project_cli.py: passed (exit 0)",
+          "xcodebuild -scheme Hörbuchklöppler Debug: BUILD SUCCEEDED"
         ]
       }
     },
@@ -813,9 +792,15 @@
         "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ReviewFixTests.swift"
       ],
       "priority": 3,
-      "state": "pending",
+      "state": "in_progress",
       "noted_at": "2026-09-10T10:58:25+02:00",
-      "campaign_id": "20260910T101635358055+0200"
+      "campaign_id": "20260910T101635358055+0200",
+      "started_at": "2026-09-10T11:14:17+02:00",
+      "active_run": {
+        "campaign_id": "20260910T101635358055+0200",
+        "started_at": "2026-09-10T11:14:17+02:00",
+        "observed_head": "0b01cbc48e858e72aa5cc223a59808ad1406b77e"
+      }
     }
   ]
 }
