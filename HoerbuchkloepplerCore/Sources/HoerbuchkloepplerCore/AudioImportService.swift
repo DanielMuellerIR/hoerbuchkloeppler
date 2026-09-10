@@ -12,23 +12,19 @@ public struct ImportAnalysisMetrics: Sendable, Codable {
     public var chapterProcessRequests = 0
 }
 
-struct ImportSourceIdentity: Equatable, Sendable {
-    let device: dev_t
-    let inode: ino_t
-    let size: off_t
-    let modifiedSeconds: Int
-    let modifiedNanoseconds: Int
+/// Der Importdienst benutzt denselben Snapshot-Typ wie Staging und Projektformat.
+/// Vorher hatte er eine eigene Fassung mit einer vierten Feldmenge.
+typealias ImportSourceIdentity = FileSystemIdentity
 
-    init?(_ url: URL) {
+extension FileSystemIdentity {
+    /// Folgt Symlinks: Der Importdienst vergleicht den sichtbaren Pfad und die
+    /// aufgelöste Lese-URL gegen dieselbe Zieldatei.
+    init?(followingSymlink url: URL) {
         var info = stat()
         guard url.withUnsafeFileSystemRepresentation({ path in
             path.map { fstatat(AT_FDCWD, $0, &info, 0) } ?? -1
         }) == 0 else { return nil }
-        device = info.st_dev
-        inode = info.st_ino
-        size = info.st_size
-        modifiedSeconds = info.st_mtimespec.tv_sec
-        modifiedNanoseconds = info.st_mtimespec.tv_nsec
+        self.init(stat: info)
     }
 }
 
@@ -41,7 +37,8 @@ struct ImportedSourceAnalysis: @unchecked Sendable {
     let bookMetadata: [String: String]
 
     func isCurrent() -> Bool {
-        ImportSourceIdentity(file.url) == identity && ImportSourceIdentity(file.sourceURL) == identity
+        ImportSourceIdentity(followingSymlink: file.url)?.matchesContentSnapshot(identity) == true
+            && ImportSourceIdentity(followingSymlink: file.sourceURL)?.matchesContentSnapshot(identity) == true
     }
 }
 
@@ -75,8 +72,8 @@ public final class AudioImportService: @unchecked Sendable {
         // die Quelle zwischen Scan und Analyse getauscht worden. Die drei
         // späteren Prüfungen melden denselben Sachverhalt als `.sourceChanged`;
         // „Audioanalyse fehlgeschlagen" schickte den Nutzer in die falsche Ecke.
-        guard let identity = ImportSourceIdentity(file.readURL),
-              ImportSourceIdentity(file.source) == identity else {
+        guard let identity = ImportSourceIdentity(followingSymlink: file.readURL),
+              ImportSourceIdentity(followingSymlink: file.source)?.matchesContentSnapshot(identity) == true else {
             return .failure(AudioImportFailure(sourceURL: file.source, reason: .sourceChanged))
         }
         let asset = AVURLAsset(url: file.readURL)
@@ -86,8 +83,8 @@ public final class AudioImportService: @unchecked Sendable {
                 lock.withLock { counters.assetLoadRequests += 1 }
                 let (tracks, duration, metadata) = try await asset.load(.tracks, .duration, .metadata)
                 guard !Task.isCancelled else { return .cancelled }
-                guard ImportSourceIdentity(file.readURL) == identity,
-                      ImportSourceIdentity(file.source) == identity else {
+                guard ImportSourceIdentity(followingSymlink: file.readURL)?.matchesContentSnapshot(identity) == true,
+                      ImportSourceIdentity(followingSymlink: file.source)?.matchesContentSnapshot(identity) == true else {
                     return .failure(AudioImportFailure(sourceURL: file.source, reason: .sourceChanged))
                 }
                 guard let audioTrack = tracks.first(where: { $0.mediaType == .audio }) else {
@@ -100,8 +97,8 @@ public final class AudioImportService: @unchecked Sendable {
                 let title = await AudioFile.findRobustTag(for: "title", in: metadata)
                     ?? file.source.deletingPathExtension().lastPathComponent
                 guard !Task.isCancelled else { return .cancelled }
-                guard ImportSourceIdentity(file.readURL) == identity,
-                      ImportSourceIdentity(file.source) == identity else {
+                guard ImportSourceIdentity(followingSymlink: file.readURL)?.matchesContentSnapshot(identity) == true,
+                      ImportSourceIdentity(followingSymlink: file.source)?.matchesContentSnapshot(identity) == true else {
                     return .failure(AudioImportFailure(sourceURL: file.source, reason: .sourceChanged))
                 }
                 var bookMetadata = await Self.bookMetadata(from: metadata)
@@ -113,8 +110,8 @@ public final class AudioImportService: @unchecked Sendable {
                     }
                 }
                 guard !Task.isCancelled else { return .cancelled }
-                guard ImportSourceIdentity(file.readURL) == identity,
-                      ImportSourceIdentity(file.source) == identity else {
+                guard ImportSourceIdentity(followingSymlink: file.readURL)?.matchesContentSnapshot(identity) == true,
+                      ImportSourceIdentity(followingSymlink: file.source)?.matchesContentSnapshot(identity) == true else {
                     return .failure(AudioImportFailure(sourceURL: file.source, reason: .sourceChanged))
                 }
                 let analysis = ImportedSourceAnalysis(

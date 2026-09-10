@@ -580,16 +580,12 @@ public struct FFmpegWrapper {
         }
 
         var after = stat()
+        // Gemeinsames Inhaltsprädikat statt eines eigenen Feldvergleichs; die
+        // gelesene Bytezahl gegen `st_size` bleibt als eigene Zusicherung daneben.
         guard data.count <= maximumCoverByteCount,
               data.count == Int(before.st_size),
               Darwin.fstat(descriptor, &after) == 0,
-              before.st_dev == after.st_dev,
-              before.st_ino == after.st_ino,
-              before.st_size == after.st_size,
-              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
-              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
-              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
-              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec,
+              FileSystemIdentity(stat: before).matchesContentSnapshot(FileSystemIdentity(stat: after)),
               !isCancelled(),
               let source = CGImageSourceCreateWithData(data as CFData, nil),
               CGImageSourceGetCount(source) > 0 else { return nil }

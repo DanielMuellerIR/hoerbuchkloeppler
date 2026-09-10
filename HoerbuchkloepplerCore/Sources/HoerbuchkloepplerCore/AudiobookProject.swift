@@ -181,13 +181,13 @@ public struct ProjectSource: Codable, Sendable {
         var digest = SHA256()
         while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty { digest.update(data: data) }
         var after = stat()
+        // Gemeinsames Inhaltsprädikat statt eines eigenen Feldvergleichs. Die
+        // frühere Fassung schloss die Statuszeit ein: Ein Finder-Tag während
+        // des minutenlangen Hashens einer großen Quelle ließ das Speichern mit
+        // „Quelle wurde während der Prüfung verändert" scheitern, obwohl der
+        // Inhalt unangetastet war.
         guard fstat(descriptor, &after) == 0,
-              before.st_dev == after.st_dev, before.st_ino == after.st_ino,
-              before.st_size == after.st_size,
-              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
-              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
-              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
-              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec else {
+              FileSystemIdentity(stat: before).matchesContentSnapshot(FileSystemIdentity(stat: after)) else {
             throw ProjectError.invalid("Quelle wurde während der Prüfung verändert: \(url.lastPathComponent)")
         }
         return digest.finalize().map { String(format: "%02x", $0) }.joined()

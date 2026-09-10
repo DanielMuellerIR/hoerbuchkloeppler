@@ -15,7 +15,10 @@ final class ProjectFingerprintStore: @unchecked Sendable {
         // Lesevorgang über die ganze Datei auslösen.
         if let cached = lock.withLock({ entries[url] }), cached.0.matchesContentSnapshot(identity) { return cached.1 }
         let hash = try ProjectSource.fingerprint(url)
-        guard FFmpegWrapper.fileSystemIdentity(at: url, followSymlink: true) == identity else {
+        // Wie überall: Nur eine Inhaltsänderung entwertet den Hash. Mit dem
+        // strengen `==` warf schon ein Finder-Tag während des Lesens.
+        guard FFmpegWrapper.fileSystemIdentity(at: url, followSymlink: true)?
+            .matchesContentSnapshot(identity) == true else {
             throw ProjectError.invalid("Quelle wurde während der Prüfung verändert.")
         }
         lock.withLock { entries[url] = (identity, hash) }

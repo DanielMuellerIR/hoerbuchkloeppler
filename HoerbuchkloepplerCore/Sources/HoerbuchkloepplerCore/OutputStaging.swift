@@ -44,26 +44,32 @@ struct FileSystemIdentity: Codable, Equatable, Sendable {
         statusNanoseconds = Int64(information.st_ctimespec.tv_nsec)
     }
 
-    /// Vergleicht nur die Felder, die sich beim Ändern des Datei-INHALTS
-    /// zwangsläufig mitändern: Volume, Inode, Typ, Größe und Änderungszeit.
-    /// Die Statuszeit (`st_ctime`) bleibt bewusst außen vor — sie steigt auch
-    /// bei reinen Metadaten-Operationen wie einem Finder-Tag, `chmod` oder
-    /// einem `xattr`, die den Inhalt nicht anfassen.
+    /// Vergleicht genau die Felder, die sich beim Ändern des Datei-INHALTS
+    /// zwangsläufig mitändern: Volume, Inode, Größe und Änderungszeit.
+    /// Bewusst NICHT dabei sind
+    /// - die Statuszeit `st_ctime`: Sie steigt auch bei einem Finder-Tag, einem
+    ///   `chmod` oder einem `xattr` durch Spotlight oder Time Machine;
+    /// - der Modus `st_mode`: Ein `chmod` ändert die Rechte, nicht den Inhalt.
+    ///   Wo der Dateityp zählt, steht daneben eine eigene `S_IFMT`-Prüfung.
+    ///
+    /// Das ist die EINE Antwort auf „ist das noch derselbe Datei-Snapshot?".
+    /// Vorher stand dieselbe Frage fünfmal mit vier verschiedenen Feldmengen im
+    /// Projekt, und die strengeren Fassungen verwarfen fertige Ausgaben und
+    /// brachen laufende Läufe wegen einer reinen Metadatenoperation ab.
     func matchesContentSnapshot(_ other: FileSystemIdentity) -> Bool {
         device == other.device
             && inode == other.inode
-            && mode == other.mode
             && size == other.size
             && modificationSeconds == other.modificationSeconds
             && modificationNanoseconds == other.modificationNanoseconds
     }
 
     /// Ein atomarer Rename aktualisiert auf manchen Volumes die Statuszeit des
-    /// verschobenen Eintrags. Für die Prüfung NACH `RENAME_SWAP` zählt deshalb
-    /// nur der Inhalts-Snapshot; die strengere Vorprüfung vergleicht weiterhin
-    /// alle Felder über `Equatable`.
+    /// verschobenen Eintrags. Für die Prüfung NACH `RENAME_SWAP` zählen deshalb
+    /// Inhalts-Snapshot und Dateityp, aber nicht die Statuszeit; die strengere
+    /// Vorprüfung vergleicht weiterhin alle Felder über `Equatable`.
     func matchesDisplacedEntry(_ other: FileSystemIdentity) -> Bool {
-        matchesContentSnapshot(other)
+        matchesContentSnapshot(other) && mode == other.mode
     }
 
     /// Verzeichnisgröße und Zeitstempel ändern sich bei jedem Kind-Eintrag.

@@ -6,7 +6,7 @@
     "token_budget": 3000000,
     "status": "active",
     "started_at": "2026-09-10T10:16:35+02:00",
-    "tokens_spent": 566082
+    "tokens_spent": 581980
   },
   "campaign_history": [
     {
@@ -130,18 +130,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260910T101635358055+0200",
-        "completed_at": "2026-09-10T11:14:09+02:00",
-        "observed_head": "0b01cbc48e858e72aa5cc223a59808ad1406b77e",
-        "content_sha256": "28e540862e865661937e3b910c1fb13158ef2c755db072b1a60a4427ef7a6cb5",
+        "completed_at": "2026-09-10T12:46:43+02:00",
+        "observed_head": "9e90183b09d00bb0b2076421087eb93c0899a0c9",
+        "content_sha256": "c9c55edeaba428169aca86f86e9e32c0e61835144749350ce080662c3fde666f",
         "file_count": 7,
         "review": "delta-plus-boundaries",
-        "outcome": "improved",
-        "summary": "Acht Korrektheitsfunde behoben, darunter drei mit Datenverlust- oder Blockadefolge: die wirkungslose Leerheitsprüfung des Cleanup-Ordners (dup teilt den Verzeichnis-Offset), das Verwerfen der fertigen Ausgabe nach einem Finder-Tag an der Altdatei, und der Totalverlust eines Laufs durch eine fehlgeschlagene rein informative Lautheitsanalyse. Dazu toter Code entfernt und die dokumentierte Lautheits-Testlücke über eine Testnaht geschlossen.",
+        "outcome": "reviewed-clean",
+        "summary": "Nachbuchung: Einziges Delta sind die drei FFMETADATA-Parsertests aus dem audio-analysis-Commit, die in FFmpegWrapperTests.swift liegen. Im selben Lauf geschrieben, Gegenprobe ohne Fix für zwei davon belegt rot.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 245/245 passed",
-          "test_scripts.sh: passed",
-          "test_project_cli.py: passed (exit 0)",
-          "xcodebuild -scheme Hörbuchklöppler Debug: BUILD SUCCEEDED"
+          "swift test -Xswiftc -warnings-as-errors: 252/252 passed"
         ]
       }
     },
@@ -267,26 +264,21 @@
       "risk": "high",
       "priority": 7,
       "reason": "Download-Integrität externer Werkzeuge und reproduzierbarer Core-, CLI- und App-Build",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260830T095802250952+0200",
-        "completed_at": "2026-08-30T09:59:36+02:00",
-        "observed_head": "3fe4c82a4dbf3592d7d8d5d1d7e574d1fdbb794a",
-        "content_sha256": "dd3b754093e311514ca8c286bfbb6829df73d237be288132e961fe207d70845d",
+        "campaign_id": "20260910T101635358055+0200",
+        "completed_at": "2026-09-10T12:46:05+02:00",
+        "observed_head": "9e90183b09d00bb0b2076421087eb93c0899a0c9",
+        "content_sha256": "c95a9fdbca12fccee300871b6d2d61a3303d471ae3f1a67f2df75077b4d5b5f2",
         "file_count": 5,
         "review": "delta-plus-boundaries",
-        "outcome": "reviewed-clean",
-        "summary": "Build-, Version-, Helper- und Paketgrenzen geprüft: build.sh bezieht die App-Version weiterhin erst beim App-Build aus dem gemeinsamen strikten Leser; Abhängigkeitsarchive und Binaries bleiben SHA-gebunden; beide SwiftPM-Lockdateien binden swift-argument-parser 1.7.1 an dieselbe Revision (unterschiedliche Lockformat-Versionen sind werkzeugbedingt). Der neue Helper kapselt Versions- und Prozesssnapshot-Verträge ohne globale Mutation.",
+        "outcome": "improved",
+        "summary": "Delta war ein Versionsstempel; build.sh und script-helpers.sh sind seit dem Review vom 2026-08-30 unverändert und ohne Korrektheitsbefund (beide Prüfsummen je Abhängigkeit, Subshells mit eigenem set -euo pipefail und Traps, geführter Mount-Abbau, Startprüfung beider Binaries). Der Fund lag an der Grenze: test_scripts.sh prüfte keines der sieben Shell-Skripte, nicht einmal auf Syntax, und notary-profile.sh war gar nicht eingebunden. Jetzt bash -n über alle sieben, Gegenprobe mit künstlichem Syntaxfehler belegt. Weiterhin ungetestet und im Bericht benannt: die Beenden-und-Ersetzen-Sequenz von install.sh, die DMG- und Notarisierungskette von release.sh und die Innen-nach-außen-Reihenfolge von sign-bundle.sh.",
         "tests": [
-          "Vollständiger ./build.sh-Lauf erzeugte Release-CLI und ad-hoc-signierte App 1.3.1; Plist-Version 1.3.1 und Projektdatei per plutil bestätigt; test_scripts.sh, bash -n und build.sh --help bestanden."
+          "test_scripts.sh: passed; Gegenprobe mit Syntaxfehler in notary-profile.sh meldet Datei und Zeile",
+          "./build.sh --deps-only: beide Prüfsummen und beide Binärstarts bestätigt",
+          "swift test -Xswiftc -warnings-as-errors: 252/252 passed"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260910T101635358055+0200",
-        "started_at": "2026-09-10T12:44:20+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
@@ -335,18 +327,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260910T101635358055+0200",
-        "completed_at": "2026-09-10T12:26:57+02:00",
-        "observed_head": "6af7d732859f8ccec64488d805e6534ec841a7d4",
-        "content_sha256": "f35d9e780a5ae9a450400e293229d98b2f98d8eacde4adbb12dd5e0a9a138b07",
+        "completed_at": "2026-09-10T12:46:05+02:00",
+        "observed_head": "9e90183b09d00bb0b2076421087eb93c0899a0c9",
+        "content_sha256": "82b75019dce818fd3f71c1a5d3e25ab2f0832b27fc1ec7915ed4e9cc2ac70ca1",
         "file_count": 13,
         "review": "delta-plus-boundaries",
-        "outcome": "improved",
-        "summary": "Elf Zusicherungen geschärft, die eine echte Regression nicht gesehen hätten, darunter zwei Lücken, die diese Kampagne selbst verursacht hatte (Cover-Unterdrückung nach dem Handoff-Umbau, Abbruchbereinigung nach der Umstellung auf die Hintergrundqueue). LoudnessTests übersprang sich ohne gebündeltes ffmpeg still und nahm dabei die gesamte Abdeckung des echten Encodings mit. Skript-Gates: test_scripts.sh meldet jetzt, welche Prüfung brach; die CLI-Matrix läuft mit eigenem TMPDIR statt gegen den geteilten Systemordner; das Terminalskript räumt seine 86 MB auf. Doku richtiggestellt: test_scripts.sh ist kein Build-/Install-/Release-Wächter, und das reale Encoding ist entgegen der bisherigen Aussage abgedeckt. Offen und bewusst nicht angefasst: der FIFO-Test in ProjectTests würde bei einer Regression hängen statt fehlzuschlagen (Swift Testing hat kein Zeitlimit je Test), und das SIGINT-Timing der CLI-Matrix hängt an einem festen 150-ms-Schlaf.",
+        "outcome": "reviewed-clean",
+        "summary": "Nachbuchung: test_scripts.sh hat im build-system-Commit die Syntaxprüfung aller sieben Shell-Skripte bekommen, im selben Lauf geschrieben und mit Gegenprobe belegt.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 252/252 passed",
-          "test_scripts.sh: passed, Gegenprobe mit verfälschter Erwartung meldet die Stelle",
-          "test_project_cli.py, tests/verify_cli_matrix.py, tests/verify_cli_terminal.py, tests/verify_audio_transitions.py: passed",
-          "xcodebuild -scheme Hörbuchklöppler Debug: BUILD SUCCEEDED"
+          "test_scripts.sh: passed"
         ]
       }
     },
@@ -397,16 +386,17 @@
       "reason": "App-Ziel, Build-Einstellungen und Paket-Verknüpfung im Xcode-Projekt",
       "state": "completed",
       "last_run": {
-        "campaign_id": "20260830T095802250952+0200",
-        "completed_at": "2026-08-30T10:01:17+02:00",
-        "observed_head": "457f37694bb22fe57f9c5bc92c1238632b9b2b0e",
-        "content_sha256": "e3daff35389de9fb144696c7e65a028ada14ad92c0d39a308e335e452ac56bd8",
+        "campaign_id": "20260910T101635358055+0200",
+        "completed_at": "2026-09-10T12:46:43+02:00",
+        "observed_head": "9e90183b09d00bb0b2076421087eb93c0899a0c9",
+        "content_sha256": "49a5346dc3b6b70a1e7bc0a81e1eae4ba60f106ccf31332dfcb1ed6af7e55f94",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Xcode-Delta und Paketgrenzen geprüft: Debug und Release tragen dieselbe MARKETING_VERSION 1.3.1; info.plist bindet CFBundleShortVersionString daran und behält den unveränderten Buildzähler-Vertrag. Projektstruktur bleibt gültig, beide SwiftPM-Lockdateien zeigen auf dieselbe ArgumentParser-Version und Revision.",
+        "summary": "Delta sind ausschließlich die Versionsstempel dieser Kampagne: MARKETING_VERSION steht in Debug und Release identisch auf 1.4.16 und stimmt mit der VERSION-Datei überein — genau das prüft der Wächter in test_scripts.sh. Package.resolved unverändert.",
         "tests": [
-          "plutil-Projektprüfung bestanden; vollständiger xcodebuild über build.sh bestanden; gebautes Bundle meldet CFBundleShortVersionString 1.3.1 und CFBundleVersion 1."
+          "test_scripts.sh: passed (Abgleich VERSION gegen MARKETING_VERSION)",
+          "xcodebuild -scheme Hörbuchklöppler Debug: BUILD SUCCEEDED"
         ]
       }
     }
@@ -764,9 +754,15 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudiobookProject.swift"
       ],
       "priority": 2,
-      "state": "pending",
+      "state": "in_progress",
       "noted_at": "2026-09-10T10:39:25+02:00",
-      "campaign_id": "20260910T101635358055+0200"
+      "campaign_id": "20260910T101635358055+0200",
+      "started_at": "2026-09-10T12:47:17+02:00",
+      "active_run": {
+        "campaign_id": "20260910T101635358055+0200",
+        "started_at": "2026-09-10T12:47:17+02:00",
+        "observed_head": "9e90183b09d00bb0b2076421087eb93c0899a0c9"
+      }
     },
     {
       "id": "flaky-process-join-under-load",

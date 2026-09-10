@@ -1545,6 +1545,52 @@ struct ConversionFileOwnershipTests {
         #expect(identity.mode & mode_t(0o777) == mode_t(0o644))
     }
 
+    @Test("Der Datei-Snapshot trennt Inhalt, Dateityp und Statuszeit")
+    func fileSystemIdentityPredicatesSeparateContentFromMetadata() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("Quelle.m4b")
+        try Data("Inhalt".utf8).write(to: file)
+        let baseline = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: file, followSymlink: false)
+        )
+
+        // Ein `chmod` ändert Rechte und Statuszeit, nicht den Inhalt.
+        #expect(chmod(file.path, 0o600) == 0)
+        let afterChmod = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: file, followSymlink: false)
+        )
+        #expect(baseline.matchesContentSnapshot(afterChmod))
+        #expect(!baseline.matchesDisplacedEntry(afterChmod))
+        #expect(baseline != afterChmod)
+
+        // Ein Finder-Tag hebt allein die Statuszeit.
+        var tag: [UInt8] = [0x41]
+        #expect(setxattr(
+            file.path,
+            "com.apple.metadata:_kMDItemUserTags",
+            &tag,
+            tag.count,
+            0,
+            0
+        ) == 0)
+        let afterTag = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: file, followSymlink: false)
+        )
+        #expect(afterChmod.matchesContentSnapshot(afterTag))
+        #expect(afterChmod.matchesDisplacedEntry(afterTag))
+        #expect(afterChmod != afterTag)
+
+        // Neuer Inhalt schlägt in allen drei Prädikaten durch.
+        try Data("Anderer, längerer Inhalt".utf8).write(to: file)
+        let afterWrite = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: file, followSymlink: false)
+        )
+        #expect(!afterTag.matchesContentSnapshot(afterWrite))
+        #expect(!afterTag.matchesDisplacedEntry(afterWrite))
+        #expect(afterTag != afterWrite)
+    }
+
     @Test("Ein Finder-Tag an der Altdatei kostet nicht die fertige Ausgabe")
     func metadataOnlyDestinationChangeStillCommits() throws {
         let directory = try conversionTestDirectory()
