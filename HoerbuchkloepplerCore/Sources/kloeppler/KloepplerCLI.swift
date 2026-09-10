@@ -337,8 +337,17 @@ struct KloepplerCLI: AsyncParsableCommand {
     // erst später eine kryptische ffmpeg-Meldung — wichtig für den Skript-/Agent-Einsatz.
     func validate() throws {
         if let importWorkers, !(1...8).contains(importWorkers) { throw ValidationError("--import-workers erwartet 1–8.") }
-        if let language { _ = try BookMetadata.outputLanguage(language) }
-        if let volumeNumber { try BookMetadata.validateVolumeNumber(volumeNumber) }
+        // Die Kernprüfungen werfen `ProjectError`, das ArgumentParser als
+        // gewöhnlichen Fehler behandelt — Exit 1 statt des Usage-Codes 64, den
+        // jede andere Optionsprüfung hier liefert. Deshalb umschlüsseln.
+        if let language {
+            do { _ = try BookMetadata.outputLanguage(language) }
+            catch { throw ValidationError(error.localizedDescription) }
+        }
+        if let volumeNumber {
+            do { try BookMetadata.validateVolumeNumber(volumeNumber) }
+            catch { throw ValidationError(error.localizedDescription) }
+        }
         guard ["text", "json"].contains(format) else { throw ValidationError("--format erwartet text oder json.") }
         guard (folderPath != nil ? 1 : 0) + (project != nil ? 1 : 0) + (!files.isEmpty ? 1 : 0) == 1 else {
             throw ValidationError("Genau einen Ordner, --project oder eine Folge von --file angeben.")
@@ -463,7 +472,14 @@ struct KloepplerCLI: AsyncParsableCommand {
 
         func emitInterruptIfNeeded() {
             guard let receivedSignal = interruptState.takeUnannouncedSignal() else { return }
-            print("⚠️ \(signalName(receivedSignal)) empfangen. Lauf wird geordnet abgebrochen …")
+            let message = "⚠️ \(signalName(receivedSignal)) empfangen. Lauf wird geordnet abgebrochen …"
+            // Im Textmodus gehört das Terminal dem Renderer; ein direktes
+            // `print` umginge dessen Buchhaltung über die Blockzeilen. Ein
+            // sichtbarer Fehler ließ sich damit nicht nachstellen (die Schleife
+            // endet nach dem Abbruch ohne weiteren Redraw), die Ausnahme von
+            // der Regel bleibt aber unnötig — tests/verify_cli_terminal.py
+            // prüft das Endbild jetzt maschinell.
+            if machineOutput { writeStandardError(message) } else { renderer.emitLog(message) }
         }
 
         func throwIfInterrupted() throws {
@@ -478,6 +494,9 @@ struct KloepplerCLI: AsyncParsableCommand {
         // akzeptierter Signal-Handler auch gegen einen gleichzeitig entstehenden
         // Validierungs- oder Importfehler.
         var executionError: Error?
+        // Merkt, ob `--inspect` seinen Prüfbericht schon ausgegeben hat. Nur
+        // wenn nicht, tritt am Ende ein terminales Ereignis an seine Stelle.
+        var emittedInspectionReport = false
         do {
             session.beginPreparation()
             try throwIfInterrupted()
@@ -597,8 +616,15 @@ struct KloepplerCLI: AsyncParsableCommand {
             try throwIfInterrupted()
 
             // Sichtbarer Linkname bestimmt wie bisher den Fallback-Titel; nur das
-            // Lesen selbst verwendet den aufgelösten physischen Ordner.
-            let rawTitle = session.title.isEmpty ? sourceURL.lastPathComponent : session.title
+            // Lesen selbst verwendet den aufgelösten physischen Ordner. Bei
+            // `--file` und `--project` ist die Quelle eine Datei: Ihre Endung
+            // gehört nicht in den Buchtitel, sonst hieße die Ausgabe
+            // „01.wav.m4b" statt „01.m4b".
+            let sourceIsFile = options.project != nil || !options.files.isEmpty
+            let fallbackTitle = sourceIsFile
+                ? sourceURL.deletingPathExtension().lastPathComponent
+                : sourceURL.lastPathComponent
+            let rawTitle = session.title.isEmpty ? fallbackTitle : session.title
             let finalTitle = KloepplerCLI.sanitizeFilename(rawTitle)
             let outputFile = try resolveOutputFile(
                 option: output,
@@ -626,7 +652,10 @@ struct KloepplerCLI: AsyncParsableCommand {
             }
             session.refreshProjectSourceIssues()
             if options.inspect {
-                if machineOutput { try emitJSON(await InspectionReport(session: session, outputs: conversionPlan.outputURLs)) }
+                if machineOutput {
+                    try emitJSON(await InspectionReport(session: session, outputs: conversionPlan.outputURLs))
+                    emittedInspectionReport = true
+                }
                 else {
                     print("\(session.audioFiles.count) Kapitel, \(session.audioFiles.reduce(0) { $0 + $1.duration }) Sekunden")
                     conversionPlan.outputURLs.forEach { print($0.path) }
@@ -660,7 +689,10 @@ struct KloepplerCLI: AsyncParsableCommand {
                     } else if interruptState.wasReceived {
                         try throwIfInterrupted()
                     } else {
-                        print("Vorgang abgebrochen.")
+                        // Wie jede andere Abbruch- und Fehlermeldung dieser
+                        // Datei: auf stderr, damit sie umgeleitete Nutzdaten
+                        // auf stdout nicht verunreinigt.
+                        writeStandardError("Vorgang abgebrochen.")
                         throw ExitCode(2)
                     }
                 }
@@ -755,7 +787,10 @@ struct KloepplerCLI: AsyncParsableCommand {
         // zeitlich hinterherlaufen.
         let receivedSignal = interruptState.finishExecution()
         emitInterruptIfNeeded()
-        if machineOutput && !options.inspect {
+        // `--inspect` gibt normalerweise seinen Prüfbericht als einzige
+        // JSON-Zeile aus. Scheitert es davor, blieb stdout bisher leer und ein
+        // Konsument bekam statt einer Fehlermeldung einen Parserfehler.
+        if machineOutput, !options.inspect || !emittedInspectionReport {
             let event = receivedSignal != nil ? "cancelled" : (executionError != nil ? "failed" : "finished")
             try emitJSON(RunReport(event: event, phase: session.conversionPhase, progress: session.progress, outputs: session.completedOutputURLs, success: receivedSignal == nil && executionError == nil && session.lastConversionSucceeded == true))
         }

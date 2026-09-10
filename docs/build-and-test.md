@@ -80,6 +80,9 @@ nicht nur „Build grün".
 ```bash
 cd HoerbuchkloepplerCore && swift test        # vollständige Core-/CLI-Suite
 cd .. && ./test_scripts.sh                    # Build-/Install-/Release-Wächter
+python3 test_project_cli.py                   # Projekt-CLI von Ende zu Ende
+python3 tests/verify_cli_matrix.py            # CLI-Abnahme: Optionen, Exit-Codes, Signale
+python3 tests/verify_cli_terminal.py          # ANSI-Endbild der CLI
 ```
 
 Deckt die reine Kernlogik ab: FFMETADATA-Escaping/Parsing, Kapitel-Arithmetik
@@ -98,7 +101,17 @@ import` drankommt. Das ist Absicht, kein vergessenes `private`.
 
 ## Terminal-Ausgabe prüfen (ohne vor dem Terminal zu sitzen)
 
-Die CLI zeichnet den Pacman-Statusblock per ANSI-Cursor-Sprüngen neu. Ob das
+```bash
+python3 tests/verify_cli_terminal.py   # läuft ~15 s, braucht ffmpeg + swift build
+```
+
+Das Skript erledigt das frühere Handrezept maschinell: Es startet die CLI an
+einem Pseudoterminal, unterbricht sie mit SIGINT, sobald der Fortschrittsbalken
+erscheint, spielt den Strom durch einen Mini-Emulator und prüft, dass jede
+Logzeile im Endbild steht und der Exit-Code 130 ist.
+
+Das Rezept dahinter, falls es von Hand nachvollzogen werden soll: Die CLI
+zeichnet den Pacman-Statusblock per ANSI-Cursor-Sprüngen neu. Ob das
 Bild stimmt, sieht man einer `> datei.raw`-Mitschrift nicht an — die
 Escape-Sequenzen müssen erst „gerendert" werden:
 

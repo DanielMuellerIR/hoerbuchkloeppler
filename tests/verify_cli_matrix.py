@@ -28,6 +28,19 @@ def decoded(path):
 
 def inspect(path):return json.loads(run(['--file',path,'--inspect','--format','json']).stdout)
 print('ROOT',ROOT,flush=True)
+# Argumentprüfung: ungültige Werte müssen als Usage-Fehler (64) enden, nicht als
+# gewöhnlicher Fehler. Bisher war davon keine einzige Grenze getestet.
+(ROOT/'leer').mkdir()
+for bad in [['--bitrate','999k'],['--bitrate','7k'],['--bitrate','48'],['--samplerate','7999'],
+            ['--samplerate','48001'],['--mode','bogus'],['--max-duration','-1'],['--workers','0'],
+            ['--import-workers','0'],['--mono','--stereo'],['--no-cover','--cover',ROOT/'cover.png'],
+            ['--language','xx1'],['--volume-number','70000']]:
+    run([ROOT/'leer',*bad],64)
+# Gültige Randwerte dürfen NICHT abgelehnt werden; sie scheitern erst am leeren
+# Ordner (Exit 1), was die Grenzen von der Ordnerprüfung trennt.
+for good in [['--bitrate','8k'],['--bitrate','320k'],['--samplerate','8000'],['--samplerate','48000']]:
+    run([ROOT/'leer',*good],1)
+print('usage exits OK',flush=True)
 for index in [1,2]:
     tool('-f','lavfi','-i','anullsrc=r=8000:cl=mono','-t','1801','-c:a','flac','-metadata',f'title=Kapitel {index}',ROOT/f'{index}.flac')
 tool('-f','lavfi','-i','color=c=blue:s=64x64','-frames:v','1','-threads','1',ROOT/'cover.png')
@@ -90,5 +103,25 @@ abort(signal.SIGTERM,True)
 (ROOT/'bad.wav').write_bytes(b'not audio')
 p=run(['--file',ROOT/'bad.wav','--format','json','--output',ROOT/'bad.m4b'],1)
 events=[json.loads(l) for l in p.stdout.splitlines()];assert events[-1]['event']=='failed';assert not (ROOT/'bad.m4b').exists()
+# --inspect --format json gibt auch bei einem frühen Fehler genau eine JSON-Zeile
+# aus; sonst bekäme ein Konsument einen Parserfehler statt einer Diagnose.
+p=run(['--file',ROOT/'gibtsnicht.wav','--inspect','--format','json'],1)
+events=[json.loads(l) for l in p.stdout.splitlines()]
+assert len(events)==1 and events[0]['event']=='failed' and events[0]['success'] is False,events
+print('inspect failure json OK',flush=True)
+# Ohne --output benennt sich die Ausgabe nach dem Titel-Tag beziehungsweise dem
+# Quellnamen OHNE dessen Endung — nicht "1.flac.m4b".
+untagged=ROOT/'ohnetag';untagged.mkdir()
+tool('-f','lavfi','-i','anullsrc=r=8000:cl=mono','-t','1','-c:a','flac',untagged/'kapitel.flac')
+r=json.loads(run(['--file',untagged/'kapitel.flac','--inspect','--format','json']).stdout)
+assert [pathlib.Path(o).name for o in r['outputs']]==['kapitel.m4b'],r['outputs']
+# Vorhandene Zieldatei ohne --force und ohne Terminal: Abbruch mit Hinweis.
+(untagged/'kapitel.m4b').write_bytes(b'alt')
+p=run(['--file',untagged/'kapitel.flac'],1)
+assert b'--force' in p.stderr,p.stderr[-500:]
+assert (untagged/'kapitel.m4b').read_bytes()==b'alt'
+p=run(['--file',untagged/'kapitel.flac','--force','--bitrate','24k','--samplerate','8000'])
+assert (untagged/'kapitel.m4b').read_bytes()!=b'alt'
+print('default name and overwrite OK',flush=True)
 (ROOT/'report.json').write_text(json.dumps(REPORT,indent=2,ensure_ascii=False))
 print('VERIFIED',ROOT/'report.json',flush=True)

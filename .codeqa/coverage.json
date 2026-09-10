@@ -71,7 +71,9 @@
       "HoerbuchkloepplerCore/Package.resolved",
       "Hörbuchklöppler.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved",
       "script-helpers.sh",
-      "test_scripts.sh"
+      "test_scripts.sh",
+      "tests",
+      "test_project_cli.py"
     ],
     "exclusions": [
       {
@@ -99,18 +101,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260910T101635358055+0200",
-        "completed_at": "2026-09-10T10:39:58+02:00",
-        "observed_head": "0df6118e1ef1d1021007d08715761a13f703626a",
-        "content_sha256": "4891b20a70e2dc83474233bfc48cf57bdc5ca910adf28ed0da0e8fef8611be93",
+        "completed_at": "2026-09-10T11:15:18+02:00",
+        "observed_head": "990a704dc89bf73b167bf9e10e226c161cce9ce3",
+        "content_sha256": "50a89e4c41589e5b07b5c0b0c70b7ca2cf6b60efb845c0f6a3cfb59f15b1b32a",
         "file_count": 4,
         "review": "delta-plus-boundaries",
-        "outcome": "improved",
-        "summary": "Fünf Korrektheitsfunde behoben: klebender Fehlalarm 'Quelle wurde verändert' nach reiner Metadatenänderung, vergessene Felder beim Zurücksetzen des Laufzustands, Abbruchbilanz von loadAudioFiles, verlorene Cover-Suche bei leerem Import-Batch, stilles Abbrechen von saveProjectAsync/openProjectAsync. Dazu Cover-Suche und Metadaten-Prädikat je an einer Stelle zusammengeführt.",
+        "outcome": "reviewed-clean",
+        "summary": "Nachbuchung des Bereichs-Deltas aus dem conversion-engine-Commit: einziger Zusatz ist ConversionRunState.init(rejectedWith:), im selben Lauf geschrieben und über die Ablehnungspfade in FFmpegWrapper mitverifiziert.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 241/241 passed",
-          "test_scripts.sh: passed",
-          "test_project_cli.py: passed (exit 0)",
-          "xcodebuild -scheme Hörbuchklöppler Debug: BUILD SUCCEEDED"
+          "swift test -Xswiftc -warnings-as-errors: 245/245 passed"
         ]
       }
     },
@@ -154,7 +153,7 @@
       "risk": "high",
       "priority": 3,
       "reason": "Signalbehandlung, Fehler-Exit-Codes, Eingabevalidierung und skriptfähige Ausgabe",
-      "state": "completed",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260903T102818420748+0200",
         "completed_at": "2026-09-03T10:39:32+02:00",
@@ -168,6 +167,13 @@
           "swift test -Xswiftc -warnings-as-errors: 201/201 passed",
           "CLI-Matrix: 3 --output-Zweige erfolgreich, 6 Fehlerpfade mit Exit 1 und unveränderter stderr-Meldung"
         ]
+      },
+      "active_run": {
+        "campaign_id": "20260910T101635358055+0200",
+        "started_at": "2026-09-10T11:15:30+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": []
       }
     },
     {
@@ -324,7 +330,9 @@
         "test_project_cli.py",
         "tests/verify_cli_matrix.py",
         "tests/verify_audio_transitions.py",
-        "tests/experiments/encoding_without_wav.py"
+        "tests/experiments/encoding_without_wav.py",
+        "tests/verify_cli_terminal.py",
+        "tests/verify_gui_import.swift"
       ],
       "risk": "medium",
       "priority": 9,
@@ -354,7 +362,9 @@
         "test_project_cli.py",
         "tests/verify_cli_matrix.py",
         "tests/verify_audio_transitions.py",
-        "tests/experiments/encoding_without_wav.py"
+        "tests/experiments/encoding_without_wav.py",
+        "tests/verify_cli_terminal.py",
+        "tests/verify_gui_import.swift"
       ]
     },
     {
@@ -792,14 +802,14 @@
         "HoerbuchkloepplerCore/Tests/HoerbuchkloepplerCoreTests/ReviewFixTests.swift"
       ],
       "priority": 3,
-      "state": "in_progress",
+      "state": "dismissed",
       "noted_at": "2026-09-10T10:58:25+02:00",
       "campaign_id": "20260910T101635358055+0200",
       "started_at": "2026-09-10T11:14:17+02:00",
-      "active_run": {
+      "dismissed": {
         "campaign_id": "20260910T101635358055+0200",
-        "started_at": "2026-09-10T11:14:17+02:00",
-        "observed_head": "0b01cbc48e858e72aa5cc223a59808ad1406b77e"
+        "dismissed_at": "2026-09-10T11:14:55+02:00",
+        "reason": "Kein eigener Querschnitts-Fund mehr: Der Fund entstand während des Bereichs conversion-engine und wurde dort mitbehoben. Commit 0b01cbc legt alle vier blockierenden Prozess-Joins der Tests auf eigene Threads statt auf DispatchQueue.global(); vorher fiel cancellationEscalatesAndThenCleansFiles in einem von drei Volllaufen aus, danach zehn Volllaufe hintereinander grün. Als Arbeitseinheit falsch angelegt, nicht inhaltlich verworfen."
       }
     }
   ]
