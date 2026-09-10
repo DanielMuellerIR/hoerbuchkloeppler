@@ -255,7 +255,10 @@ struct ProjectTests {
     func interruptedAsyncSaveReportsInsteadOfSilence() async throws {
         let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("Quelle.wav")
-        try Data([1, 2, 3]).write(to: source)
+        // Bewusst groß: Der Prewarm hasht die Quelle außerhalb des Main Actors,
+        // und dieser Test braucht dafür ein Zeitfenster, das deutlich über der
+        // Einplanungsdauer eines Main-Actor-Sprungs liegt.
+        try Data(count: 64 * 1024 * 1024).write(to: source)
         let session = ConversionSession(settings: AudioSettings())
         session.logSink = { _ in }
         session.audioFiles = [AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Kapitel")]

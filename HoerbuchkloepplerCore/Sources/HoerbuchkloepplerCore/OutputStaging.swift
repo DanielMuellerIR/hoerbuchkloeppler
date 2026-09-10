@@ -164,6 +164,27 @@ enum OutputDestinationSnapshot: Equatable, Sendable {
     case missing
     case existing(FileSystemIdentity)
     case inaccessible(errno: Int32)
+
+    /// Vergleicht zwei Aufnahmen desselben Pfades so, wie es für einen Lauf
+    /// zählt: Nur eine Änderung des INHALTS ist eine Änderung. Ein Finder-Tag,
+    /// ein `chmod` oder ein `xattr` durch Spotlight oder Time Machine hebt
+    /// allein die Statuszeit `st_ctime`. Mit dem strengen `==` verwarf
+    /// `commitStagedOutput` daraufhin das fertige Hörbuch, und ein Tag an einer
+    /// Quelldatei brach den laufenden Lauf ab. Der Preis ist bewusst: Wer den
+    /// Inhalt ändert und die Änderungszeit anschließend zurückstellt, wird
+    /// nicht mehr erkannt — das ist kein Angriffsmodell dieser Anwendung.
+    func matchesContent(of other: OutputDestinationSnapshot) -> Bool {
+        switch (self, other) {
+        case (.missing, .missing):
+            return true
+        case (.existing(let mine), .existing(let theirs)):
+            return mine.matchesContentSnapshot(theirs)
+        case (.inaccessible(let mine), .inaccessible(let theirs)):
+            return mine == theirs
+        default:
+            return false
+        }
+    }
 }
 
 enum ConversionOutputError: LocalizedError {
@@ -179,9 +200,12 @@ enum ConversionOutputError: LocalizedError {
     case stagingChanged(URL)
     case sourceChanged(URL)
     case sourceInaccessible(URL, Int32)
+    case noInputFiles
 
     var errorDescription: String? {
         switch self {
+        case .noInputFiles:
+            return "Keine Audiodateien zum Konvertieren vorhanden."
         case .destinationChanged(let url):
             return "Die Zieldatei wurde seit der Bestätigung verändert: \(url.path)"
         case .destinationInaccessible(let url, let number):
@@ -1372,7 +1396,8 @@ extension FFmpegWrapper {
         case .inaccessible(let number):
             throw ConversionOutputError.destinationInaccessible(finalURL, number)
         case .existing(let expectedIdentity):
-            guard captureSnapshot(of: finalURL) == .existing(expectedIdentity) else {
+            guard captureSnapshot(of: finalURL)
+                .matchesContent(of: .existing(expectedIdentity)) else {
                 throw ConversionOutputError.destinationChanged(finalURL)
             }
             guard expectedIdentity.mode & mode_t(S_IFMT) != mode_t(S_IFDIR) else {
@@ -1598,10 +1623,17 @@ extension FFmpegWrapper {
         return record.matches(current)
     }
 
+    /// Liest die Einträge des gebundenen Verzeichnisses. Bewusst `openat` auf
+    /// „." statt `dup`: `dup` teilt die Dateibeschreibung und damit den
+    /// Verzeichnis-Offset, ein zweiter Scan desselben Deskriptors stünde also
+    /// schon am Ende und lieferte immer eine leere Liste. `openat` bleibt an
+    /// den geprüften Deskriptor gebunden und löst keinen Namen neu auf.
     private static func directoryEntryNames(
         descriptor: Int32
     ) -> [String]? {
-        let duplicate = Darwin.dup(descriptor)
+        let duplicate = ".".withCString {
+            Darwin.openat(descriptor, $0, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        }
         guard duplicate >= 0, let stream = Darwin.fdopendir(duplicate) else {
             if duplicate >= 0 { _ = Darwin.close(duplicate) }
             return nil
@@ -1705,8 +1737,16 @@ extension FFmpegWrapper {
                 Darwin.unlinkat(descriptor, $0, 0)
             }) == 0 else { return false }
         }
-        for marker in [cleanupEntryIdentityFilename, tempOwnerFilename]
-        where names.contains(marker) {
+        // Erst erneut nachsehen, dann die Besitzmarken entfernen: Ist seit dem
+        // ersten Scan etwas Fremdes dazugekommen, sind das Recovery-Daten. Der
+        // Ordner bleibt dann samt `.owner-pid` stehen, sonst könnte ihn kein
+        // späterer Lauf je wieder als eigenen erkennen.
+        guard let remaining = directoryEntryNames(descriptor: descriptor),
+              Set(remaining).isSubset(of: [
+                  cleanupEntryIdentityFilename,
+                  tempOwnerFilename
+              ]) else { return false }
+        for marker in remaining {
             guard marker.withCString({
                 Darwin.unlinkat(descriptor, $0, 0)
             }) == 0 else { return false }

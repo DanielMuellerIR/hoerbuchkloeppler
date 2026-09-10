@@ -82,4 +82,104 @@ struct LoudnessTests {
             } else { Issue.record("Ausgabeanalyse fehlgeschlagen") }
         }
     }
+
+    /// Schließt die in `docs/build-and-test.md` benannten Lücken: reine Analyse
+    /// ohne Pegeländerung, Fehlschlag der Analyse und Fehlschlag der
+    /// Angleichung. Möglich wird das über die Testnaht `measureBookLoudness`.
+    @MainActor
+    private func runWithMeasurement(
+        folder: URL,
+        input: URL,
+        name: String,
+        settings: AudioSettings,
+        measure: @escaping @Sendable () throws -> LoudnessMeasurement
+    ) async -> (session: ConversionSession, output: URL, logs: [String]) {
+        let session = ConversionSession(settings: settings)
+        session.logSink = { _ in }
+        session.title = "Buch"
+        session.audioFiles = [
+            AudioFile(url: input, startTime: 0, duration: 2, chapterTitle: "A")
+        ]
+        let output = folder.appendingPathComponent("\(name).m4b")
+        let plan = FFmpegWrapper.makeConversionPlan(
+            files: session.audioFiles,
+            outputURL: output,
+            maxDurationHours: nil
+        )
+        guard case .started = FFmpegWrapper.convert(
+            session: session,
+            plan: plan,
+            measureBookLoudness: measure
+        ) else {
+            Issue.record("Start abgelehnt")
+            return (session, output, [])
+        }
+        for _ in 0..<1500 {
+            if !session.isConverting { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return (session, output, session.eventLogs.map(\.message))
+    }
+
+    @Test @MainActor func analysisOnlyKeepsLevelAndSurvivesFailure() async throws {
+        guard let ffmpeg = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else { return }
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("LoudnessPolicy-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let input = folder.appendingPathComponent("input.wav")
+        let generated = FFmpegWrapper.runCapturedProcess(
+            executableURL: ffmpeg,
+            arguments: [
+                "-nostdin", "-v", "error", "-f", "lavfi",
+                "-i", "sine=frequency=440:duration=2",
+                "-af", "volume=0.3", input.path
+            ],
+            timeout: 10
+        )
+        guard case .completed(let status, _) = generated, status == 0 else {
+            Issue.record("Fixture-Erzeugung fehlgeschlagen"); return
+        }
+        // Ein Messwert, der bei aktivierter Angleichung einen Gain ungleich 0
+        // ergäbe: -26,5 LUFS bei -3 dBTP.
+        let loud = LoudnessMeasurement(integratedLUFS: -26.5, truePeakDB: -3)
+        #expect(loud.gainDB != 0)
+
+        // 1. Reine Analyse: Der Messwert wird berichtet, der Pegel bleibt.
+        let analysed = await runWithMeasurement(
+            folder: folder, input: input, name: "analyse",
+            settings: AudioSettings(analyzeLoudness: true, normalizeLoudness: false),
+            measure: { loud }
+        )
+        #expect(analysed.session.lastConversionSucceeded == true)
+        #expect(FileManager.default.fileExists(atPath: analysed.output.path))
+        #expect(analysed.logs.contains { $0.contains("Analyse ohne Pegeländerung") })
+        #expect(!analysed.logs.contains { $0.contains("gemeinsamer Gain") })
+
+        // 2. Fehlgeschlagene reine Analyse: Die Auskunft entfällt, das Hörbuch
+        //    entsteht trotzdem.
+        let failedAnalysis = await runWithMeasurement(
+            folder: folder, input: input, name: "analyse-fehler",
+            settings: AudioSettings(analyzeLoudness: true, normalizeLoudness: false),
+            measure: { throw NSError(domain: "Test", code: 1) }
+        )
+        #expect(failedAnalysis.session.lastConversionSucceeded == true)
+        #expect(FileManager.default.fileExists(atPath: failedAnalysis.output.path))
+        #expect(failedAnalysis.logs.contains {
+            $0.contains("läuft ohne Messwert weiter")
+        })
+
+        // 3. Fehlgeschlagene Angleichung: Der Nutzer wollte die Pegeländerung,
+        //    ein Buch ohne sie wäre etwas anderes als das Bestellte.
+        let failedNormalisation = await runWithMeasurement(
+            folder: folder, input: input, name: "angleichung-fehler",
+            settings: AudioSettings(analyzeLoudness: false, normalizeLoudness: true),
+            measure: { throw NSError(domain: "Test", code: 1) }
+        )
+        #expect(failedNormalisation.session.lastConversionSucceeded == false)
+        #expect(!FileManager.default.fileExists(atPath: failedNormalisation.output.path))
+        #expect(failedNormalisation.logs.contains {
+            $0.contains("Lautheitsanalyse fehlgeschlagen:")
+        })
+    }
 }

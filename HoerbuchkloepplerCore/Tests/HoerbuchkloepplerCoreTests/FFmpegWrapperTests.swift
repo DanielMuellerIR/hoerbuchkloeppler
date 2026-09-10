@@ -858,19 +858,30 @@ struct SplitAudioFilesTests {
         #expect(groups.count == 1)
     }
 
-    @Test("Leere Liste: mit Maximaldauer null Gruppen, ohne eine leere Gruppe")
-    func emptyListIsAsymmetric() {
-        // Festgehaltenes Ist-Verhalten, bewusst asymmetrisch:
-        //   maxDurationHours == nil -> [[]]  (eine leere Gruppe, via early return)
-        //   maxDurationHours >  0   -> []    (keine Gruppe, da nur nicht-leere angehängt werden)
-        //
-        // Heute harmlos: convert() hat ein `guard !session.audioFiles.isEmpty`
-        // davor, die Funktion sieht also nie eine leere Liste. Fiele das Guard
-        // weg, liefe die Gruppen-Schleife in convert() null Mal durch und der
-        // Lauf meldete Erfolg, ohne je eine Datei erzeugt zu haben. Dieser Test
-        // schlägt an, falls sich eine der beiden Seiten unbemerkt ändert.
+    @Test("Eine leere Liste ergibt mit und ohne Maximaldauer null Gruppen")
+    func emptyListYieldsNoGroups() {
+        // Früher war das asymmetrisch: ohne Maximaldauer kam `[[]]` zurück, mit
+        // Maximaldauer `[]`. Der leere Plan lief damit in `validateConversionPlan`
+        // in einen sachfremden Zielfehler („Die Zieldatei wurde seit der
+        // Bestätigung verändert: /"). Beide Wege liefern jetzt `[]`, und der
+        // Plan meldet dafür `noInputFiles`.
         #expect(FFmpegWrapper.splitAudioFilesIfNeeded([], maxDurationHours: 10).isEmpty)
-        #expect(FFmpegWrapper.splitAudioFilesIfNeeded([], maxDurationHours: nil).count == 1)
+        #expect(FFmpegWrapper.splitAudioFilesIfNeeded([], maxDurationHours: nil).isEmpty)
+        // Ohne das Guard in `convert()` liefe die Gruppen-Schleife sonst null Mal
+        // durch und der Lauf meldete Erfolg, ohne je eine Datei erzeugt zu haben.
+        let empty = ConversionPlan(
+            groups: [],
+            outputURLs: [],
+            outputSnapshots: [],
+            outputDirectorySnapshots: [],
+            inputSnapshots: [:]
+        )
+        #expect {
+            try FFmpegWrapper.validateConversionPlan(empty)
+        } throws: { error in
+            (error as? ConversionOutputError)?.errorDescription
+                == "Keine Audiodateien zum Konvertieren vorhanden."
+        }
     }
 }
 
@@ -976,7 +987,7 @@ struct ProcessPipeReaderTests {
         try pipe.fileHandleForWriting.close()
         #expect(callbackStarted.wait(timeout: .now() + 1) == .success)
 
-        DispatchQueue.global().async {
+        Thread.detachNewThread {
             _ = reader.waitUntilEOF()
             waitFinished.signal()
         }
@@ -1113,7 +1124,7 @@ struct ProcessGroupOwnershipTests {
 
         #expect(context.cancel())
         let cleanupFinished = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        Thread.detachNewThread {
             context.finishAfterCancellationCleanup { _ in }
             cleanupFinished.signal()
         }
@@ -1477,6 +1488,39 @@ struct ConversionFileOwnershipTests {
             FFmpegWrapper.fileSystemIdentity(at: final, followSymlink: false)
         )
         #expect(identity.mode & mode_t(0o777) == mode_t(0o644))
+    }
+
+    @Test("Ein Finder-Tag an der Altdatei kostet nicht die fertige Ausgabe")
+    func metadataOnlyDestinationChangeStillCommits() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        try Data("alt".utf8).write(to: final)
+        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        try Data("fertiges Hörbuch".utf8).write(to: staging.url)
+
+        // Spotlight, Time Machine oder ein Finder-Tag fassen die Altdatei
+        // während des stundenlangen Encodings an: Inhalt, Größe und
+        // Änderungszeit bleiben gleich, nur die Statuszeit steigt.
+        var tag: [UInt8] = [0x41]
+        #expect(setxattr(
+            final.path,
+            "com.apple.metadata:_kMDItemUserTags",
+            &tag,
+            tag.count,
+            0,
+            0
+        ) == 0)
+
+        _ = try FFmpegWrapper.commitStagedOutput(
+            staging.url,
+            to: final,
+            expectedDestination: expected,
+            expectedStagingOwnership: staging.ownership
+        )
+
+        #expect(try String(contentsOf: final, encoding: .utf8) == "fertiges Hörbuch")
     }
 
     @Test("Ein erfolgreicher geschützter Commit entfernt seinen Staging-Ordner")
@@ -1851,6 +1895,7 @@ struct ConversionFileOwnershipTests {
 
         #expect(!ownership.hasPersistentMarker)
         #expect(context.cancel())
+        #expect(context.waitForCancellationCleanup())
         #expect(!FileManager.default.fileExists(atPath: staged.path))
     }
 
@@ -2130,6 +2175,73 @@ struct ConversionFileOwnershipTests {
         #expect(hookError == nil)
         #expect(FileManager.default.fileExists(atPath: try #require(replacementPayload).path))
         #expect(FileManager.default.fileExists(atPath: parked.appendingPathComponent("entry").path))
+    }
+
+    @Test("Eine nach der Vorprüfung eingeschleuste Datei rettet den Cleanup-Ordner")
+    func cleanupKeepsDirectoryWhenForeignFileAppearsAfterScan() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let owner = ProcessInfo.processInfo.processIdentifier
+        let cleanup = directory.appendingPathComponent(
+            ".HB_DisplacedCleanup_\(owner)-\(UUID().uuidString)"
+        )
+        try FFmpegWrapper.createOwnedTempDirectory(cleanup, ownerPID: owner)
+        let entry = cleanup.appendingPathComponent("entry")
+        try Data("erwartet".utf8).write(to: entry)
+        let entryIdentity = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: entry, followSymlink: false)
+        )
+        try FFmpegWrapper.writeCleanupEntryIdentity(entryIdentity, in: cleanup)
+        let directoryIdentity = try #require(
+            FFmpegWrapper.fileSystemIdentity(at: cleanup, followSymlink: false)
+        )
+        let record = CleanupEntryRecord(
+            identity: entryIdentity,
+            filename: "entry",
+            stableIdentityOnly: false
+        )
+        var intruderWritten = false
+
+        FFmpegWrapper.removeOwnedTempDirectory(
+            cleanup,
+            expectedIdentity: directoryIdentity,
+            expectedOwnerPID: owner,
+            beforeRecordedEntryQuarantine: { descriptor in
+                // Der aufgezeichnete Eintrag bleibt unangetastet; dazu kommt
+                // eine Datei, die es beim ersten Namens-Scan noch nicht gab.
+                let intruder = "fremd.txt".withCString {
+                    Darwin.openat(
+                        descriptor,
+                        $0,
+                        O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW,
+                        mode_t(0o600)
+                    )
+                }
+                guard intruder >= 0 else { return }
+                let payload = Data("Recovery-Daten".utf8)
+                intruderWritten = payload.withUnsafeBytes {
+                    Darwin.write(intruder, $0.baseAddress, $0.count) == $0.count
+                }
+                _ = Darwin.close(intruder)
+            },
+            expectedCleanupEntry: record
+        )
+
+        #expect(intruderWritten)
+        let remains = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix(".HB_Cleanup_\(owner)-") }
+        let remaining = try #require(remains.first)
+        #expect(try String(
+            contentsOf: remaining.appendingPathComponent("fremd.txt"),
+            encoding: .utf8
+        ) == "Recovery-Daten")
+        // Ohne Besitzerdatei könnte kein späterer Lauf diesen Rest je wieder
+        // als eigenen erkennen — sie muss deshalb liegen bleiben.
+        #expect(FileManager.default.fileExists(
+            atPath: remaining.appendingPathComponent(".owner-pid").path
+        ))
     }
 
     @Test("Ein Ersatz innerhalb des Cleanup-Ordners bleibt erhalten")
@@ -2664,6 +2776,7 @@ struct ConversionFileOwnershipTests {
 
             if cancel {
                 context.cancel()
+                #expect(context.waitForCancellationCleanup())
             } else {
                 context.removeTempDirectory(directory)
             }

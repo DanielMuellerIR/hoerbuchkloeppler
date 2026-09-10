@@ -128,11 +128,12 @@ Deshalb laufen alle Terminal-Ausgaben der CLI über `TerminalRenderer` in
 ## Bekannte Test-Lücken / offen
 
 - Stream-Copy-Merge mit verschiedenen Codecs.
-- Lautheitssteuerung (`FFmpegWrapper.convert`): nur der Erfolgsfall mit
-  `normalizeLoudness` ist getestet. Offen sind reine Analyse ohne Pegeländerung
-  (Gain muss 0 bleiben), ein Fehlschlag der Analyse (keine Gruppe wird kodiert,
-  Abschluss `false`) und ein Abbruch währenddessen. Dafür fehlt ein
-  Injektionspunkt für `analyzeBookLoudness` (Review 2026-09-06).
+- Lautheitssteuerung (`FFmpegWrapper.convert`): abgedeckt seit 2026-09-10. Der
+  interne `convert(session:plan:measureBookLoudness:)` nimmt den Messwert als
+  Testnaht entgegen; `LoudnessTests.analysisOnlyKeepsLevelAndSurvivesFailure`
+  prüft damit die reine Analyse (Gain bleibt 0), den Fehlschlag der reinen
+  Analyse (Konvertierung läuft weiter) und den Fehlschlag der Angleichung (Lauf
+  bricht ab). Offen bleibt ein Abbruch mitten im Messpass.
 - Fehlschlag von `mediainfo` beim Import ist nicht injizierbar
   (`getBinaryURL` bevorzugt das Bundle); die Regel „leere Auswahl nur bei
   leerem Titel/Autor“ ist deshalb nur über den prozessfreien Pfad getestet.

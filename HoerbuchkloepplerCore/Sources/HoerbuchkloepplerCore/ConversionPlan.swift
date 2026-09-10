@@ -89,7 +89,8 @@ extension FFmpegWrapper {
                 throw ConversionOutputError.sourceChanged(file.sourceURL)
             }
             switch (planned, current) {
-            case (.existing(let old), .existing(let new)) where old == new:
+            case (.existing(let old), .existing(let new))
+                where old.matchesContentSnapshot(new):
                 continue
             case (_, .inaccessible(let number)):
                 throw ConversionOutputError.sourceInaccessible(file.sourceURL, number)
@@ -100,11 +101,16 @@ extension FFmpegWrapper {
     }
 
     static func validateConversionPlan(_ plan: ConversionPlan) throws {
+        // Ohne Eingabedateien ist nichts am Ziel verändert — es gibt schlicht
+        // nichts zu konvertieren. Der frühere Sammelfehler meldete stattdessen
+        // „Die Zieldatei wurde seit der Bestätigung verändert: /".
+        guard !plan.groups.isEmpty,
+              plan.groups.allSatisfy({ !$0.isEmpty }) else {
+            throw ConversionOutputError.noInputFiles
+        }
         guard plan.groups.count == plan.outputURLs.count,
               plan.outputURLs.count == plan.outputSnapshots.count,
-              plan.outputURLs.count == plan.outputDirectorySnapshots.count,
-              !plan.groups.isEmpty,
-              plan.groups.allSatisfy({ !$0.isEmpty }) else {
+              plan.outputURLs.count == plan.outputDirectorySnapshots.count else {
             throw ConversionOutputError.destinationChanged(
                 plan.outputURLs.first ?? URL(fileURLWithPath: "/")
             )
@@ -135,7 +141,7 @@ extension FFmpegWrapper {
             }
             let planned = plan.outputSnapshots[index]
             let current = captureSnapshot(of: output)
-            guard planned == current else {
+            guard planned.matchesContent(of: current) else {
                 if case .inaccessible(let number) = current {
                     throw ConversionOutputError.destinationInaccessible(output, number)
                 }
@@ -169,6 +175,10 @@ extension FFmpegWrapper {
     }
 
     static func splitAudioFilesIfNeeded(_ files: [AudioFile], maxDurationHours: Int?) -> [[AudioFile]] {
+        // Eine leere Eingabe ergibt eine leere Gruppenliste — sonst hätte
+        // derselbe Aufruf je nach Einstellung zwei Formen (`[]` gegen `[[]]`)
+        // und der leere Plan liefe in einen sachfremden Zielfehler.
+        guard !files.isEmpty else { return [] }
         guard let maxHours = maxDurationHours, maxHours > 0 else { return [files] }
         var result: [[AudioFile]] = []; var currentGroup: [AudioFile] = []; var currentDuration: TimeInterval = 0
         for file in files {

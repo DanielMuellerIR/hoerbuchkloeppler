@@ -28,6 +28,46 @@ private func writeSilentWAV(to url: URL, duration: TimeInterval = 0.25) throws {
     try file.write(from: buffer)
 }
 
+extension ConversionContext {
+    /// Wartet auf die im Hintergrund laufende Abbruchbereinigung. Das ist
+    /// dieselbe Barriere, die auch der Worker vor seinem Abschluss nimmt —
+    /// `cancel()` selbst kehrt bewusst sofort zurück, damit es den Main Actor
+    /// nicht blockiert.
+    @discardableResult
+    func waitForCancellationCleanup(timeout: TimeInterval = 5) -> Bool {
+        let finished = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            self.finishAfterCancellationCleanup { _ in }
+            finished.signal()
+        }
+        return finished.wait(timeout: .now() + timeout) == .success
+    }
+}
+
+/// Hält fest, auf welchem Thread ein Log entstanden ist. Für die Frage, ob die
+/// Abbruchbereinigung den Aufrufer blockiert, zählt allein: nicht auf seinem.
+private final class CallerThreadProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let callerThread: Thread
+    private var logs = 0
+    private var onCallerThread = 0
+
+    init(callerThread: Thread) { self.callerThread = callerThread }
+
+    func record() {
+        lock.lock()
+        logs += 1
+        if Thread.current === callerThread { onCallerThread += 1 }
+        lock.unlock()
+    }
+
+    func snapshot() -> (logs: Int, onCallerThread: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (logs, onCallerThread)
+    }
+}
+
 private final class ThreadSafeLogProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var messages: [String] = []
@@ -837,6 +877,7 @@ struct CancellationIsolationTests {
         second.registerTempDirectory(secondDirectory)
 
         first.cancel()
+        #expect(first.waitForCancellationCleanup())
 
         #expect(first.isCancelled)
         #expect(!second.isCancelled)
@@ -920,6 +961,7 @@ struct CancellationIsolationTests {
         context.registerStagedOutput(staged)
 
         #expect(context.cancel())
+        #expect(context.waitForCancellationCleanup())
         #expect(!FileManager.default.fileExists(atPath: staged.path))
     }
 
@@ -977,14 +1019,18 @@ struct CancellationIsolationTests {
         let ready = output.fileHandleForReading.readData(ofLength: 5)
         #expect(String(data: ready, encoding: .utf8) == "READY")
 
+        // Eigene Threads statt der globalen Queue: Laufen alle Suiten parallel,
+        // blockieren ihre Prozess-Joins den Dispatch-Pool, und ein hier
+        // eingereihter Block kann sekundenlang auf einen Thread warten. Das ließ
+        // diesen Test unter Volllast etwa jeden dritten Lauf auslaufen.
         let workerFinished = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        Thread.detachNewThread {
             process.waitUntilExit()
             workerFinished.signal()
         }
         #expect(context.cancel())
         let cleanupFinished = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        Thread.detachNewThread {
             context.finishAfterCancellationCleanup { _ in }
             cleanupFinished.signal()
         }
@@ -1001,6 +1047,40 @@ struct CancellationIsolationTests {
         #expect(process.terminationReason == .uncaughtSignal)
         #expect(process.terminationStatus == SIGKILL)
         #expect(!FileManager.default.fileExists(atPath: staged.path))
+    }
+
+    @Test("Die Abbruchbereinigung läuft auch ohne laufenden Prozess nicht auf dem Aufrufer")
+    func cancellationCleanupLeavesCallerThread() throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let staged = FFmpegWrapper.stagingOutputURL(
+            for: directory.appendingPathComponent("Buch.m4b")
+        )
+        let ownership = try FFmpegWrapper.createOwnedStagingOutput(staged)
+        let probe = CallerThreadProbe(callerThread: Thread.current)
+        let context = ConversionContext { _, _ in probe.record() }
+        context.registerStagedOutput(staged, ownership: ownership)
+        // Ein fremder Ersatz an derselben Stelle: Die Bereinigung lässt ihn
+        // liegen und meldet das. Erst diese Meldung macht überhaupt sichtbar,
+        // auf welchem Thread die Bereinigung läuft.
+        try FileManager.default.removeItem(at: staged)
+        try Data("fremd".utf8).write(to: staged)
+
+        // Kein Prozess registriert: Genau dann lief die Bereinigung früher
+        // synchron auf dem Aufrufer — in der GUI also auf dem Main Actor,
+        // samt rekursivem Löschen mehrerer Gigabyte.
+        #expect(context.cancel())
+
+        let cleanupFinished = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            context.finishAfterCancellationCleanup { _ in }
+            cleanupFinished.signal()
+        }
+        #expect(cleanupFinished.wait(timeout: .now() + 5) == .success)
+
+        let observed = probe.snapshot()
+        #expect(observed.logs > 0)
+        #expect(observed.onCallerThread == 0)
     }
 
     @Test("Abbruchmeldung und Bereinigungswarnung gehen dem Abschluss voraus")

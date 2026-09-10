@@ -223,12 +223,22 @@ final class ProcessPipeReader: @unchecked Sendable {
     private let stateLock = NSLock()
     private var started = false
     private var stopRequested = false
+    private var stoppedBeforeEOF = false
     private var output = Data()
     private let maximumBytes: Int
     private let requiresCompleteOutput: Bool
     private var exceeded = false
 
     var exceededOutputLimit: Bool { queue.sync { exceeded } }
+
+    /// Wahr, wenn der begrenzte Join abgelaufen ist, bevor die Pipe EOF
+    /// meldete. Die gelesene Ausgabe ist dann still gekürzt — ohne dieses
+    /// Merkmal sähe sie für den Aufrufer aus wie eine vollständige.
+    var joinTimedOut: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return stoppedBeforeEOF
+    }
 
     init(handle: FileHandle, maximumBytes: Int = 256 * 1024, requiresCompleteOutput: Bool = false) {
         self.handle = handle
@@ -292,10 +302,11 @@ final class ProcessPipeReader: @unchecked Sendable {
     /// Wartet normalerweise bis EOF. Bei einem begrenzten Join beendet die
     /// Leser-Queue ihre `poll`-Schleife selbst; dadurch kann ein fremdes Kind,
     /// das den Pipe-Schreibdeskriptor geerbt hat, den Aufrufer nicht festhalten.
-    func waitUntilEOF(
-        timeout: TimeInterval? = nil,
-        onTimeout: () -> Void = {}
-    ) -> Data {
+    /// Dass dabei gekürzt wurde, meldet danach `joinTimedOut` — ein Aufräum-
+    /// Rückruf half an dieser Stelle nichts: Der direkte Prozess ist längst
+    /// beendet und seine Prozessgruppe schon terminiert, festhalten kann nur
+    /// noch ein Nachkomme außerhalb der Gruppe.
+    func waitUntilEOF(timeout: TimeInterval? = nil) -> Data {
         stateLock.lock()
         let hasStarted = started
         stateLock.unlock()
@@ -303,9 +314,9 @@ final class ProcessPipeReader: @unchecked Sendable {
         if let timeout {
             let bounded = timeout.isFinite ? max(0, timeout) : 1
             if completion.wait(timeout: .now() + bounded) == .timedOut {
-                onTimeout()
                 stateLock.lock()
                 stopRequested = true
+                stoppedBeforeEOF = true
                 stateLock.unlock()
                 completion.wait()
             }
@@ -384,7 +395,9 @@ extension FFmpegWrapper {
         guard isUsableExecutable(url) else { return nil }
         let result = runCapturedProcess(
             executableURL: url,
-            arguments: name == "mediainfo" ? ["--Version"] : ["-version"],
+            // Auch der kurze Versionsaufruf bekommt `-nostdin`: Ein ffmpeg,
+            // das auf ein geerbtes Terminal wartet, hängt im Hintergrund.
+            arguments: name == "mediainfo" ? ["--Version"] : ["-nostdin", "-version"],
             timeout: 5
         )
         guard case .completed(let status, let data) = result,
@@ -417,6 +430,9 @@ extension FFmpegWrapper {
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = pipe
+        // Kein Werkzeug hier liest von stdin. Ohne diese Zeile erbt das Kind den
+        // stdin der App beziehungsweise das Terminal der CLI.
+        process.standardInput = FileHandle.nullDevice
         let reader = ProcessPipeReader(handle: pipe.fileHandleForReading, maximumBytes: 32 * 1024 * 1024, requiresCompleteOutput: true)
         do {
             let started: Bool
@@ -444,23 +460,26 @@ extension FFmpegWrapper {
             if timedOut {
                 ProcessTerminator.terminateAndWait([process])
             }
-            process.waitUntilExit()
+            // Ein Prozess im nicht unterbrechbaren Kernel-Wait — etwa auf einem
+            // abgerissenen Netz-Mount — überlebt auch SIGKILL, bis sein I/O
+            // zurückkommt. Ein unbedingtes `waitUntilExit()` blockierte hier
+            // trotz der angegebenen Frist unbegrenzt.
+            let exited = !process.isRunning
+            if exited { process.waitUntilExit() }
             // Auch kurze Hilfsaufrufe dürfen keinen vom Wrapper abgekoppelten
-            // Nachkommen im eigenen Prozessbaum zurücklassen. Der aufrufende
-            // Pfad braucht hier keinen eigenen Fehlerfall: Seine Ausgabe bleibt
-            // verwertbar, nachdem der fremde Rest sicher beendet wurde.
+            // Nachkommen im eigenen Prozessbaum zurücklassen.
             ProcessTerminator.terminateRemainingOwnedGroup(process)
             // Ein bereits beendeter direkter Prozess kann einen Nachkommen mit
             // geerbtem stdout hinterlassen. Dessen offener Schreibdeskriptor darf
             // den informativen Versions-/MediaInfo-Aufruf nicht endlos blockieren.
-            let output = reader.waitUntilEOF(timeout: 0.25) {
-                // Der direkte Prozess kann bereits beendet sein, während ein
-                // Nachkomme seine Pipe geerbt hat. Dann gehört auch dieser Rest
-                // zur aufgezeichneten Werkzeug-Prozessgruppe.
-                ProcessTerminator.terminateAndWait([process])
-            }
+            let output = reader.waitUntilEOF(timeout: 0.25)
             if context?.isCancelled == true { return .cancelled(output: output) }
-            if timedOut { return .timedOut(output: output) }
+            // Eine gekürzte Ausgabe darf nicht wie eine vollständige aussehen:
+            // Aus halben MediaInfo-Daten entstünden sonst falsche Titel- und
+            // Autorvorschläge, ohne dass jemand gewarnt wird.
+            if timedOut || !exited || reader.joinTimedOut {
+                return .timedOut(output: output)
+            }
             if reader.exceededOutputLimit { return .failed("Werkzeugausgabe überschreitet 32 MiB; vollständige Analyse nicht möglich.") }
             return .completed(status: process.terminationStatus, output: output)
         } catch {

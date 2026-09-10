@@ -92,6 +92,16 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
         ProcessTerminator.terminateAndWait(running)
     }
 
+    /// Hebt das Fehler-Latch eines abgeschlossenen Teilschritts wieder auf.
+    /// Nur für einen Schritt gedacht, der allein scheitern darf: Der
+    /// Lautheits-Analysepass läuft vor der eigentlichen Kodierung und hat den
+    /// Kontext in dieser Zeit für sich.
+    func clearSegmentFailure() {
+        lock.lock()
+        segmentFailure = false
+        lock.unlock()
+    }
+
     func unregister(_ process: Process) {
         lock.lock()
         processes.remove(process)
@@ -409,14 +419,16 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
             lock.broadcast()
             lock.unlock()
         }
-        if !ownedProcesses.isEmpty {
-            ProcessTerminator.terminateInBackground(
-                terminationRequest,
-                completion: finishCleanup
-            )
-        } else {
-            finishCleanup()
-        }
+        // Auch ohne laufenden Prozess gehört die Bereinigung auf die
+        // Hintergrundqueue: Sie löscht Zwischendateien rekursiv, und
+        // `cancelConversion` wird aus dem Overlay-Knopf und aus
+        // `beginConversionRun` heraus auf dem Main Actor gerufen. Bei leerer
+        // Zielliste kehrt `terminateAndWait` sofort zurück, der Umweg kostet
+        // also nichts.
+        ProcessTerminator.terminateInBackground(
+            terminationRequest,
+            completion: finishCleanup
+        )
         return true
     }
 
@@ -620,6 +632,19 @@ public struct FFmpegWrapper {
         session: ConversionSession,
         plan: ConversionPlan
     ) -> ConversionStartResult {
+        convert(session: session, plan: plan, measureBookLoudness: nil)
+    }
+
+    /// `measureBookLoudness` ist eine Testnaht: Der echte Messpass startet
+    /// einen vollständigen Dekodierlauf über das ganze Buch und lässt sich
+    /// sonst weder zum Fehlschlag noch zum Abbruch bringen.
+    @MainActor
+    @discardableResult
+    static func convert(
+        session: ConversionSession,
+        plan: ConversionPlan,
+        measureBookLoudness: (@Sendable () throws -> LoudnessMeasurement)?
+    ) -> ConversionStartResult {
         let outputLanguage: String
         do {
             outputLanguage = try BookMetadata.outputLanguage(session.language)
@@ -633,25 +658,22 @@ public struct FFmpegWrapper {
         // und Division durch die Gruppengröße bei der Fortschrittsberechnung.
         guard !plan.groups.isEmpty, !plan.groups.flatMap({ $0 }).isEmpty,
               plan.groups.count == plan.outputURLs.count else {
-            session.isConverting = false
-            session.lastConversionSucceeded = false
-            session.conversionStatus = "Keine Dateien"
-            session.addLog(
-                "❌ Keine Audiodateien zum Konvertieren vorhanden.",
-                type: .highlight
+            return reject(
+                session: session,
+                status: "Keine Dateien",
+                message: "Keine Audiodateien zum Konvertieren vorhanden."
             )
-            return .rejected("Keine Audiodateien zum Konvertieren vorhanden.")
         }
         let outputLeases: OutputLeaseSet
         do {
             try validateConversionPlan(plan)
             outputLeases = try acquireOutputLeases(for: plan.outputURLs)
         } catch {
-            session.isConverting = false
-            session.lastConversionSucceeded = false
-            session.conversionStatus = "Ausgabe nicht sicher verfügbar"
-            session.addLog("❌ \(error.localizedDescription)", type: .highlight)
-            return .rejected(error.localizedDescription)
+            return reject(
+                session: session,
+                status: "Ausgabe nicht sicher verfügbar",
+                message: error.localizedDescription
+            )
         }
         let plannedFiles = plan.groups.flatMap { $0 }
         let context = session.beginConversionRun()
@@ -670,9 +692,10 @@ public struct FFmpegWrapper {
             coverData: coverSnapshotForConversion(session)
         )
         let plannedTotalDuration = plannedFiles.reduce(0) { $0 + $1.duration }
-        guard session.isCurrentConversion(context.id) else {
-            return .rejected("Ein neuer Konvertierungslauf hat diesen Start ersetzt.")
-        }
+        // Zwischen `beginConversionRun()` und hier liegt kein Suspendierungspunkt
+        // — `convert` ist Main-Actor-isoliert und nicht `async`. Der Kontext ist
+        // deshalb zwangsläufig der aktuelle; eine Prüfung wäre toter Code, der
+        // Sperren und Kontext ungeschlossen zurückließe.
         session.runState = ConversionRunState(startingWith: "Konvertierung läuft")
         session.eventLogs = []
         session.logString = ""
@@ -717,12 +740,27 @@ public struct FFmpegWrapper {
 
             if job.settings.analyzeLoudness || job.settings.normalizeLoudness {
                 do {
-                    let measurement = try analyzeBookLoudness(job: job, session: session, context: context)
+                    let measurement = try measureBookLoudness?()
+                        ?? analyzeBookLoudness(job: job, session: session, context: context)
                     job.loudnessGain = job.settings.normalizeLoudness ? measurement.gainDB : 0
                     session.enqueueLog(measurement.description + (job.settings.normalizeLoudness ? "; gemeinsamer Gain: \(job.loudnessGain) dB" : "; Analyse ohne Pegeländerung"), type: .info, runID: context.id)
                 } catch {
-                    overallSuccess = false
-                    if !context.isCancelled { session.enqueueLog("Lautheitsanalyse fehlgeschlagen: \(error.localizedDescription)", type: .highlight, runID: context.id) }
+                    if context.isCancelled || job.settings.normalizeLoudness {
+                        // Wer „Lautheit angleichen" gewählt hat, will die
+                        // Pegeländerung. Ein Buch ohne sie still auszuliefern
+                        // wäre etwas anderes als das Bestellte.
+                        overallSuccess = false
+                        if !context.isCancelled { session.enqueueLog("Lautheitsanalyse fehlgeschlagen: \(error.localizedDescription)", type: .highlight, runID: context.id) }
+                    } else {
+                        // Die reine Analyse ist eine Auskunft. Sie darf die
+                        // Konvertierung nicht kosten — auch nicht über das
+                        // Fehler-Latch, das ihr eigener Dekodierpass gesetzt
+                        // haben kann und das sonst jeden weiteren Prozessstart
+                        // dieses Laufs stumm ablehnte.
+                        job.loudnessGain = 0
+                        context.clearSegmentFailure()
+                        session.enqueueLog("Lautheitsanalyse fehlgeschlagen, die Konvertierung läuft ohne Messwert weiter: \(error.localizedDescription)", type: .highlight, runID: context.id)
+                    }
                 }
             }
             for (groupIndex, fileGroup) in (overallSuccess ? job.plan.groups : []).enumerated() {
@@ -1093,9 +1131,7 @@ public struct FFmpegWrapper {
                         .terminateRemainingOwnedGroup(process)
                     // Join des Lesers vor Status/Phasenwechsel: Kein Callback aus
                     // diesem Segment darf danach noch Fortschritt einreihen.
-                    let stderrData = outputReader.waitUntilEOF(timeout: 0.25) {
-                        ProcessTerminator.terminateAndWait([process])
-                    }
+                    let stderrData = outputReader.waitUntilEOF(timeout: 0.25)
                     if context.isCancelled { return }
                     // Ein anderes Segment ist bereits fatal gescheitert und hat
                     // dieses per SIGTERM beendet (`failSegments`). Der so
@@ -1185,11 +1221,6 @@ public struct FFmpegWrapper {
         return results.completedPaths()
     }
 
-    /// Schreibt die concat-Liste (`audio_list.txt`) und die FFMETADATA-
-    /// Kapiteldatei (`chapters.txt`) nach tempDir. Gibt `false` zurück, wenn ein
-    /// Schreibvorgang fehlschlägt — sonst liefe ffmpeg mit fehlender Steuerdatei
-    /// weiter und meldete einen irreführenden Fehler. Pfade werden fürs
-    /// concat-Format escaped (einfaches Anführungszeichen → `'\''`).
     /// Baut den FFMETADATA-Inhalt (`chapters.txt`) für eine Kapitelgruppe.
     /// Kapitel liegen hintereinander: jedes beginnt, wo das vorherige endet.
     ///
@@ -1205,6 +1236,11 @@ public struct FFmpegWrapper {
         return metaContent
     }
 
+    /// Schreibt die concat-Liste (`audio_list.txt`) und die FFMETADATA-
+    /// Kapiteldatei (`chapters.txt`) nach tempDir. Gibt `false` zurück, wenn ein
+    /// Schreibvorgang fehlschlägt — sonst liefe ffmpeg mit fehlender Steuerdatei
+    /// weiter und meldete einen irreführenden Fehler. Pfade werden fürs
+    /// concat-Format escaped (einfaches Anführungszeichen → `'\''`).
     private static func writeConcatAndChapters(
         validPaths: [String],
         group: [AudioFile],
@@ -1238,8 +1274,7 @@ public struct FFmpegWrapper {
         coverInput: String?,
         audioCodecArguments: [String],
         job: ConversionJob,
-        finalURL: URL,
-        outputPath: String? = nil
+        outputPath: String
     ) -> [String] {
         var arguments = [
             "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", listFile.path,
@@ -1268,13 +1303,10 @@ public struct FFmpegWrapper {
         if coverInput != nil {
             arguments += ["-map", "2:0", "-c:v", "copy", "-disposition:v", "attached_pic"]
         }
-        if let outputPath {
-            // Der MP4-Muxer leitet das Format aus einem normalen Pfad ab. Beim
-            // deskriptorgebundenen Produktionspfad braucht er es ausdrücklich.
-            arguments += ["-f", "ipod", outputPath]
-        } else {
-            arguments.append(finalURL.path)
-        }
+        // Der MP4-Muxer leitet das Format sonst aus der Dateiendung ab. Der
+        // Produktionspfad schreibt aber auf einen Dateideskriptor, deshalb muss
+        // das Format ausdrücklich dabeistehen.
+        arguments += ["-f", "ipod", outputPath]
         return arguments
     }
 
@@ -1321,7 +1353,6 @@ public struct FFmpegWrapper {
             coverInput: coverInput,
             audioCodecArguments: audioCodecArguments,
             job: job,
-            finalURL: finalURL,
             outputPath: "/dev/fd/0"
         )
         return runFinalProcess(
@@ -1522,9 +1553,7 @@ public struct FFmpegWrapper {
             process.waitUntilExit()
             let hadBackgroundProcesses = ProcessTerminator
                 .terminateRemainingOwnedGroup(process)
-            let stderrData = outputReader.waitUntilEOF(timeout: 0.25) {
-                ProcessTerminator.terminateAndWait([process])
-            }
+            let stderrData = outputReader.waitUntilEOF(timeout: 0.25)
             if context.isCancelled { return false }
             if hadBackgroundProcesses {
                 session.enqueueLog(
@@ -1623,6 +1652,22 @@ public struct FFmpegWrapper {
         min(1, max(0, base + weight * min(1, max(0, phaseProgress))))
     }
 
+    /// Lehnt eine Startanforderung ab und hinterlässt einen sauberen Zustand.
+    /// Einen wirklich laufenden Vorgang fasst sie nicht an: Sonst verschwände
+    /// dessen Overlay, während sein Worker weiterarbeitet.
+    @MainActor
+    private static func reject(
+        session: ConversionSession,
+        status: String,
+        message: String
+    ) -> ConversionStartResult {
+        if session.currentConversionContext() == nil {
+            session.runState = ConversionRunState(rejectedWith: status)
+        }
+        session.addLog("❌ \(message)", type: .highlight)
+        return .rejected(message)
+    }
+
     @discardableResult
     public static func cancelConversion(
         session: ConversionSession
@@ -1700,7 +1745,7 @@ extension FFmpegWrapper {
         reader.start()
         process.waitUntilExit()
         let background = ProcessTerminator.terminateRemainingOwnedGroup(process)
-        let data = reader.waitUntilEOF(timeout: 0.25) { ProcessTerminator.terminateAndWait([process]) }
+        let data = reader.waitUntilEOF(timeout: 0.25)
         if context.isCancelled { throw CancellationError() }
         guard process.terminationStatus == 0, !background else {
             throw NSError(domain: "Loudness", code: 3, userInfo: [NSLocalizedDescriptionKey: "ffmpeg-Lautheitsanalyse fehlgeschlagen: \(String(decoding: data, as: UTF8.self))"])

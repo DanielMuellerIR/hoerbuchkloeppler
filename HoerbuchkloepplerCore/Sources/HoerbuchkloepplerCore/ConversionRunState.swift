@@ -22,4 +22,14 @@ public struct ConversionRunState: Sendable {
         self.status = status
         phase = status
     }
+
+    /// Zustand nach einer abgelehnten Startanforderung. Wie beim Start zählt:
+    /// Es bleibt nichts vom Vorlauf stehen — sonst zeigte das Overlay neben
+    /// „Keine Dateien" weiterhin 100 %, die alte Phase und die alte Ausgabe.
+    public init(rejectedWith status: String) {
+        self.init()
+        self.status = status
+        phase = status
+        succeeded = false
+    }
 }
