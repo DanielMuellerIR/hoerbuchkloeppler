@@ -483,6 +483,13 @@ public final class ConversionSession: ObservableObject, Identifiable {
     @Published public var series = ""
     @Published public var volumeNumber = ""
     @Published public var language = ""
+    /// Fehlt eines der Buchfelder, lohnt ein Blick in die Datei-Tags. An einer
+    /// Stelle formuliert: Ein künftiges siebtes Feld gilt sofort in beiden
+    /// Importpfaden (GUI-Batch und erwarteter CLI-Import).
+    var bookMetadataIncomplete: Bool {
+        title.isEmpty || author.isEmpty || narrator.isEmpty
+            || series.isEmpty || volumeNumber.isEmpty || language.isEmpty
+    }
     @Published public var projectSourceIssues: [ProjectSourceIssue] = []
     public var loadedProjectURL: URL?
     var projectSources: [ProjectSource] = []
@@ -711,7 +718,10 @@ public final class ConversionSession: ObservableObject, Identifiable {
                 if let importToken { await self.reportImportScan(importToken, filename: file.source.lastPathComponent, completed: true) }
                 return result
             }
-        ) ?? [.cancelled]
+        // Beide Aufrufer bilanzieren ihre `finishImport`-Aufrufe über die Zahl
+        // der Ergebnisse. Ein Abbruch muss deshalb genau ein Ergebnis je
+        // Eingabedatei liefern, nicht ein einzelnes für den ganzen Batch.
+        ) ?? files.map { _ in .cancelled }
     }
 
     /// Startet einen neuen Lauf und macht einen eventuell noch auslaufenden
@@ -963,14 +973,11 @@ public final class ConversionSession: ObservableObject, Identifiable {
     public func resetSession() {
         invalidateImportWork()
         self.audioFiles.removeAll()
-        self.showOverlay = false
-        self.isConverting = false
-        self.progress = 0.0
-        self.conversionStatus = "Bereit"
-        self.lastConversionSucceeded = nil
+        // Den ganzen Laufzustand ersetzen statt Feld für Feld: Phase und
+        // fertige Ausgaben des Vorlaufs blieben sonst stehen.
+        self.runState = ConversionRunState()
         self.eventLogs = []
         self.logString = ""
-        self.segmentProgress = [:]
         loadedProjectURL = nil; projectSources = []; projectSourceIssues = []
         undoChapters = []; redoChapters = []; updateHistoryAvailability()
     }
@@ -1115,6 +1122,11 @@ public final class ConversionSession: ObservableObject, Identifiable {
         pendingImportFolderURL = nil
         pendingImportCanRepresentFolder = expectedItemCount == 1
         invalidateArtworkWork()
+        // Ein leerer Batch (Auswahl ohne Dateien) hat nichts abzuschließen:
+        // `finishImport` läuft nie, also müsste die eben entwertete Cover-Suche
+        // des Vorgängers hier verfallen. Stattdessen den Batch sofort verwerfen,
+        // damit `abandonPendingImport` die Suche wieder anwirft.
+        if pendingImportOperations == 0 { abandonPendingImport() }
         return ImportToken(generation: importGeneration, coverRevision: coverRevision)
     }
 
@@ -1169,7 +1181,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
             resumeArtworkSearchAfterBatch(token)
         }
         guard isCurrentImport(token) else { return }
-        if (title.isEmpty || author.isEmpty || narrator.isEmpty || series.isEmpty || volumeNumber.isEmpty || language.isEmpty), let first = audioFiles.first {
+        if bookMetadataIncomplete, let first = audioFiles.first {
             await importGlobalMetadata(from: first, importToken: token)
             await finishMetadataImport(token: token, sourceFileID: first.id)
         } else {
@@ -1354,7 +1366,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         // GUI-Drops sammeln erst alle Provider und starten danach in
         // `finishImport` genau eine Metadatenabfrage. Der erwartete CLI-Pfad hat
         // keinen Import-Token und löst die Abfrage hier direkt aus.
-        if importToken == nil, (title.isEmpty || author.isEmpty || narrator.isEmpty || series.isEmpty || volumeNumber.isEmpty || language.isEmpty) {
+        if importToken == nil, bookMetadataIncomplete {
             if let first = audioFiles.first {
                 await importGlobalMetadata(from: first, importToken: importToken)
             }
@@ -1715,15 +1727,10 @@ public final class ConversionSession: ObservableObject, Identifiable {
         if preparationCancellationRequested() { return cancelledResult() }
         var embedded: Data?
         if analyzeArtwork {
-            for audioFile in Self.uniqueArtworkCandidates(foundAudio) {
-                if preparationCancellationRequested() { return cancelledResult() }
-                if let artworkData = await importService.artwork(at: audioFile.url) {
-                    if preparationCancellationRequested() { return cancelledResult() }
-                    if NSImage(data: artworkData) != nil {
-                        embedded = artworkData
-                        break
-                    }
-                }
+            switch await firstEmbeddedArtwork(in: foundAudio) {
+            case .found(let artworkData): embedded = artworkData
+            case .none: break
+            case .cancelled: return cancelledResult()
             }
         }
         if preparationCancellationRequested() { return cancelledResult() }
@@ -1932,19 +1939,36 @@ public final class ConversionSession: ObservableObject, Identifiable {
         }
     }
 
+    /// Ergebnis der Cover-Suche. Der Abbruch ist ausdrücklich ein eigener Fall:
+    /// Der Ordnerscan verwirft daraufhin den ganzen Batch, während „kein Cover
+    /// gefunden" ein gültiges Ergebnis ist.
+    private enum EmbeddedArtworkSearch: Sendable {
+        case found(Data)
+        case none
+        case cancelled
+    }
+
+    /// Erstes dekodierbares eingebettetes Cover der Kandidaten. Manche Container
+    /// deklarieren beliebige Binärdaten als Artwork, deshalb muss `NSImage` sie
+    /// tatsächlich lesen können.
+    private nonisolated func firstEmbeddedArtwork(in files: [AudioFile]) async -> EmbeddedArtworkSearch {
+        for audioFile in Self.uniqueArtworkCandidates(files) {
+            if preparationCancellationRequested() { return .cancelled }
+            if let artworkData = await importService.artwork(at: audioFile.url) {
+                if preparationCancellationRequested() { return .cancelled }
+                if NSImage(data: artworkData) != nil { return .found(artworkData) }
+            }
+        }
+        return preparationCancellationRequested() ? .cancelled : .none
+    }
+
     /// Sucht wie der Ordnerscan synchron das erste dekodierbare eingebettete
     /// Cover der übergebenen Dateien. Für den CLI-`--file`-Pfad: Die CLI liest
     /// das Cover direkt nach dem Import für Bericht und Konvertierung, deshalb
     /// darf es nicht erst in einer nicht abgewarteten Hintergrundsuche entstehen.
     /// Bei laufbezogenem Abbruch liefert die Suche `nil`.
     public nonisolated func analyzeImportArtwork(for files: [AudioFile]) async -> Data? {
-        for audioFile in Self.uniqueArtworkCandidates(files) {
-            if preparationCancellationRequested() { return nil }
-            if let artworkData = await importService.artwork(at: audioFile.url),
-               NSImage(data: artworkData) != nil {
-                return artworkData
-            }
-        }
+        if case .found(let artworkData) = await firstEmbeddedArtwork(in: files) { return artworkData }
         return nil
     }
 

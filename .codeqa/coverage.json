@@ -2,13 +2,10 @@
   "schema_version": 2,
   "project": "Hoerbuchkloeppler",
   "campaign": {
-    "id": "20260903T102818420748+0200",
+    "id": "20260910T101635358055+0200",
     "token_budget": 3000000,
-    "status": "complete",
-    "started_at": "2026-09-03T10:28:18+02:00",
-    "tokens_spent": 365987,
-    "finished_at": "2026-09-03T10:57:11+02:00",
-    "finish_reason": "all-current"
+    "status": "active",
+    "started_at": "2026-09-10T10:16:35+02:00"
   },
   "campaign_history": [
     {
@@ -44,6 +41,15 @@
       "status": "complete",
       "started_at": "2026-08-30T09:58:02+02:00",
       "finished_at": "2026-08-30T10:01:47+02:00",
+      "finish_reason": "all-current"
+    },
+    {
+      "id": "20260903T102818420748+0200",
+      "token_budget": 3000000,
+      "status": "complete",
+      "started_at": "2026-09-03T10:28:18+02:00",
+      "tokens_spent": 365987,
+      "finished_at": "2026-09-03T10:57:11+02:00",
       "finish_reason": "all-current"
     }
   ],
@@ -89,7 +95,7 @@
       "risk": "critical",
       "priority": 1,
       "reason": "Bekannte SIGINT-Lücke in der Vorbereitungsphase sowie zentraler Main-Actor-, Import- und Metadatenzustand",
-      "state": "pending",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260903T102818420748+0200",
         "completed_at": "2026-09-03T10:30:21+02:00",
@@ -108,7 +114,19 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession+Project.swift",
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionRunState.swift",
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ProjectFingerprintStore.swift"
-      ]
+      ],
+      "active_run": {
+        "campaign_id": "20260910T101635358055+0200",
+        "started_at": "2026-09-10T10:18:27+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": [
+          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession.swift",
+          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionSession+Project.swift",
+          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ConversionRunState.swift",
+          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/ProjectFingerprintStore.swift"
+        ]
+      }
     },
     {
       "id": "conversion-engine",
@@ -431,13 +449,13 @@
     }
   ],
   "architecture": {
-    "campaign_id": "20260903T102818420748+0200",
-    "recorded_at": "2026-09-03T10:56:59+02:00",
-    "observed_head": "919db7c4d5fe782603d41916b2e7145b0c26546b",
-    "summary": "Das Paradigma trägt weiterhin: Beide Frontends teilen sich denselben Core, und die Sicherheitsgrenzen liegen sauber an den POSIX-Aufrufen. Gespannt bleibt es an zwei Stellen: FFmpegWrapper.swift hat 4052 Zeilen und vereint Prozessterminierung, Staging/Commit, Altlastenbereinigung und die Kodierpipeline; ConversionSession.swift hat 2099 Zeilen und vereint Importlebenszyklus, Metadaten, Artwork und die Worker-Brücke. Diese Kampagne hat dort nur gemeinsame Verträge herausgezogen (Prozess-Frist, Sperren-Freigabe, Verzeichnis-Deskriptor, versteckte Nachbarnamen, Task-Registrierung) statt die Zentren aufzuteilen.",
-    "paradigm": "Gemeinsamer Swift-Core mit MainActor-Sitzungsmodell, dünnen SwiftUI-/CLI-Frontends und POSIX-/Shell-Sicherheitsgrenzen für Prozesse, Dateien, Installation und Release",
+    "campaign_id": "20260910T101635358055+0200",
+    "recorded_at": "2026-09-10T10:18:21+02:00",
+    "observed_head": "9bd04b7ba9236231d8c9ff086841fef59d39c9f7",
+    "summary": "Die Schichtung hält: Beide Frontends fahren über denselben Core, die Frontends enthalten keine Konvertierungslogik, und die Dateisystem- und Prozessgrenzen liegen gebündelt in OutputStaging.swift und ProcessTermination.swift. Gegenüber dem Stand vom 2026-09-03 hat sich das Gewicht verschoben: FFmpegWrapper.swift ist von 4052 auf 1717 Zeilen geschrumpft, weil Staging (OutputStaging.swift, 1824 Zeilen) und Prozesssteuerung (ProcessTermination.swift, 470 Zeilen) herausgelöst wurden. Neuer Engpass ist ConversionSession.swift mit 2264 Zeilen, davon rund 1717 in der Klasse ConversionSession selbst: Sie vereint Einstellungen, Dateiliste, Cover- und Artworksuche, Import-Lebenszyklus, Tag-Metadaten, Projektzustand mit Undo/Redo, Laufzustand, Logging, MediaInfo-Abfragen und Bildskalierung in einem MainActor-Objekt.",
+    "paradigm": "Schichtenmodell mit gemeinsamem MVVM-Kern: Core-Package als Domänen- und Prozessschicht, ConversionSession als geteiltes ObservableObject-Viewmodel, darüber dünne SwiftUI-Views und die kloeppler-CLI",
     "fit": "gespannt",
-    "recommendation": "Kein Paradigmenwechsel. Der nächste sinnvolle Schritt wäre, FFmpegWrapper.swift entlang der bereits sichtbaren Nähte in drei Dateien zu trennen (Prozessterminierung, Staging/Commit/Bereinigung, Kodierpipeline) — der Nutzen ist Lesbarkeit und getrennte Testbarkeit, das Risiko liegt in der sicherheitskritischen Bereinigungslogik. Das braucht einen eigenen Auftrag mit eigenem Budget, nicht den Rand einer CodeQA-Kampagne."
+    "recommendation": "Kein Paradigmenwechsel; die Schichtung ist richtig gewaehlt. Lohnend waere, ConversionSession nach dem bereits erprobten Muster von ConversionSession+Project.swift weiter in Extensions je Zustaendigkeit zu zerlegen (Import-Lebenszyklus, Artwork, MediaInfo/Info-Sheet). Das ist ein eigener Auftrag, kein Kampagnen-Beifang: Der Schnitt beruehrt beide Frontends und braucht eigene Regressionstests. Aufwand-Nutzen: mittlerer Aufwand, klarer Gewinn fuer Lesbarkeit und Testbarkeit, kein Verhaltensrisiko, solange nur verschoben und nicht umgebaut wird."
   },
   "themes": [
     {
@@ -772,6 +790,20 @@
           "Gegenprobe mit lahmgelegter SIGKILL-Eskalation: Abbruchtest rot, Timeout-Test grün — wie mit der alten Fassung"
         ]
       }
+    },
+    {
+      "id": "file-snapshot-identity",
+      "summary": "Die Prüfung „ist das noch derselbe Datei-Snapshot?\" ist fünfmal mit vier verschiedenen Feldmengen ausgeschrieben: FileSystemIdentity == (dev, ino, mode, size, mtime, ctime) und matchesContentSnapshot (ohne ctime) in OutputStaging.swift, ImportSourceIdentity (dev, ino, size, mtime) in AudioImportService.swift sowie zwei handgeschriebene before/after-Vergleiche in FFmpegWrapper.swift (Cover-Lesen) und AudiobookProject.swift (Fingerprint-Lesen), beide ohne mode. Ein gemeinsamer Typ mit benannten Vergleichen macht die Regel an einer Stelle prüfbar.",
+      "evidence": [
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/OutputStaging.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioImportService.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/FFmpegWrapper.swift",
+        "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudiobookProject.swift"
+      ],
+      "priority": 2,
+      "state": "pending",
+      "noted_at": "2026-09-10T10:39:25+02:00",
+      "campaign_id": "20260910T101635358055+0200"
     }
   ]
 }

@@ -221,4 +221,57 @@ struct ProjectTests {
         #expect(throws: (any Error).self) { try session.openProject(from: url) }
         #expect(session.title == "Behalten")
     }
+
+    @Test("Ein Finder-Tag an der Quelle gilt nicht als Inhaltsänderung")
+    func metadataOnlySourceChangeIsNoContentChange() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Quelle.wav")
+        try Data([1, 2, 3]).write(to: source)
+        let session = ConversionSession(settings: AudioSettings())
+        session.audioFiles = [AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Kapitel")]
+        let url = root.appendingPathComponent("Buch.hkproject")
+        try session.saveProject(to: url)
+
+        // Wie in der GUI: Das asynchrone Öffnen wärmt den Fingerprint-Speicher
+        // außerhalb des Main Actors vor.
+        let reopened = ConversionSession(settings: AudioSettings())
+        try await reopened.openProjectAsync(from: url)
+        #expect(reopened.projectSourceIssues.isEmpty)
+
+        // Ein Finder-Tag schreibt nur ein erweitertes Attribut. Inhalt und
+        // Änderungszeit bleiben gleich, allein die Statuszeit (ctime) steigt.
+        var tag: [UInt8] = [0x41]
+        #expect(setxattr(source.path, "com.apple.metadata:_kMDItemUserTags", &tag, tag.count, 0, 0) == 0)
+
+        reopened.refreshProjectSourceIssues()
+        #expect(reopened.projectSourceIssues.isEmpty)
+        // Auch der zweite Aufruf darf nicht kippen: Der Fehlalarm war früher
+        // selbsterhaltend, weil nie neu gehasht wurde.
+        reopened.refreshProjectSourceIssues()
+        #expect(reopened.projectSourceIssues.isEmpty)
+    }
+
+    @Test("Ein unterbrochenes Speichern meldet sich, statt still nichts zu tun")
+    func interruptedAsyncSaveReportsInsteadOfSilence() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Quelle.wav")
+        try Data([1, 2, 3]).write(to: source)
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        session.audioFiles = [AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Kapitel")]
+        let url = root.appendingPathComponent("Buch.hkproject")
+
+        let before = session.projectOperation
+        let save = Task { try await session.saveProjectAsync(to: url) }
+        // Warten, bis das Speichern seinen Vorgang angemeldet hat und beim
+        // Hashen außerhalb des Main Actors hängt.
+        while session.projectOperation == before { await Task.yield() }
+        // Genau hier zieht ein Drop dazwischen: `beginImport` vergibt eine neue
+        // Vorgangskennung. Zwischen Prüfung und Aufruf liegt kein `await`, der
+        // Zeitpunkt ist also fest.
+        _ = session.beginImport()
+
+        await #expect(throws: ProjectError.self) { try await save.value }
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
 }

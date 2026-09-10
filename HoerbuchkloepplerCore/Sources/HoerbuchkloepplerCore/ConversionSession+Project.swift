@@ -96,7 +96,12 @@ extension ConversionSession {
             for source in project.sources { _ = try? store.fingerprint(source.readLocation.resolve(from: url)) }
             return project
         }.value
-        guard projectOperation == operation else { return }
+        // Ein zwischenzeitlicher Import oder ein neueres Öffnen hat diesen
+        // Vorgang ersetzt. Das still zu schlucken hieße: Das Projekt öffnet
+        // sich einfach nicht, ohne dass jemand erfährt warum.
+        guard projectOperation == operation else {
+            throw ProjectError.invalid("Das Öffnen wurde durch eine andere Aktion unterbrochen; bitte erneut öffnen.")
+        }
         try applyProject(project, from: url)
     }
 
@@ -107,7 +112,12 @@ extension ConversionSession {
         await Task.detached {
             for file in files { _ = try? store.fingerprint(file.url) }
         }.value
-        guard projectOperation == operation else { return }
+        // Sonst hielte der Nutzer das Projekt für gespeichert, obwohl nichts
+        // geschrieben wurde — der Konfliktfall eine Zeile weiter meldet sich
+        // aus demselben Grund.
+        guard projectOperation == operation else {
+            throw ProjectError.invalid("Das Speichern wurde durch eine andere Aktion unterbrochen; bitte erneut speichern.")
+        }
         guard files == audioFiles else { throw ProjectError.invalid("Kapitel wurden während des Speicherns verändert; bitte erneut speichern.") }
         try saveProject(to: url)
     }

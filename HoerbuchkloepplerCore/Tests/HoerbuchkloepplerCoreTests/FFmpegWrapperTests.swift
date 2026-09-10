@@ -262,6 +262,50 @@ struct CoverSelectionTests {
         await probe.releaseFirstCall()
     }
 
+    @Test("Eine Auswahl ohne Dateien startet die entwertete Artwork-Suche neu")
+    func emptyImportBatchRestartsArtworkSearch() async throws {
+        let source = URL(fileURLWithPath: "/tmp/leerer-batch-kapitel.m4a")
+        let artwork = try onePixelPNGData()
+        let probe = ArtworkLoaderProbe(dataByURL: [source: artwork])
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        session.title = "Titel"
+        session.author = "Autor"
+        session.embeddedArtworkLoader = { url in await probe.load(url) }
+        let existing = AudioFile(
+            url: source,
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Kapitel"
+        )
+
+        await session.processIncomingFiles([existing])
+        var probeState = await probe.snapshot()
+        var attempts = 0
+        while !probeState.started, attempts < 200 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(10))
+            probeState = await probe.snapshot()
+        }
+        #expect(probeState.started)
+
+        // Das Auswahlfenster wurde bestätigt, hat aber keine Datei geliefert.
+        // Dieser Batch hat nichts abzuschließen — die laufende Cover-Suche
+        // darf er trotzdem nicht mitnehmen.
+        _ = session.beginImport(expectedItemCount: 0)
+        #expect(!session.isImporting)
+
+        attempts = 0
+        while session.embeddedCoverData == nil, attempts < 200 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        probeState = await probe.snapshot()
+        #expect(probeState.calls == [source, source])
+        #expect(session.embeddedCoverData == artwork)
+        await probe.releaseFirstCall()
+    }
+
     @Test("Ein übersprungener Zusatz-Drop startet die entwertete Artwork-Suche neu")
     func skippedAdditionalDropRestartsArtworkSearch() async throws {
         let source = URL(fileURLWithPath: "/tmp/uebersprungenes-kapitel.m4a")

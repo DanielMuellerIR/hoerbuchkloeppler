@@ -44,17 +44,26 @@ struct FileSystemIdentity: Codable, Equatable, Sendable {
         statusNanoseconds = Int64(information.st_ctimespec.tv_nsec)
     }
 
-    /// Ein atomarer Rename aktualisiert auf manchen Volumes die Statuszeit des
-    /// verschobenen Eintrags. Für die Prüfung NACH `RENAME_SWAP` zählen deshalb
-    /// Inode, Volume, Typ, Größe und Inhalts-Änderungszeit; die strengere
-    /// Vorprüfung vergleicht weiterhin alle Felder über `Equatable`.
-    func matchesDisplacedEntry(_ other: FileSystemIdentity) -> Bool {
+    /// Vergleicht nur die Felder, die sich beim Ändern des Datei-INHALTS
+    /// zwangsläufig mitändern: Volume, Inode, Typ, Größe und Änderungszeit.
+    /// Die Statuszeit (`st_ctime`) bleibt bewusst außen vor — sie steigt auch
+    /// bei reinen Metadaten-Operationen wie einem Finder-Tag, `chmod` oder
+    /// einem `xattr`, die den Inhalt nicht anfassen.
+    func matchesContentSnapshot(_ other: FileSystemIdentity) -> Bool {
         device == other.device
             && inode == other.inode
             && mode == other.mode
             && size == other.size
             && modificationSeconds == other.modificationSeconds
             && modificationNanoseconds == other.modificationNanoseconds
+    }
+
+    /// Ein atomarer Rename aktualisiert auf manchen Volumes die Statuszeit des
+    /// verschobenen Eintrags. Für die Prüfung NACH `RENAME_SWAP` zählt deshalb
+    /// nur der Inhalts-Snapshot; die strengere Vorprüfung vergleicht weiterhin
+    /// alle Felder über `Equatable`.
+    func matchesDisplacedEntry(_ other: FileSystemIdentity) -> Bool {
+        matchesContentSnapshot(other)
     }
 
     /// Verzeichnisgröße und Zeitstempel ändern sich bei jedem Kind-Eintrag.

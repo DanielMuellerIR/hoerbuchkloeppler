@@ -1459,6 +1459,68 @@ struct ImportLifecycleTests {
         #expect(session.eventLogs.isEmpty)
     }
 
+    @Test("Ein Reset räumt auch Phase und fertige Ausgaben des Vorlaufs ab")
+    func resetClearsCompleteRunState() {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        session.conversionPhase = "Buchlautheit messen"
+        session.completedOutputURLs = [URL(fileURLWithPath: "/tmp/Buch.m4b")]
+        session.progress = 0.5
+        session.lastConversionSucceeded = true
+
+        session.resetSession()
+
+        #expect(session.conversionPhase == "Bereit")
+        #expect(session.completedOutputURLs.isEmpty)
+        #expect(session.conversionStatus == "Bereit")
+        #expect(session.progress == 0.0)
+        #expect(session.lastConversionSucceeded == nil)
+        #expect(!session.isConverting)
+        #expect(!session.showOverlay)
+        #expect(session.segmentProgress.isEmpty)
+    }
+
+    @Test("Der Startzustand eines Laufs trägt keine Phase des Vorlaufs weiter")
+    func startingRunStateDropsPreviousPhase() {
+        var state = ConversionRunState()
+        state.phase = "Buchlautheit messen"
+        state.completedOutputs = [URL(fileURLWithPath: "/tmp/Alt.m4b")]
+        state.succeeded = false
+        state.progress = 0.9
+        state.segments = [0: SegmentStatus(filename: "alt.m4b", progress: 1.0)]
+
+        state = ConversionRunState(startingWith: "Konvertierung läuft")
+
+        #expect(state.isConverting)
+        #expect(state.showOverlay)
+        #expect(state.status == "Konvertierung läuft")
+        #expect(state.phase == "Konvertierung läuft")
+        #expect(state.completedOutputs.isEmpty)
+        #expect(state.succeeded == nil)
+        #expect(state.progress == 0.0)
+        #expect(state.segments.isEmpty)
+    }
+
+    @Test("Ein abgebrochener Batch liefert ein Ergebnis je Eingabedatei")
+    func cancelledBatchReturnsOneResultPerInput() async {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        session.beginPreparation()
+        // Genau die Lage nach SIGINT in der CLI: Der Vorbereitungskontext ist
+        // entwertet, bevor die Analyse überhaupt anläuft.
+        _ = session.cancelPreparation()
+
+        let files = (1...3).map { index -> FoundFile in
+            let url = URL(fileURLWithPath: "/tmp/abgebrochen-\(index).m4a")
+            return FoundFile(source: url, resolved: url)
+        }
+        let results = await session.loadAudioFiles(from: files)
+
+        // Beide Frontends zählen ihre `finishImport`-Aufrufe über die Ergebnisse.
+        #expect(results.count == files.count)
+        #expect(results.allSatisfy { if case .cancelled = $0 { return true } else { return false } })
+    }
+
     @Test("Getrennte Provider behalten beim gleichen Ziel nur die Symlink-Kapitelgruppe")
     func providerResultsAreDeduplicatedByReadURL() async {
         let session = ConversionSession(settings: AudioSettings())

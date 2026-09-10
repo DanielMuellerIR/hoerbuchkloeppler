@@ -673,15 +673,9 @@ public struct FFmpegWrapper {
         guard session.isCurrentConversion(context.id) else {
             return .rejected("Ein neuer Konvertierungslauf hat diesen Start ersetzt.")
         }
-        session.showOverlay = true
-        session.isConverting = true
-        session.lastConversionSucceeded = nil
-        session.completedOutputURLs = []
-        session.conversionStatus = "Konvertierung läuft"
-        session.progress = 0.0
+        session.runState = ConversionRunState(startingWith: "Konvertierung läuft")
         session.eventLogs = []
         session.logString = ""
-        session.segmentProgress = [:]
         let totalHours = Int(plannedTotalDuration / 3600)
         let totalMinutes = Int((plannedTotalDuration.truncatingRemainder(dividingBy: 3600)) / 60)
         let durationStr = String(format: "%02d:%02dh", totalHours, totalMinutes)
