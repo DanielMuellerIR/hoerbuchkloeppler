@@ -119,6 +119,10 @@ extension AudioFile {
         // stderr getrennt verwerfen, damit es weder die Metadaten-Ausgabe stört
         // noch in einer ungelesenen Pipe den Kindprozess blockieren kann.
         process.standardError = FileHandle.nullDevice
+        // `-nostdin` deckt nur echtes ffmpeg ab. Ein über `$PATH` aufgelöstes
+        // Wrapper-Skript erbte sonst den stdin der App beziehungsweise das
+        // Terminal der CLI und könnte dort auf Eingabe warten.
+        process.standardInput = FileHandle.nullDevice
 
         return await withTaskCancellationHandler {
             do {
@@ -155,7 +159,14 @@ extension AudioFile {
                 if !processExited {
                     ProcessTerminator.terminateAndWait([process])
                 }
-                process.waitUntilExit()
+                // Ein Prozess im nicht unterbrechbaren Kernel-Wait — etwa auf
+                // einem abgerissenen Netz-Mount — überlebt auch SIGKILL. Ein
+                // unbedingtes `waitUntilExit()` machte die Frist hier wertlos.
+                if !process.isRunning { process.waitUntilExit() }
+                // Nach dem Exit des direkten Prozesses darf in seiner besessenen
+                // Gruppe kein Nachkomme weiterlaufen; danach vergisst das `defer`
+                // die Gruppe und der spätere Abbruchpfad fände ihn nicht mehr.
+                ProcessTerminator.terminateRemainingOwnedGroup(process)
                 try? pipe.fileHandleForReading.close()
                 guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
                 guard !output.timedOut, processExited else {
@@ -331,7 +342,7 @@ extension AudioFile {
         var sawEnd = false
 
         func parseTimebase(_ value: String) {
-            let parts = value.trimmingCharacters(in: .whitespaces).split(separator: "/")
+            let parts = value.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "/")
             guard parts.count == 2,
                   let numerator = Double(parts[0]), numerator.isFinite, numerator > 0,
                   let denominator = Double(parts[1]), denominator.isFinite, denominator > 0 else {
@@ -354,8 +365,8 @@ extension AudioFile {
             chapters.append(c)
         }
 
-        for line in text.components(separatedBy: "\n") {
-            if line.trimmingCharacters(in: .whitespaces) == "[CHAPTER]" {
+        for line in ffMetadataLines(text) {
+            if line.trimmingCharacters(in: .whitespacesAndNewlines) == "[CHAPTER]" {
                 flush()
                 current = FFChapter()
                 rawStart = nil
@@ -364,7 +375,7 @@ extension AudioFile {
                 continue
             }
             guard let eq = line.firstIndex(of: "=") else { continue }
-            let key = String(line[..<eq]).trimmingCharacters(in: .whitespaces).uppercased()
+            let key = String(line[..<eq]).trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
             let value = String(line[line.index(after: eq)...])
             // Vor dem ersten [CHAPTER]: nur ein evtl. globales TIMEBASE übernehmen.
             if current == nil {
@@ -373,22 +384,53 @@ extension AudioFile {
             }
             switch key {
             case "TIMEBASE": parseTimebase(value)
-            case "START": rawStart = Double(value.trimmingCharacters(in: .whitespaces))
+            case "START": rawStart = Double(value.trimmingCharacters(in: .whitespacesAndNewlines))
             case "END":
                 sawEnd = true
-                rawEnd = Double(value.trimmingCharacters(in: .whitespaces))
+                rawEnd = Double(value.trimmingCharacters(in: .whitespacesAndNewlines))
             case "TITLE": current?.title = unescapeFFMetadata(value)
             default: break
             }
         }
         flush()
 
-        // Fehlende oder nichtpositive END-Zeiten aus dem Start des nächsten
-        // Kapitels füllen. Nicht parsebare Werte bleiben NaN und damit ungültig.
-        for i in chapters.indices where chapters[i].end <= chapters[i].start && i + 1 < chapters.count {
+        // Fehlt END, setzt `flush` end == start. Genau diesen Fall aus dem Start
+        // des nächsten Kapitels füllen. Ein ausdrücklich widersprüchliches Paar
+        // (END VOR START) bleibt dagegen ungültig: Es zu „reparieren" erfände
+        // aus einer nachweislich kaputten Angabe ein Kapitel, statt auf das
+        // sichere Ein-Kapitel-Ergebnis zurückzufallen. Nicht parsebare Werte
+        // bleiben NaN und damit ebenfalls ungültig.
+        for i in chapters.indices where chapters[i].end == chapters[i].start && i + 1 < chapters.count {
             chapters[i].end = chapters[i + 1].start
         }
         return chapters
+    }
+
+    /// Zerlegt FFMETADATA in Zeilen und hält dabei Fortsetzungszeilen zusammen.
+    /// ffmpeg escapt einen Zeilenumbruch im Wert als Backslash plus echten
+    /// Umbruch. Ohne dieses Zusammenfügen bräche ein Kapiteltitel dort ab, und
+    /// seine Fortsetzung würde als eigenes Schlüssel/Wert-Paar gelesen — ein
+    /// Titel wie „Vorwort\nEND=180000" überschriebe damit das echte Kapitelende.
+    static func ffMetadataLines(_ text: String) -> [String] {
+        var lines: [String] = []
+        for piece in text.components(separatedBy: "\n") {
+            if let last = lines.last, endsWithEscapingBackslash(last) {
+                lines[lines.count - 1] = last + "\n" + piece
+            } else {
+                lines.append(piece)
+            }
+        }
+        return lines
+    }
+
+    /// Ein Backslash escapt nur, wenn er selbst nicht escapt ist — deshalb zählt
+    /// die ungerade Anzahl am Zeilenende.
+    private static func endsWithEscapingBackslash(_ line: String) -> Bool {
+        var count = 0
+        for character in line.reversed() {
+            if character == "\\" { count += 1 } else { break }
+        }
+        return count % 2 == 1
     }
 
     static func chaptersAreValid(

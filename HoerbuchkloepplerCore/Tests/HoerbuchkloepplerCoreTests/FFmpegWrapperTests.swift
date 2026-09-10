@@ -657,6 +657,61 @@ struct ParseFFMetadataChaptersTests {
         #expect(chapters[1].end == 20)
     }
 
+    @Test("Ein Zeilenumbruch im Titel bricht weder Titel noch Kapitelende")
+    func keepsEscapedNewlineInsideTitle() {
+        // ffmpeg escapt einen Umbruch im Wert als Backslash plus echten Umbruch.
+        // Die Fortsetzungszeile darf nicht als eigenes Schlüssel/Wert-Paar
+        // gelesen werden — sonst überschriebe ein Titel das echte END.
+        let text = "[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1000\n"
+            + "title=Vorwort\\\nEND=180000\n"
+        let chapters = AudioFile.parseFFMetadataChapters(text)
+        #expect(chapters.count == 1)
+        #expect(chapters[0].end == 1)
+        #expect(chapters[0].title == "Vorwort\nEND=180000")
+    }
+
+    @Test("CRLF-Zeilenenden liefern dieselben Kapitel wie LF")
+    func parsesCarriageReturnLineEndings() {
+        // `CharacterSet.whitespaces` enthält kein CR; vorher blieb von einer
+        // handgepflegten CRLF-Datei kein einziges Kapitel übrig.
+        let text = "[CHAPTER]\r\nTIMEBASE=1/1000\r\nSTART=0\r\nEND=1000\r\ntitle=Eins\r\n"
+            + "[CHAPTER]\r\nSTART=1000\r\nEND=2000\r\ntitle=Zwei\r\n"
+        let chapters = AudioFile.parseFFMetadataChapters(text)
+        #expect(chapters.count == 2)
+        #expect(chapters[0].start == 0)
+        #expect(chapters[0].end == 1)
+        #expect(chapters[1].start == 1)
+        #expect(chapters[1].end == 2)
+    }
+
+    @Test("Ein END vor dem START wird nicht stillschweigend repariert")
+    func doesNotRepairInvertedChapterBounds() {
+        // Fehlt END, füllt der Parser aus dem nächsten Kapitel. Ein
+        // ausdrücklich widersprüchliches Paar bleibt dagegen ungültig, damit
+        // die Extraktion auf das sichere Ein-Kapitel-Ergebnis zurückfällt,
+        // statt ein Kapitel zu erfinden.
+        let text = """
+        [CHAPTER]
+        TIMEBASE=1/1000
+        START=0
+        END=4000
+        title=Eins
+        [CHAPTER]
+        START=4000
+        END=2000
+        title=Verdreht
+        [CHAPTER]
+        START=9000
+        END=12000
+        title=Drei
+        """
+        let chapters = AudioFile.parseFFMetadataChapters(text)
+        #expect(chapters.count == 3)
+        #expect(chapters[1].start == 4)
+        #expect(chapters[1].end == 2)
+        #expect(!AudioFile.chaptersAreValid(chapters, totalDuration: 12))
+    }
+
     @Test("TIMEBASE wird korrekt skaliert")
     func scalesTimebase() {
         // Bei TIMEBASE=1/1 sind die Rohwerte bereits Sekunden.

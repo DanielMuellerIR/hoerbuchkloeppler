@@ -1187,6 +1187,12 @@ public final class ConversionSession: ObservableObject, Identifiable {
         } else {
             isImporting = false
         }
+        // Der Analyse-Cache hält je Quelle einen Metadaten-Snapshot samt
+        // AVFoundation-Backing. Nach dem Import braucht ihn nur noch die
+        // Coversuche über den sichtbaren Bestand; verworfene Quellen und
+        // übersprungene Dateien dürfen nicht bis zum nächsten Drop stehen
+        // bleiben.
+        importService.retainCachedArtwork(for: audioFiles.map(\.url))
     }
 
     private func finishMetadataImport(token: ImportToken, sourceFileID: UUID) async {
@@ -2149,12 +2155,6 @@ public final class ConversionSession: ObservableObject, Identifiable {
 }
 
 public struct AudioFile: Identifiable, Equatable, Sendable {
-    enum AudioTrackAvailability: Sendable {
-        case available
-        case missing
-        case unreadable
-        case cancelled
-    }
     public var id = UUID()
     /// Physische Lese-URL: die reguläre Datei, aus der AVFoundation und ffmpeg
     /// lesen. Bei einem Symlink ist das dessen aufgelöstes Ziel.
@@ -2229,20 +2229,6 @@ public struct AudioFile: Identifiable, Equatable, Sendable {
         guard !taskCancellationRequested() else { return (duration, fallbackTitle) }
         let title = await findRobustTag(for: "title", in: metadata) ?? fallbackTitle
         return (duration, title)
-    }
-
-    /// Prüft den Stream-Typ getrennt von der Gesamtdauer des Containers. Eine
-    /// reine Videodatei kann eine positive Dauer haben, ist für `-map 0:a` aber
-    /// keine gültige Hörbuchquelle.
-    static func audioTrackAvailability(at url: URL) async -> AudioTrackAvailability {
-        guard !taskCancellationRequested() else { return .cancelled }
-        do {
-            let tracks = try await AVAsset(url: url).loadTracks(withMediaType: .audio)
-            guard !taskCancellationRequested() else { return .cancelled }
-            return tracks.isEmpty ? .missing : .available
-        } catch {
-            return taskCancellationRequested() ? .cancelled : .unreadable
-        }
     }
 
     /// Macht eine Sekundenangabe für Berechnungen sicher: NaN/Infinity/negativ → 0.

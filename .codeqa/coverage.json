@@ -6,7 +6,7 @@
     "token_budget": 3000000,
     "status": "active",
     "started_at": "2026-09-10T10:16:35+02:00",
-    "tokens_spent": 320423
+    "tokens_spent": 391933
   },
   "campaign_history": [
     {
@@ -153,27 +153,23 @@
       "risk": "high",
       "priority": 3,
       "reason": "Signalbehandlung, Fehler-Exit-Codes, Eingabevalidierung und skriptfähige Ausgabe",
-      "state": "in_progress",
+      "state": "completed",
       "last_run": {
-        "campaign_id": "20260903T102818420748+0200",
-        "completed_at": "2026-09-03T10:39:32+02:00",
-        "observed_head": "a3e44676e3e6c2bc0d5464db601cb4b7bb1164d8",
-        "content_sha256": "c47f7878c67dbfd0a5b1ed46a4194badc28e10cc53bcc87c00f31dc58eff9619",
+        "campaign_id": "20260910T101635358055+0200",
+        "completed_at": "2026-09-10T11:37:07+02:00",
+        "observed_head": "e26be10fb7d2727a7b70447045e65d9e7b84a889",
+        "content_sha256": "4372389037d00f5f4d28cd664774b097a4051c01fae0b4de61f06fa2cfd2fa92",
         "file_count": 1,
         "review": "delta-plus-boundaries",
         "outcome": "improved",
-        "summary": "Ausgabeziel-Auflösung aus execute in resolveOutputFile extrahiert; neun getrennte Paare aus stderr-Meldung und Exit-Code zu reportedFailure zusammengezogen",
+        "summary": "Vier belegte Korrektheitsfunde behoben (Standard-Ausgabename mit Quellendung, Usage-Exit-Code 64 für --language/--volume-number, leeres stdout bei früh gescheitertem --inspect --format json, Abbruchmeldung auf stdout) plus Wiederherstellung der Renderer-Invariante ohne reproduzierbaren Fehler. Das bisher nur manuelle ANSI-Endbild-Rezept ist jetzt als tests/verify_cli_terminal.py maschinell geprüft; die Argumentgrenzen sind erstmals überhaupt getestet. Offen und bewusst nicht angefasst: TerminalRenderer zählt Blockzeilen logisch statt physisch und liest die Terminalbreite nie, in einem sehr schmalen Terminal kann eine Logzeile deshalb überschrieben werden.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 201/201 passed",
-          "CLI-Matrix: 3 --output-Zweige erfolgreich, 6 Fehlerpfade mit Exit 1 und unveränderter stderr-Meldung"
+          "swift test -Xswiftc -warnings-as-errors: 245/245 passed",
+          "tests/verify_cli_matrix.py: VERIFIED",
+          "tests/verify_cli_terminal.py: VERIFIED, Exit 130",
+          "test_scripts.sh und test_project_cli.py: passed",
+          "xcodebuild -scheme Hörbuchklöppler Debug: BUILD SUCCEEDED"
         ]
-      },
-      "active_run": {
-        "campaign_id": "20260910T101635358055+0200",
-        "started_at": "2026-09-10T11:15:30+02:00",
-        "required_review": "delta-plus-boundaries",
-        "status_at_start": "changed",
-        "covered_pending_paths": []
       }
     },
     {
@@ -210,7 +206,7 @@
       "risk": "high",
       "priority": 5,
       "reason": "AVFoundation-Analyse, Kapitelimport und externe ffmpeg-Prozessgrenze",
-      "state": "pending",
+      "state": "in_progress",
       "last_run": {
         "campaign_id": "20260903T102818420748+0200",
         "completed_at": "2026-09-03T10:52:27+02:00",
@@ -227,7 +223,17 @@
       "pending_paths": [
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift",
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioImportService.swift"
-      ]
+      ],
+      "active_run": {
+        "campaign_id": "20260910T101635358055+0200",
+        "started_at": "2026-09-10T11:37:50+02:00",
+        "required_review": "delta-plus-boundaries",
+        "status_at_start": "changed",
+        "covered_pending_paths": [
+          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioFile+Extensions.swift",
+          "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudioImportService.swift"
+        ]
+      }
     },
     {
       "id": "core-configuration",

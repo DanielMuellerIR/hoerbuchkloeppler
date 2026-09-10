@@ -71,9 +71,13 @@ public final class AudioImportService: @unchecked Sendable {
     func analyze(_ file: FoundFile) async -> SourceAnalysisResult {
         guard !Task.isCancelled else { return .cancelled }
         lock.withLock { counters.sourceAnalyses += 1 }
+        // Weichen sichtbarer und aufgelöster Pfad schon hier voneinander ab, ist
+        // die Quelle zwischen Scan und Analyse getauscht worden. Die drei
+        // späteren Prüfungen melden denselben Sachverhalt als `.sourceChanged`;
+        // „Audioanalyse fehlgeschlagen" schickte den Nutzer in die falsche Ecke.
         guard let identity = ImportSourceIdentity(file.readURL),
               ImportSourceIdentity(file.source) == identity else {
-            return .failure(AudioImportFailure(sourceURL: file.source, reason: .analysisFailed))
+            return .failure(AudioImportFailure(sourceURL: file.source, reason: .sourceChanged))
         }
         let asset = AVURLAsset(url: file.readURL)
         return await withTaskCancellationHandler {
@@ -185,9 +189,13 @@ public final class AudioImportService: @unchecked Sendable {
     }
 
     func artwork(at url: URL) async -> Data? {
-        if let cached = lock.withLock({ artworkCache[url] }) {
+        if let cached = lock.withLock({ artworkCache[url] }), cached.isCurrent() {
             return await artwork(from: cached)
         }
+        // Ein veralteter Eintrag war schlechter als gar keiner: Er lieferte
+        // dauerhaft `nil`, während ein Cache-Fehltreffer neu analysiert und ein
+        // inzwischen vorhandenes Cover gefunden hätte.
+        lock.withLock { artworkCache[url] = nil }
         guard case .success(let analysis) = await analyze(FoundFile(source: url, resolved: url)) else { return nil }
         return await artwork(from: analysis)
     }

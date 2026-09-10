@@ -87,6 +87,55 @@ struct AudioImportServiceTests {
         #expect(await service.artwork(from: analysis) == nil)
     }
 
+    @Test("Ein veralteter Cache-Eintrag löst eine neue Analyse aus")
+    func staleCacheEntryTriggersFreshAnalysis() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let url = folder.appendingPathComponent("01 Sprache.wav")
+        try importFixture(url)
+        let service = AudioImportService()
+        guard case .success = await service.analyze(FoundFile(source: url, resolved: url)) else {
+            Issue.record("Echte WAV-Datei konnte nicht analysiert werden")
+            return
+        }
+        #expect(service.metrics.sourceAnalyses == 1)
+
+        // Austausch am selben Pfad: neuer Inode, der Cache-Eintrag gilt nicht mehr.
+        let replacement = folder.appendingPathComponent("replacement.wav")
+        try importFixture(replacement)
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.moveItem(at: replacement, to: url)
+
+        _ = await service.artwork(at: url)
+        // Ein veralteter Eintrag war früher schlechter als gar keiner: Er
+        // lieferte dauerhaft `nil`, während ein Cache-Fehltreffer neu analysiert
+        // und ein inzwischen vorhandenes Cover gefunden hätte.
+        #expect(service.metrics.sourceAnalyses == 2)
+    }
+
+    @Test("Eine Änderung vor dem Laden heißt „Quelle verändert\", nicht „Analyse fehlgeschlagen\"")
+    func changeBeforeLoadingReportsSourceChanged() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let visible = folder.appendingPathComponent("kapitel.wav")
+        let other = folder.appendingPathComponent("anderes.wav")
+        try importFixture(visible)
+        try importFixture(other)
+        let service = AudioImportService()
+
+        // `resolved` zeigt auf eine andere Datei als der sichtbare Pfad — genau
+        // die Lage, die entsteht, wenn zwischen Scan und Analyse getauscht wird.
+        let result = await service.analyze(FoundFile(source: visible, resolved: other))
+        guard case .failure(let failure) = result else {
+            Issue.record("Uneinheitliche Quelle muss abgelehnt werden")
+            return
+        }
+        #expect(failure.sourceURL == visible)
+        #expect(failure.reason == .sourceChanged)
+    }
+
     @Test("Zusätzliche Buchtags werden ohne Verwechslung von Reihe und Band gelesen")
     func additionalBookMetadata() async {
         let values = [("narrator", "Ada Beispiel"), ("series_part", "3"), ("language", "deu")]
