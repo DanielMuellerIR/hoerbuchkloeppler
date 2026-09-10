@@ -6,7 +6,7 @@
     "token_budget": 3000000,
     "status": "active",
     "started_at": "2026-09-10T10:16:35+02:00",
-    "tokens_spent": 581980
+    "tokens_spent": 605502
   },
   "campaign_history": [
     {
@@ -101,15 +101,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260910T101635358055+0200",
-        "completed_at": "2026-09-10T11:53:17+02:00",
-        "observed_head": "917da900982ee386a8cb26b38ad736ed256b35fa",
-        "content_sha256": "98ed2395c337ba051308d46fa9186b8bc8f1a76aff0dff5483b5cc45794bac5a",
+        "completed_at": "2026-09-10T12:50:42+02:00",
+        "observed_head": "64d4b090955acd91b3c0c4cc51d2fc68eb49ebc7",
+        "content_sha256": "b1f9465c395264f22686f1caf79fcf4d726123a7f4c1de0810e51ef861c034d1",
         "file_count": 4,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Nachbuchung des Bereichs-Deltas aus dem audio-analysis-Commit: Analyse-Cache wird am Ende von finishImport auf den sichtbaren Bestand gestutzt, und der tote AudioTrackAvailability-Pfad ist entfernt. Beides im selben Lauf geschrieben und über die Artwork-Resume-Tests mitverifiziert.",
+        "summary": "Nachbuchung des Querschnitts-Diffs file-snapshot-identity: Die Datei-Snapshot-Prüfung läuft jetzt über das gemeinsame matchesContentSnapshot statt über eine eigene Feldmenge. Im selben Lauf geschrieben und über den neuen Prädikat-Test sowie die vollständige Suite verifiziert.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 250/250 passed"
+          "swift test -Xswiftc -warnings-as-errors: 253/253 passed"
         ]
       }
     },
@@ -130,15 +130,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260910T101635358055+0200",
-        "completed_at": "2026-09-10T12:46:43+02:00",
-        "observed_head": "9e90183b09d00bb0b2076421087eb93c0899a0c9",
-        "content_sha256": "c9c55edeaba428169aca86f86e9e32c0e61835144749350ce080662c3fde666f",
+        "completed_at": "2026-09-10T12:50:42+02:00",
+        "observed_head": "64d4b090955acd91b3c0c4cc51d2fc68eb49ebc7",
+        "content_sha256": "99a96855b90859bdfa55be10baa8078d02aa67bba3e17e6cd419719eab40e38b",
         "file_count": 7,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Nachbuchung: Einziges Delta sind die drei FFMETADATA-Parsertests aus dem audio-analysis-Commit, die in FFmpegWrapperTests.swift liegen. Im selben Lauf geschrieben, Gegenprobe ohne Fix für zwei davon belegt rot.",
+        "summary": "Nachbuchung des Querschnitts-Diffs file-snapshot-identity: Die Datei-Snapshot-Prüfung läuft jetzt über das gemeinsame matchesContentSnapshot statt über eine eigene Feldmenge. Im selben Lauf geschrieben und über den neuen Prädikat-Test sowie die vollständige Suite verifiziert.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 252/252 passed"
+          "swift test -Xswiftc -warnings-as-errors: 253/253 passed"
         ]
       }
     },
@@ -206,18 +206,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260910T101635358055+0200",
-        "completed_at": "2026-09-10T11:53:09+02:00",
-        "observed_head": "917da900982ee386a8cb26b38ad736ed256b35fa",
-        "content_sha256": "66b70f8e9b37d30ae82bd0314001d5de10252b90bd6b50e409ef4b8aa142c8e5",
+        "completed_at": "2026-09-10T12:50:42+02:00",
+        "observed_head": "64d4b090955acd91b3c0c4cc51d2fc68eb49ebc7",
+        "content_sha256": "7f527dc2c3364f732337577a4d4e399110bfeb81ae3cd06563e5e0e4fb788e1b",
         "file_count": 2,
         "review": "delta-plus-boundaries",
-        "outcome": "improved",
-        "summary": "Sechs Korrektheitsfunde behoben: FFMETADATA-Fortsetzungszeile zerstörte Titel und konnte das Kapitelende überschreiben, END vor START wurde zu einem erfundenen Kapitel repariert, CRLF-Dateien lieferten gar keine Kapitel, ein veralteter Artwork-Cache-Eintrag verhinderte dauerhaft die Coversuche, falsche Fehlerursache vor dem Laden, unbegrenztes waitUntilExit nach der Kapitel-Frist. Dazu Analyse-Cache nach dem Import gestutzt und toten Audiostream-Prüfer entfernt. Offen und bewusst nicht angefasst: readFFMetadata und waitForProcessExit blockieren synchron einen Thread des Cooperative Pools (bis zu 30 s je Datei, bis zu workerLimit gleichzeitig); die Artwork-Größengrenze greift erst nach dem vollständigen Laden.",
+        "outcome": "reviewed-clean",
+        "summary": "Nachbuchung des Querschnitts-Diffs file-snapshot-identity: Die Datei-Snapshot-Prüfung läuft jetzt über das gemeinsame matchesContentSnapshot statt über eine eigene Feldmenge. Im selben Lauf geschrieben und über den neuen Prädikat-Test sowie die vollständige Suite verifiziert.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 250/250 passed",
-          "tests/verify_cli_matrix.py und tests/verify_cli_terminal.py: VERIFIED",
-          "test_scripts.sh und test_project_cli.py: passed",
-          "xcodebuild -scheme Hörbuchklöppler Debug: BUILD SUCCEEDED"
+          "swift test -Xswiftc -warnings-as-errors: 253/253 passed"
         ]
       }
     },
@@ -237,18 +234,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260910T101635358055+0200",
-        "completed_at": "2026-09-10T12:10:26+02:00",
-        "observed_head": "d31d5c49263b78540f4f86e0b5092b06dc252220",
-        "content_sha256": "70dc444ae298922b46492b7444e01e46abc2c8293e809b9ee4b64fb643dfc7d0",
+        "completed_at": "2026-09-10T12:50:43+02:00",
+        "observed_head": "64d4b090955acd91b3c0c4cc51d2fc68eb49ebc7",
+        "content_sha256": "a84bac5fc539484835f6c6458330252a259b998ce67645a48e7b4e0143e09185",
         "file_count": 6,
         "review": "delta-plus-boundaries",
-        "outcome": "improved",
-        "summary": "Sieben Vertrags- und Korrektheitsfunde behoben, darunter der GUI-CLI-Handoff, der bei jedem Freitext mit führendem Bindestrich einen abbrechenden Befehl erzeugte, und zwei Wege, auf denen eine Projektdatei entweder mit rohem Decoding-Fehler starb oder gegen das Arbeitsverzeichnis auflöste. Die Bitratenumrechnung steht jetzt an einer Stelle statt zweimal mit Force-Unwrap. Nicht bestätigt: Der Review hielt FIFO oder Zeichengerät als Projektdatei für einen Hänger — FIFO ohne Schreiber, FIFO mit Schreiber und /dev/zero enden alle sauber mit Exit 1. Offen und bewusst nicht angefasst: RunReport.phase trägt deutsche UI-Beschriftungen in einer versionierten Maschinenschnittstelle, und success fehlt auf nicht-terminalen Zeilen statt null zu sein — beides sind Schnittstellenentscheidungen mit eigenem Auftragsbedarf.",
+        "outcome": "reviewed-clean",
+        "summary": "Nachbuchung des Querschnitts-Diffs file-snapshot-identity: Die Datei-Snapshot-Prüfung läuft jetzt über das gemeinsame matchesContentSnapshot statt über eine eigene Feldmenge. Im selben Lauf geschrieben und über den neuen Prädikat-Test sowie die vollständige Suite verifiziert.",
         "tests": [
-          "swift test -Xswiftc -warnings-as-errors: 250/250 passed",
-          "tests/verify_cli_matrix.py: VERIFIED (inkl. Handoff-Form gegen den echten Parser)",
-          "tests/verify_cli_terminal.py, test_scripts.sh, test_project_cli.py: passed",
-          "xcodebuild -scheme Hörbuchklöppler Debug: BUILD SUCCEEDED"
+          "swift test -Xswiftc -warnings-as-errors: 253/253 passed"
         ]
       }
     },
@@ -267,17 +261,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260910T101635358055+0200",
-        "completed_at": "2026-09-10T12:46:05+02:00",
-        "observed_head": "9e90183b09d00bb0b2076421087eb93c0899a0c9",
-        "content_sha256": "c95a9fdbca12fccee300871b6d2d61a3303d471ae3f1a67f2df75077b4d5b5f2",
+        "completed_at": "2026-09-10T12:50:52+02:00",
+        "observed_head": "64d4b090955acd91b3c0c4cc51d2fc68eb49ebc7",
+        "content_sha256": "f09bd5bccc0fb4853ca245d218305058ed33d73939d5c74b6eb9574cc3d081b2",
         "file_count": 5,
         "review": "delta-plus-boundaries",
-        "outcome": "improved",
-        "summary": "Delta war ein Versionsstempel; build.sh und script-helpers.sh sind seit dem Review vom 2026-08-30 unverändert und ohne Korrektheitsbefund (beide Prüfsummen je Abhängigkeit, Subshells mit eigenem set -euo pipefail und Traps, geführter Mount-Abbau, Startprüfung beider Binaries). Der Fund lag an der Grenze: test_scripts.sh prüfte keines der sieben Shell-Skripte, nicht einmal auf Syntax, und notary-profile.sh war gar nicht eingebunden. Jetzt bash -n über alle sieben, Gegenprobe mit künstlichem Syntaxfehler belegt. Weiterhin ungetestet und im Bericht benannt: die Beenden-und-Ersetzen-Sequenz von install.sh, die DMG- und Notarisierungskette von release.sh und die Innen-nach-außen-Reihenfolge von sign-bundle.sh.",
+        "outcome": "reviewed-clean",
+        "summary": "Nachbuchung: Einziges Delta ist der Versionsstempel in VERSION aus dem Querschnitts-Commit; build.sh und script-helpers.sh sind unverändert.",
         "tests": [
-          "test_scripts.sh: passed; Gegenprobe mit Syntaxfehler in notary-profile.sh meldet Datei und Zeile",
-          "./build.sh --deps-only: beide Prüfsummen und beide Binärstarts bestätigt",
-          "swift test -Xswiftc -warnings-as-errors: 252/252 passed"
+          "test_scripts.sh: passed (Abgleich VERSION gegen MARKETING_VERSION)"
         ]
       }
     },
@@ -387,16 +379,15 @@
       "state": "completed",
       "last_run": {
         "campaign_id": "20260910T101635358055+0200",
-        "completed_at": "2026-09-10T12:46:43+02:00",
-        "observed_head": "9e90183b09d00bb0b2076421087eb93c0899a0c9",
-        "content_sha256": "49a5346dc3b6b70a1e7bc0a81e1eae4ba60f106ccf31332dfcb1ed6af7e55f94",
+        "completed_at": "2026-09-10T12:50:43+02:00",
+        "observed_head": "64d4b090955acd91b3c0c4cc51d2fc68eb49ebc7",
+        "content_sha256": "b6e2144628f0af8ddf7644393196fcaecf98b58b6019ca8c341cb665ec6219fb",
         "file_count": 2,
         "review": "delta-plus-boundaries",
         "outcome": "reviewed-clean",
-        "summary": "Delta sind ausschließlich die Versionsstempel dieser Kampagne: MARKETING_VERSION steht in Debug und Release identisch auf 1.4.16 und stimmt mit der VERSION-Datei überein — genau das prüft der Wächter in test_scripts.sh. Package.resolved unverändert.",
+        "summary": "Nachbuchung des Querschnitts-Diffs file-snapshot-identity: Die Datei-Snapshot-Prüfung läuft jetzt über das gemeinsame matchesContentSnapshot statt über eine eigene Feldmenge. Im selben Lauf geschrieben und über den neuen Prädikat-Test sowie die vollständige Suite verifiziert.",
         "tests": [
-          "test_scripts.sh: passed (Abgleich VERSION gegen MARKETING_VERSION)",
-          "xcodebuild -scheme Hörbuchklöppler Debug: BUILD SUCCEEDED"
+          "swift test -Xswiftc -warnings-as-errors: 253/253 passed"
         ]
       }
     }
@@ -754,14 +745,20 @@
         "HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/AudiobookProject.swift"
       ],
       "priority": 2,
-      "state": "in_progress",
+      "state": "completed",
       "noted_at": "2026-09-10T10:39:25+02:00",
       "campaign_id": "20260910T101635358055+0200",
       "started_at": "2026-09-10T12:47:17+02:00",
-      "active_run": {
+      "completed": {
         "campaign_id": "20260910T101635358055+0200",
-        "started_at": "2026-09-10T12:47:17+02:00",
-        "observed_head": "9e90183b09d00bb0b2076421087eb93c0899a0c9"
+        "completed_at": "2026-09-10T12:50:34+02:00",
+        "observed_head": "64d4b090955acd91b3c0c4cc51d2fc68eb49ebc7",
+        "summary": "Fünf Fundstellen mit vier Feldmengen auf ein Prädikat zusammengeführt: matchesContentSnapshot (Volume, Inode, Größe, Änderungszeit), daneben matchesDisplacedEntry mit zusätzlichem Modusvergleich für die Prüfung nach RENAME_SWAP. ImportSourceIdentity ist ein Alias auf FileSystemIdentity; die beiden handgeschriebenen before/after-Vergleiche in loadCoverSnapshot und ProjectSource.fingerprint sind ersetzt. Mitbehoben: Ein Finder-Tag während des Hashens einer großen Quelle ließ das Projektspeichern scheitern. grep findet im Core keinen handgeschriebenen stat-Feldvergleich mehr.",
+        "tests": [
+          "swift test -Xswiftc -warnings-as-errors: 253/253 passed",
+          "test_scripts.sh, test_project_cli.py, tests/verify_cli_matrix.py, tests/verify_cli_terminal.py: passed",
+          "xcodebuild -scheme Hörbuchklöppler Debug: BUILD SUCCEEDED"
+        ]
       }
     },
     {
