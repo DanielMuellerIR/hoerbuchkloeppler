@@ -670,22 +670,33 @@ struct ParseFFMetadataChaptersTests {
         #expect(chapters[0].title == "Vorwort\nEND=180000")
     }
 
+    @Test("Viele Fortsetzungszeilen werden vollständig zusammengefügt")
+    func manyMetadataContinuationLines() throws {
+        let pieces = Array(repeating: "x\\", count: 10_000) + ["Ende"]
+        let lines = AudioFile.ffMetadataLines(pieces.joined(separator: "\n"))
+        try #require(lines.count == 1)
+        #expect(lines[0].hasSuffix("\nEnde"))
+        #expect(lines[0].filter { $0 == "\n" }.count == 10_000)
+    }
+
     @Test("CRLF-Zeilenenden liefern dieselben Kapitel wie LF")
-    func parsesCarriageReturnLineEndings() {
+    func parsesCarriageReturnLineEndings() throws {
         // `CharacterSet.whitespaces` enthält kein CR; vorher blieb von einer
         // handgepflegten CRLF-Datei kein einziges Kapitel übrig.
         let text = "[CHAPTER]\r\nTIMEBASE=1/1000\r\nSTART=0\r\nEND=1000\r\ntitle=Eins\r\n"
             + "[CHAPTER]\r\nSTART=1000\r\nEND=2000\r\ntitle=Zwei\r\n"
         let chapters = AudioFile.parseFFMetadataChapters(text)
-        #expect(chapters.count == 2)
+        try #require(chapters.count == 2)
         #expect(chapters[0].start == 0)
         #expect(chapters[0].end == 1)
+        #expect(chapters[0].title == "Eins")
         #expect(chapters[1].start == 1)
         #expect(chapters[1].end == 2)
+        #expect(chapters[1].title == "Zwei")
     }
 
     @Test("Ein END vor dem START wird nicht stillschweigend repariert")
-    func doesNotRepairInvertedChapterBounds() {
+    func doesNotRepairInvertedChapterBounds() throws {
         // Fehlt END, füllt der Parser aus dem nächsten Kapitel. Ein
         // ausdrücklich widersprüchliches Paar bleibt dagegen ungültig, damit
         // die Extraktion auf das sichere Ein-Kapitel-Ergebnis zurückfällt,
@@ -706,7 +717,7 @@ struct ParseFFMetadataChaptersTests {
         title=Drei
         """
         let chapters = AudioFile.parseFFMetadataChapters(text)
-        #expect(chapters.count == 3)
+        try #require(chapters.count == 3)
         #expect(chapters[1].start == 4)
         #expect(chapters[1].end == 2)
         #expect(!AudioFile.chaptersAreValid(chapters, totalDuration: 12))
@@ -933,6 +944,21 @@ struct SplitAudioFilesTests {
         )
         #expect {
             try FFmpegWrapper.validateConversionPlan(empty)
+        } throws: { error in
+            (error as? ConversionOutputError)?.errorDescription
+                == "Keine Audiodateien zum Konvertieren vorhanden."
+        }
+
+        let file = file(1)
+        let mixed = ConversionPlan(
+            groups: [[file], []],
+            outputURLs: [],
+            outputSnapshots: [],
+            outputDirectorySnapshots: [],
+            inputSnapshots: [:]
+        )
+        #expect {
+            try FFmpegWrapper.validateConversionPlan(mixed)
         } throws: { error in
             (error as? ConversionOutputError)?.errorDescription
                 == "Keine Audiodateien zum Konvertieren vorhanden."
@@ -1561,7 +1587,7 @@ struct ConversionFileOwnershipTests {
             FFmpegWrapper.fileSystemIdentity(at: file, followSymlink: false)
         )
         #expect(baseline.matchesContentSnapshot(afterChmod))
-        #expect(!baseline.matchesDisplacedEntry(afterChmod))
+        #expect(baseline.matchesDisplacedEntry(afterChmod))
         #expect(baseline != afterChmod)
 
         // Ein Finder-Tag hebt allein die Statuszeit.
@@ -1589,6 +1615,28 @@ struct ConversionFileOwnershipTests {
         #expect(!afterTag.matchesContentSnapshot(afterWrite))
         #expect(!afterTag.matchesDisplacedEntry(afterWrite))
         #expect(afterTag != afterWrite)
+    }
+
+    @Test("Rechteänderung am Ziel widerspricht dem bestätigten Inhalt nicht")
+    func destinationPermissionChangeDoesNotForceRollback() throws {
+        let directory = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let staged = directory.appendingPathComponent(".staged.m4b")
+        try Data("altes Ziel".utf8).write(to: final)
+        try Data("neue Ausgabe".utf8).write(to: staged)
+        let expected = FFmpegWrapper.captureSnapshot(of: final)
+
+        let removed = try FFmpegWrapper.commitStagedOutput(
+            staged,
+            to: final,
+            expectedDestination: expected,
+            beforeRename: { #expect(chmod(final.path, 0o600) == 0) }
+        )
+
+        #expect(removed)
+        #expect(try String(contentsOf: final, encoding: .utf8) == "neue Ausgabe")
+        #expect(!FileManager.default.fileExists(atPath: staged.path))
     }
 
     @Test("Ein Finder-Tag an der Altdatei kostet nicht die fertige Ausgabe")
@@ -2853,6 +2901,7 @@ struct ConversionFileOwnershipTests {
 
             if cancel {
                 context.cancel()
+                #expect(context.waitForCancellationCleanup())
             } else {
                 context.removeTempDirectory(directory)
             }

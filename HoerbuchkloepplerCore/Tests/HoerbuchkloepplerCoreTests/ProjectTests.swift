@@ -92,6 +92,7 @@ struct ProjectTests {
         session.splitChapter(id: first.id, at: 7)
         #expect(session.audioFiles.map(\.startTime) == [3, 7])
         #expect(session.audioFiles.map(\.duration) == [4, 6])
+        #expect(session.canMergeChapterWithNext(id: session.audioFiles[0].id))
         session.mergeChapterWithNext(id: session.audioFiles[0].id)
         #expect(session.audioFiles.count == 1)
         #expect(session.audioFiles[0].duration == 10)
@@ -107,6 +108,21 @@ struct ProjectTests {
         session.undoChapterEdit()
         #expect(session.title == "Buch")
         #expect(session.audioFiles.count == 1)
+    }
+
+    @Test("Zusammenführen ist nur für lückenlose Abschnitte derselben Quelle möglich")
+    func mergeAvailabilityMatchesCorePreconditions() {
+        let session = ConversionSession(settings: AudioSettings())
+        let firstURL = URL(fileURLWithPath: "/tmp/erstes.wav")
+        let secondURL = URL(fileURLWithPath: "/tmp/zweites.wav")
+        let first = AudioFile(url: firstURL, startTime: 0, duration: 1, chapterTitle: "A")
+        let otherSource = AudioFile(url: secondURL, startTime: 1, duration: 1, chapterTitle: "B")
+        session.audioFiles = [first, otherSource]
+        #expect(!session.canMergeChapterWithNext(id: first.id))
+
+        let gap = AudioFile(url: firstURL, startTime: 2, duration: 1, chapterTitle: "C")
+        session.audioFiles = [first, gap]
+        #expect(!session.canMergeChapterWithNext(id: first.id))
     }
 
     @Test("Undo einer Kapiteländerung erhält zwischenzeitlich getippte Metadaten")
@@ -268,13 +284,26 @@ struct ProjectTests {
         let save = Task { try await session.saveProjectAsync(to: url) }
         // Warten, bis das Speichern seinen Vorgang angemeldet hat und beim
         // Hashen außerhalb des Main Actors hängt.
-        while session.projectOperation == before { await Task.yield() }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while session.projectOperation == before, ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+        guard session.projectOperation != before else {
+            Issue.record("Speichern hat seinen Vorgang nicht innerhalb von 5 Sekunden angemeldet")
+            save.cancel()
+            return
+        }
         // Genau hier zieht ein Drop dazwischen: `beginImport` vergibt eine neue
         // Vorgangskennung. Zwischen Prüfung und Aufruf liegt kein `await`, der
         // Zeitpunkt ist also fest.
         _ = session.beginImport()
 
-        await #expect(throws: ProjectError.self) { try await save.value }
+        await #expect {
+            try await save.value
+        } throws: { error in
+            error.localizedDescription
+                == "Das Speichern wurde durch eine andere Aktion unterbrochen; bitte erneut speichern."
+        }
         #expect(!FileManager.default.fileExists(atPath: url.path))
     }
 }

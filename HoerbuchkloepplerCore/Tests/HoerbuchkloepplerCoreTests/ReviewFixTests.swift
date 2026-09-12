@@ -28,22 +28,6 @@ private func writeSilentWAV(to url: URL, duration: TimeInterval = 0.25) throws {
     try file.write(from: buffer)
 }
 
-extension ConversionContext {
-    /// Wartet auf die im Hintergrund laufende Abbruchbereinigung. Das ist
-    /// dieselbe Barriere, die auch der Worker vor seinem Abschluss nimmt —
-    /// `cancel()` selbst kehrt bewusst sofort zurück, damit es den Main Actor
-    /// nicht blockiert.
-    @discardableResult
-    func waitForCancellationCleanup(timeout: TimeInterval = 5) -> Bool {
-        let finished = DispatchSemaphore(value: 0)
-        Thread.detachNewThread {
-            self.finishAfterCancellationCleanup { _ in }
-            finished.signal()
-        }
-        return finished.wait(timeout: .now() + timeout) == .success
-    }
-}
-
 /// Hält fest, auf welchem Thread ein Log entstanden ist. Für die Frage, ob die
 /// Abbruchbereinigung den Aufrufer blockiert, zählt allein: nicht auf seinem.
 private final class CallerThreadProbe: @unchecked Sendable {
@@ -558,6 +542,56 @@ struct OutputSafetyTests {
         #expect(!succeeded)
         let failure = session.eventLogs.first { $0.message.contains("Exit-Code") }?.message
         #expect(failure?.contains("Unrecognized option") == true)
+    }
+
+    @Test("Finale Ausgabe mit offen gehaltener Pipe gilt nicht als vollständig")
+    @MainActor
+    func finalProcessRejectsTruncatedPipeOutput() async throws {
+        let directory = try temporaryDirectory()
+        let wrapper = directory.appendingPathComponent("ffmpeg-wrapper")
+        let childPIDFile = directory.appendingPathComponent("child.pid")
+        defer {
+            if let text = try? String(contentsOf: childPIDFile, encoding: .utf8),
+               let childPID = pid_t(text),
+               Darwin.kill(childPID, 0) == 0 {
+                _ = Darwin.kill(childPID, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: directory)
+        }
+        try makeExecutable(wrapper, contents: """
+        #!/usr/bin/python3
+        import subprocess, sys
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            stderr=sys.stderr,
+            start_new_session=True,
+        )
+        with open(sys.argv[1], "w", encoding="utf-8") as handle:
+            handle.write(str(child.pid))
+        """)
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        let context = session.beginConversionRun()
+
+        let succeeded = FFmpegWrapper.runFinalProcess(
+            args: [childPIDFile.path],
+            session: session,
+            context: context,
+            progressBase: 0,
+            progressWeight: 1,
+            phaseDuration: 1,
+            logMessage: "Wrapper-Testlauf",
+            pacmanTitle: "Test",
+            executableURL: wrapper
+        )
+        for _ in 0..<10 where !session.eventLogs.contains(where: {
+            $0.message.contains("unvollständig")
+        }) {
+            await Task.yield()
+        }
+
+        #expect(!succeeded)
+        #expect(session.eventLogs.contains { $0.message.contains("unvollständig") })
     }
 
     @Test("Finaler Wrapper-Exit mit Hintergrund-Encoder gilt nicht als Erfolg")
@@ -1607,16 +1641,9 @@ struct ImportLifecycleTests {
         #expect(session.segmentProgress.isEmpty)
     }
 
-    @Test("Der Startzustand eines Laufs trägt keine Phase des Vorlaufs weiter")
-    func startingRunStateDropsPreviousPhase() {
-        var state = ConversionRunState()
-        state.phase = "Buchlautheit messen"
-        state.completedOutputs = [URL(fileURLWithPath: "/tmp/Alt.m4b")]
-        state.succeeded = false
-        state.progress = 0.9
-        state.segments = [0: SegmentStatus(filename: "alt.m4b", progress: 1.0)]
-
-        state = ConversionRunState(startingWith: "Konvertierung läuft")
+    @Test("Der Start-Initialisierer setzt einen vollständigen Laufzustand")
+    func startingRunStateUsesFreshDefaults() {
+        let state = ConversionRunState(startingWith: "Konvertierung läuft")
 
         #expect(state.isConverting)
         #expect(state.showOverlay)
@@ -1941,6 +1968,55 @@ struct ImportLifecycleTests {
         #expect(session.titleCandidates.isEmpty)
         #expect(session.authorCandidates.isEmpty)
         #expect(session.showSelectionUI)
+    }
+
+    @Test("Headless-Import öffnet auch bei einem MediaInfo-Fehler keine Auswahl")
+    func headlessMetadataFailureDoesNotRequestSelection() async {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        let token = session.beginImport(allowsSelectionUI: false)
+        let missing = AudioFile(
+            url: URL(fileURLWithPath: "/tmp/fehlt-\(UUID().uuidString).mp3"),
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Fehlt"
+        )
+
+        await session.processIncomingFiles(
+            [missing],
+            skipCoverExtraction: true,
+            importToken: token
+        )
+        await session.finishImport(token)
+
+        #expect(!session.showSelectionUI)
+    }
+
+    @Test("Ein Import mit festen Buchfeldern entfernt alte Kandidaten")
+    func completedMetadataClearsStaleCandidates() async {
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        session.title = "Fest"
+        session.author = "Fest"
+        session.titleCandidates = [TagCandidate(type: "Alt", key: "Title", value: "Alt")]
+        session.authorCandidates = [TagCandidate(type: "Alt", key: "Artist", value: "Alt")]
+        let token = session.beginImport()
+        let file = AudioFile(
+            url: URL(fileURLWithPath: "/tmp/fest-\(UUID().uuidString).mp3"),
+            startTime: 0,
+            duration: 1,
+            chapterTitle: "Fest"
+        )
+
+        await session.processIncomingFiles(
+            [file],
+            skipCoverExtraction: true,
+            importToken: token
+        )
+        await session.finishImport(token)
+
+        #expect(session.titleCandidates.isEmpty)
+        #expect(session.authorCandidates.isEmpty)
     }
 
     @Test("Alle löschen entwertet noch laufende Drop-Ergebnisse")

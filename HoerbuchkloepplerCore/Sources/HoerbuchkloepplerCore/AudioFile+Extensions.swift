@@ -388,7 +388,10 @@ extension AudioFile {
             case "END":
                 sawEnd = true
                 rawEnd = Double(value.trimmingCharacters(in: .whitespacesAndNewlines))
-            case "TITLE": current?.title = unescapeFFMetadata(value)
+            case "TITLE":
+                current?.title = unescapeFFMetadata(
+                    value.trimmingCharacters(in: .newlines)
+                )
             default: break
             }
         }
@@ -415,7 +418,8 @@ extension AudioFile {
         var lines: [String] = []
         for piece in text.components(separatedBy: "\n") {
             if let last = lines.last, endsWithEscapingBackslash(last) {
-                lines[lines.count - 1] = last + "\n" + piece
+                lines[lines.count - 1].append("\n")
+                lines[lines.count - 1].append(contentsOf: piece)
             } else {
                 lines.append(piece)
             }

@@ -3,7 +3,7 @@ import AVFoundation
 import Combine
 import HoerbuchkloepplerCore
 
-/// Hält das Observer-Token des NotificationCenters außerhalb des Main Actors.
+/// Hält ein Observer-Token des NotificationCenters außerhalb des Main Actors.
 /// Ein `@MainActor`-Objekt darf in seinem (nicht isolierten) `deinit` nicht auf
 /// nicht-Sendable-Eigenschaften zugreifen; die Box dagegen meldet den Observer
 /// beim eigenen Freigeben ab. Der Player ist ihr einziger Besitzer, sie stirbt
@@ -11,7 +11,7 @@ import HoerbuchkloepplerCore
 /// geschlossen wird und `stop()` nie mehr aufgerufen wird.
 // `nonisolated`: Das App-Target isoliert Typen standardmäßig auf den Main
 // Actor; die Box muss aber aus jedem `deinit` heraus erreichbar sein.
-nonisolated private final class EndObserverToken: @unchecked Sendable {
+nonisolated private final class ObserverToken: @unchecked Sendable {
     private let lock = NSLock()
     private var token: NSObjectProtocol?
 
@@ -37,10 +37,14 @@ final class ChapterPreviewPlayer: ObservableObject {
     /// Name einer Quelle, die sich nicht abspielen ließ; die Ansicht zeigt ihn
     /// als Meldung und setzt ihn zurück.
     @Published var unplayableFile: String?
+    /// Erst nach erfolgreichem Sprung an den Kapitelanfang darf die Ansicht
+    /// die aktuelle Position zum Teilen verwenden.
+    @Published private(set) var canSplit = false
     private var player: AVPlayer?
     /// Der Player, dessen Sprung an den Kapitelanfang abgeschlossen ist.
     private var seekedPlayer: AVPlayer?
-    private let endObserver = EndObserverToken()
+    private let endObserver = ObserverToken()
+    private let failureObserver = ObserverToken()
 
     /// Startet den Abschnitt, oder stoppt ihn, wenn dieses Kapitel gerade läuft.
     func toggle(_ file: AudioFile) {
@@ -58,13 +62,25 @@ final class ChapterPreviewPlayer: ObservableObject {
         let startedID = file.id
         endObserver.replace(with: NotificationCenter.default.addObserver(forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main) { [weak self] _ in
             Task { @MainActor in
-                guard self?.playingID == startedID else { return }
+                guard self?.playingID == startedID, self?.player === p else { return }
                 self?.stop()
+            }
+        })
+        failureObserver.replace(with: NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemFailedToPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard self?.playingID == startedID, self?.player === p else { return }
+                self?.stop()
+                self?.unplayableFile = file.sourceURL.lastPathComponent
             }
         })
         player = p
         playingID = file.id
         seekedPlayer = nil
+        canSplit = false
         Task {
             // Eine gelöschte, umbenannte oder auf einem ausgehängten Volume
             // liegende Quelle spielt nie ab und meldet auch kein Ende. Ohne
@@ -76,9 +92,17 @@ final class ChapterPreviewPlayer: ObservableObject {
                 unplayableFile = file.sourceURL.lastPathComponent
                 return
             }
-            await p.seek(to: CMTime(seconds: file.startTime, preferredTimescale: 600))
+            let seekFinished = await p.seek(
+                to: CMTime(seconds: file.startTime, preferredTimescale: 600)
+            )
             guard player === p else { return }
+            guard seekFinished else {
+                stop()
+                unplayableFile = file.sourceURL.lastPathComponent
+                return
+            }
             seekedPlayer = p
+            canSplit = true
             p.play()
         }
     }
@@ -96,7 +120,8 @@ final class ChapterPreviewPlayer: ObservableObject {
         player = nil
         seekedPlayer = nil
         endObserver.replace(with: nil)
+        failureObserver.replace(with: nil)
+        canSplit = false
         if playingID != nil { playingID = nil }
     }
 }
-

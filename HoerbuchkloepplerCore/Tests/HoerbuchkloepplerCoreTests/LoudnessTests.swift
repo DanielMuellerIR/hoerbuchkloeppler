@@ -6,6 +6,29 @@ import ImageIO
 
 @Suite("Buchlautheit", .serialized)
 struct LoudnessTests {
+    @MainActor
+    private func waitForConversion(
+        _ session: ConversionSession,
+        timeout: Duration = .seconds(30)
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + timeout
+        while session.isConverting, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        guard session.isConverting else { return true }
+
+        Issue.record("Konvertierung lief nach \(timeout) noch; Testlauf wird abgebrochen")
+        _ = FFmpegWrapper.cancelConversion(session: session)
+        let cleanupDeadline = ContinuousClock.now + .seconds(5)
+        while session.isConverting, ContinuousClock.now < cleanupDeadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        if session.isConverting {
+            Issue.record("Abbruchbereinigung endete nicht innerhalb von 5 Sekunden")
+        }
+        return false
+    }
+
     @Test func commonGainPreservesDynamicsAndPeakHeadroom() throws {
         let result = try LoudnessMeasurement.parse(Data("noise\n{\"input_i\":\"-26.5\",\"input_tp\":\"-3.0\"}\n".utf8))
         #expect(result.gainDB == 2)
@@ -71,10 +94,7 @@ struct LoudnessTests {
             let secondPlan = FFmpegWrapper.makeConversionPlan(files: session.audioFiles, outputURL: folder.appendingPathComponent("second-\(parallel).m4b"), maxDurationHours: nil)
             let plan = split ? ConversionPlan(groups: session.audioFiles.map { [$0] }, outputURLs: initialPlan.outputURLs + secondPlan.outputURLs, outputSnapshots: initialPlan.outputSnapshots + secondPlan.outputSnapshots, outputDirectorySnapshots: initialPlan.outputDirectorySnapshots + secondPlan.outputDirectorySnapshots, inputSnapshots: initialPlan.inputSnapshots) : initialPlan
             guard case .started = FFmpegWrapper.convert(session: session, plan: plan) else { Issue.record("Start abgelehnt"); continue }
-            for _ in 0..<1500 {
-                if !session.isConverting { break }
-                try await Task.sleep(for: .milliseconds(20))
-            }
+            guard await waitForConversion(session) else { continue }
             #expect(session.lastConversionSucceeded == true)
             #expect(FileManager.default.fileExists(atPath: output.path))
             if split { #expect(FileManager.default.fileExists(atPath: secondPlan.outputURLs[0].path)) }
@@ -122,9 +142,8 @@ struct LoudnessTests {
             Issue.record("Start abgelehnt")
             return (session, output, [])
         }
-        for _ in 0..<1500 {
-            if !session.isConverting { break }
-            try? await Task.sleep(for: .milliseconds(20))
+        guard await waitForConversion(session) else {
+            return (session, output, session.eventLogs.map(\.message))
         }
         return (session, output, session.eventLogs.map(\.message))
     }

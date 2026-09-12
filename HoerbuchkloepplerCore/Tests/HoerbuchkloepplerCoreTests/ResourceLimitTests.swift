@@ -17,8 +17,9 @@ struct ResourceLimitTests {
         // Inhaltlich statt positionsabhängig: Eine künftige nachgestellte Option
         // machte den Test sonst rot, ohne dass `--workers` kaputt wäre.
         let workerIndex = invocation.arguments.firstIndex(of: "--workers")
-        #expect(workerIndex != nil)
-        if let workerIndex { #expect(invocation.arguments[workerIndex + 1] == "2") }
+        let index = try #require(workerIndex)
+        try #require(invocation.arguments.indices.contains(index + 1))
+        #expect(invocation.arguments[index + 1] == "2")
     }
 
     @Test func boundedDiagnosticStillDeliversEveryChunk() throws {

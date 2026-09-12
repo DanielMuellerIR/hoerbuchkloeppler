@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Prüft das ANSI-Endbild der CLI maschinell.
 
 `docs/build-and-test.md` beschreibt dieses Rezept bisher nur von Hand: Die CLI
@@ -18,7 +19,6 @@ import select
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import time
 
@@ -31,7 +31,7 @@ assert CLI.exists(), f"kloeppler fehlt: {CLI} — vorher swift build --package-p
 # Der Renderer nutzt genau drei Sequenzen (siehe TerminalRenderer): eine Zeile
 # hoch, Zeile löschen, an den Zeilenanfang.
 ESCAPE = re.compile(r"\x1b\[(?:1A|2K|G)")
-LOG_LINE = re.compile(r"^\[\d\d:\d\d:\d\d\.\d\d\d\] ")
+LOG_LINE = re.compile(r"^(?:\[\d\d:\d\d:\d\d\.\d\d\d\] |\[VERBOSE\] )")
 # Der Fortschrittsbalken erscheint erst, wenn das Encoding wirklich läuft.
 PACMAN = "\u15e7"
 

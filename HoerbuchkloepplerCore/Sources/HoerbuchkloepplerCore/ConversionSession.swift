@@ -35,6 +35,7 @@ public struct SegmentStatus: Equatable, Sendable {
 public struct ImportToken: Equatable, Sendable {
     fileprivate let generation: UUID
     fileprivate let coverRevision: UInt
+    fileprivate let allowsSelectionUI: Bool
 }
 
 struct MetadataResolution: Equatable, Sendable {
@@ -1092,7 +1093,10 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// Markiert einen neuen GUI-Import. Langsame Antworten eines vorherigen
     /// Datei-/Ordner-Drops verlieren damit sofort ihre Schreibberechtigung.
     /// Nur auf dem Main Actor aufrufen.
-    public func beginImport(expectedItemCount: Int = 1) -> ImportToken {
+    public func beginImport(
+        expectedItemCount: Int = 1,
+        allowsSelectionUI: Bool = true
+    ) -> ImportToken {
         projectOperation = UUID()
         importService.retainCachedArtwork(for: audioFiles.map(\.url))
         // Derselbe Context besitzt Swift-Tasks und externe Analyseprozesse. Ein
@@ -1127,7 +1131,11 @@ public final class ConversionSession: ObservableObject, Identifiable {
         // des Vorgängers hier verfallen. Stattdessen den Batch sofort verwerfen,
         // damit `abandonPendingImport` die Suche wieder anwirft.
         if pendingImportOperations == 0 { abandonPendingImport() }
-        return ImportToken(generation: importGeneration, coverRevision: coverRevision)
+        return ImportToken(
+            generation: importGeneration,
+            coverRevision: coverRevision,
+            allowsSelectionUI: allowsSelectionUI
+        )
     }
 
     /// Meldet genau einen Provider/Scan als abgeschlossen. Erst wenn alle Teile
@@ -1502,28 +1510,32 @@ public final class ConversionSession: ObservableObject, Identifiable {
             if volumeNumber.isEmpty { volumeNumber = metadata["volume_number"] ?? "" }
             if language.isEmpty { language = metadata["language"] ?? "" }
         }
-        // Titel und Autor stehen fest: Die Kandidatenlisten bleiben unberührt
-        // und es gibt nichts auszuwählen.
-        guard needsTitleAuthorCandidates else { return }
+        // Kandidaten gehören immer genau zum aktuellen Import, auch wenn Titel
+        // und Autor schon feststehen und MediaInfo deshalb nicht laufen musste.
+        guard needsTitleAuthorCandidates else {
+            titleCandidates = []
+            authorCandidates = []
+            return
+        }
         guard let candidates else {
             // Kandidaten gehören immer genau zum aktuellen Import. Andernfalls
             // könnte die Auswahl nach einem MediaInfo-Fehler Werte des vorherigen
             // Buchs anbieten.
             titleCandidates = []
             authorCandidates = []
-            showSelectionUI = importToken != nil
+            showSelectionUI = importToken?.allowsSelectionUI ?? false
             return
         }
         titleCandidates = candidates.titles
         authorCandidates = candidates.authors
-        // Ohne Import-Token läuft der headless CLI-Pfad (siehe
-        // `processIncomingFiles`) — dort gibt es keine Auswahl-UI.
+        // Der Token bezeichnet einen Batch, nicht das Frontend. Die CLI nutzt
+        // für `--file` ebenfalls einen Token und sperrt die Auswahl ausdrücklich.
         let resolution = Self.resolveMetadata(
             currentTitle: title,
             currentAuthor: author,
             titleCandidates: candidates.titles,
             authorCandidates: candidates.authors,
-            allowsSelectionUI: importToken != nil
+            allowsSelectionUI: importToken?.allowsSelectionUI ?? false
         )
         title = resolution.title
         author = resolution.author

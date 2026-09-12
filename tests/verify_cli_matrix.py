@@ -54,11 +54,13 @@ run([ROOT/'leer','--title=-Aufzeichnungen'],1)
 run([ROOT/'leer','--title','-Aufzeichnungen'],64)
 print('usage exits OK',flush=True)
 for index in [1,2]:
-    tool('-f','lavfi','-i','anullsrc=r=8000:cl=mono','-t','1801','-c:a','flac','-metadata',f'title=Kapitel {index}',ROOT/f'{index}.flac')
+    tool('-f','lavfi','-i','anullsrc=r=8000:cl=mono','-t','1801','-c:a','flac',
+         '-metadata',f'title=Kapitel {index}','-metadata','album=Matrixbuch',
+         '-metadata','artist=Autor','-metadata','album_artist=Verlag',ROOT/f'{index}.flac')
 tool('-f','lavfi','-i','color=c=blue:s=64x64','-frames:v','1','-threads','1',ROOT/'cover.png')
 files=['--file',ROOT/'2.flac','--file',ROOT/'1.flac']
 p=run([*files,'--inspect','--format','json','--output',ROOT/'absent'/'book.m4b','--no-cover'])
-r=json.loads(p.stdout);assert [c['title'] for c in r['chapters']]==['Kapitel 2','Kapitel 1'];assert not (ROOT/'absent').exists();print('inspect order OK',flush=True)
+r=json.loads(p.stdout);assert [c['title'] for c in r['chapters']]==['Kapitel 2','Kapitel 1'];assert r['metadata']['title']=='Matrixbuch',r['metadata'];assert r['metadata']['author']=='Autor',r['metadata'];assert not (ROOT/'absent').exists();print('inspect order + headless metadata OK',flush=True)
 metadata=['--title','Matrixbuch','--author','Autor','--narrator','Sprecher','--series','Reihe','--volume-number','2','--language','deu','--cover',ROOT/'cover.png']
 for mode in ['standard','parallel']:
     p=run([*files,*metadata,'--mode',mode,'--max-duration','1','--samplerate','8000','--bitrate','24k','--workers','2','--format','json','--output',ROOT/f'{mode}.m4b'])
@@ -82,8 +84,12 @@ for mode in ['standard','parallel']:
 
 def leftovers():
     # Nur der eigene Temp-Bereich; siehe CLI_TMP.
-    temp=pathlib.Path(tempfile.gettempdir())
+    temp=CLI_TMP
     return set(map(str,temp.glob('HB_Temp_*')))|set(map(str,temp.glob('HB_Loudness_*')))
+leftover_probe=CLI_TMP/'HB_Temp_probe'
+leftover_probe.mkdir()
+assert str(leftover_probe) in leftovers()
+leftover_probe.rmdir()
 def abort(sig,analyze=False):
     before=leftovers();target=ROOT/('cancel-analysis.m4b' if analyze else 'cancel-encoding.m4b')
     args=[str(CLI),*map(str,files),'--no-cover','--mode','standard','--samplerate','48000','--format','json','--output',str(target)]
@@ -126,6 +132,10 @@ events=[json.loads(l) for l in p.stdout.splitlines()];assert events[-1]['event']
 p=run(['--file',ROOT/'gibtsnicht.wav','--inspect','--format','json'],1)
 events=[json.loads(l) for l in p.stdout.splitlines()]
 assert len(events)==1 and events[0]['event']=='failed' and events[0]['success'] is False,events
+for invalid_folder in [ROOT/'gibtsnicht', ROOT/'bad.wav']:
+    p=run([invalid_folder,'--inspect','--format','json'],1)
+    events=[json.loads(l) for l in p.stdout.splitlines()]
+    assert len(events)==1 and events[0]['event']=='failed' and events[0]['success'] is False,events
 # `--normalize-loudness` erreicht sonst nirgends das echte Binary: Der Swift-Test
 # durchsucht nur die selbst gebaute Argumentliste des GUI-Handoffs.
 run([ROOT/'leer','--normalize-loudness','--analyze-loudness'],1)

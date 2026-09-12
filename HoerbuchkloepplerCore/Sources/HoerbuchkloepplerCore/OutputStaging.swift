@@ -66,10 +66,12 @@ struct FileSystemIdentity: Codable, Equatable, Sendable {
 
     /// Ein atomarer Rename aktualisiert auf manchen Volumes die Statuszeit des
     /// verschobenen Eintrags. Für die Prüfung NACH `RENAME_SWAP` zählen deshalb
-    /// Inhalts-Snapshot und Dateityp, aber nicht die Statuszeit; die strengere
-    /// Vorprüfung vergleicht weiterhin alle Felder über `Equatable`.
+    /// Inhalts-Snapshot und Dateityp, aber weder Statuszeit noch Zugriffsrechte.
+    /// Ein paralleles `chmod` ändert den Inhalt nicht und darf Vor- und
+    /// Nachprüfung nicht auf unterschiedliche Antworten bringen.
     func matchesDisplacedEntry(_ other: FileSystemIdentity) -> Bool {
-        matchesContentSnapshot(other) && mode == other.mode
+        matchesContentSnapshot(other)
+            && (mode & mode_t(S_IFMT)) == (other.mode & mode_t(S_IFMT))
     }
 
     /// Verzeichnisgröße und Zeitstempel ändern sich bei jedem Kind-Eintrag.

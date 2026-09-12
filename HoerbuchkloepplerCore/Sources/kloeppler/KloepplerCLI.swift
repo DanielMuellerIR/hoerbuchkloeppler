@@ -428,7 +428,7 @@ struct KloepplerCLI: AsyncParsableCommand {
         let sourceURL = URL(fileURLWithPath: options.project ?? options.files.first ?? folderPath)
         var isDir: ObjCBool = false
         guard options.project != nil || !options.files.isEmpty || (FileManager.default.fileExists(atPath: folderPath, isDirectory: &isDir) && isDir.boolValue) else {
-            if machineOutput && !options.inspect { try emitJSON(RunReport(event: "failed", phase: "input", progress: 0, success: false)) }
+            if machineOutput { try emitJSON(RunReport(event: "failed", phase: "input", progress: 0, success: false)) }
             throw reportedFailure("Fehler: Der Pfad \(folderPath) existiert nicht oder ist kein Ordner.")
         }
         // Nach der Existenzprüfung den physischen Ordner festhalten. Sonst kann
@@ -511,7 +511,10 @@ struct KloepplerCLI: AsyncParsableCommand {
                 if let workers = options.importWorkers { session.settings.importWorkerLimit = workers }
             } else if !options.files.isEmpty {
                 if cover != nil || noCover { session.removeCover() }
-                let token = session.beginImport(expectedItemCount: options.files.count)
+                let token = session.beginImport(
+                    expectedItemCount: options.files.count,
+                    allowsSelectionUI: false
+                )
                 await session.runImportTask(token) {
                     var foundFiles: [FoundFile] = []
                     for path in options.files {

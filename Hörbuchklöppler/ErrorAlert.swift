@@ -4,7 +4,7 @@ extension View {
     /// Zeigt einen Hinweis, solange `message` einen Text enthält, und setzt ihn
     /// beim Schließen zurück.
     ///
-    /// Vier Stellen der Oberfläche brauchten denselben Aufbau: ein `Binding`,
+    /// Mehrere Stellen der Oberfläche brauchen denselben Aufbau: ein `Binding`,
     /// das die Sichtbarkeit aus „Text vorhanden" ableitet, ein OK-Knopf, der den
     /// Text löscht, und ein Ersatztext für den Fall, dass er beim Zeichnen schon
     /// weg ist. Der Aufbau ist leicht falsch zu schreiben — vergisst eine Stelle

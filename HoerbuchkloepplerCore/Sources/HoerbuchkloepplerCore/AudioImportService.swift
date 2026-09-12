@@ -147,7 +147,8 @@ public final class AudioImportService: @unchecked Sendable {
             "narrator": "narrator", "narration": "narrator", "reader": "narrator",
             "composer": "narrator", "%a9wrt": "narrator", "©wrt": "narrator", "tcom": "narrator",
             "series": "series", "grouping": "series", "%a9grp": "series", "©grp": "series", "tit1": "series",
-            "volume_number": "volume_number", "disc": "volume_number", "disk": "volume_number", "tpos": "volume_number",
+            "volume_number": "volume_number", "disc": "volume_number", "discnumber": "volume_number",
+            "disk": "volume_number", "tpos": "volume_number",
             "series_part": "volume_number", "language": "language"
         ]
         var result: [String: String] = [:]
@@ -162,8 +163,20 @@ public final class AudioImportService: @unchecked Sendable {
                 // Text-Bandnummern wie „2/5" (ID3 TPOS, Vorbis DISCNUMBER)
                 // nennen hinter dem Schrägstrich die Gesamtzahl; nur der Band
                 // selbst ist die Nummer.
-                if key == "volume_number", let number = value.split(separator: "/").first {
-                    result[key] = number.trimmingCharacters(in: .whitespaces)
+                if key == "volume_number" {
+                    let number = value.split(
+                        separator: "/",
+                        maxSplits: 1,
+                        omittingEmptySubsequences: false
+                    ).first ?? ""
+                    let trimmed = number.trimmingCharacters(in: .whitespaces)
+                    // Tags dürfen nullgepolstert sein, direkte Eingaben nicht.
+                    // Nur eine gültige positive UInt16-Bandnummer übernehmen;
+                    // ein kaputtes Tag darf die spätere Konvertierung nicht
+                    // wegen einer ungültigen Nutzer-Eingabeform blockieren.
+                    if let parsed = UInt16(trimmed), parsed > 0 {
+                        result[key] = String(parsed)
+                    }
                 } else {
                     result[key] = value
                 }

@@ -438,15 +438,40 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
     func finishAfterCancellationCleanup(
         _ action: @Sendable (Bool) -> Void
     ) {
+        let wasCancelled = completeAfterCancellationCleanup(until: nil) ?? false
+        action(wasCancelled)
+    }
+
+    /// Gemeinsame Barriere für Worker-Abschluss und Tests. Ein erfolgreicher
+    /// Durchlauf markiert den Kontext zugleich als beendet; das ist derselbe
+    /// Zustandswechsel wie in `finishAfterCancellationCleanup`.
+    private func completeAfterCancellationCleanup(until deadline: Date?) -> Bool? {
         lock.lock()
         while cancellationCleanupInProgress {
-            lock.wait()
+            if let deadline {
+                guard lock.wait(until: deadline) else {
+                    lock.unlock()
+                    return nil
+                }
+            } else {
+                lock.wait()
+            }
         }
         finished = true
         let wasCancelled = cancelled
         lock.unlock()
-        action(wasCancelled)
+        return wasCancelled
     }
+
+    #if DEBUG
+    /// Begrenzte Testbarriere ohne einen bei Timeout zurückbleibenden Thread.
+    func waitForCancellationCleanup(timeout: TimeInterval = 5) -> Bool {
+        let bounded = timeout.isFinite ? max(0, timeout) : 5
+        return completeAfterCancellationCleanup(
+            until: Date(timeIntervalSinceNow: bounded)
+        ) != nil
+    }
+    #endif
 }
 
 /// Unveränderlicher Laufzeit-Snapshot für den ffmpeg-Worker. Der Worker liest
@@ -652,7 +677,8 @@ public struct FFmpegWrapper {
         }
         // Ohne Eingabedateien gar nicht erst starten — sonst leere ffmpeg-Liste
         // und Division durch die Gruppengröße bei der Fortschrittsberechnung.
-        guard !plan.groups.isEmpty, !plan.groups.flatMap({ $0 }).isEmpty,
+        guard !plan.groups.isEmpty,
+              plan.groups.allSatisfy({ !$0.isEmpty }),
               plan.groups.count == plan.outputURLs.count else {
             return reject(
                 session: session,
@@ -753,7 +779,6 @@ public struct FFmpegWrapper {
                         // Fehler-Latch, das ihr eigener Dekodierpass gesetzt
                         // haben kann und das sonst jeden weiteren Prozessstart
                         // dieses Laufs stumm ablehnte.
-                        job.loudnessGain = 0
                         context.clearSegmentFailure()
                         session.enqueueLog("Lautheitsanalyse fehlgeschlagen, die Konvertierung läuft ohne Messwert weiter: \(error.localizedDescription)", type: .highlight, runID: context.id)
                     }
@@ -1137,6 +1162,14 @@ public struct FFmpegWrapper {
                     if hadBackgroundProcesses {
                         session.enqueueLog(
                             "❌ Segment \(idx+1) ließ nach dem Werkzeug-Exit Hintergrundprozesse zurück; der Batch wird verworfen.",
+                            type: .highlight,
+                            runID: context.id
+                        )
+                        return
+                    }
+                    if outputReader.joinTimedOut {
+                        session.enqueueLog(
+                            "❌ Segment \(idx+1) lieferte keine vollständige Werkzeugausgabe; der Batch wird verworfen.",
                             type: .highlight,
                             runID: context.id
                         )
@@ -1559,6 +1592,14 @@ public struct FFmpegWrapper {
                 )
                 return false
             }
+            if outputReader.joinTimedOut {
+                session.enqueueLog(
+                    "❌ KRITISCHER FEHLER: Werkzeugausgabe blieb unvollständig. Die Ausgabe wird nicht übernommen.",
+                    type: .highlight,
+                    runID: context.id
+                )
+                return false
+            }
             if process.terminationStatus == 0 {
                 session.enqueueProgress(
                     mappedProgress(
@@ -1743,6 +1784,13 @@ extension FFmpegWrapper {
         let background = ProcessTerminator.terminateRemainingOwnedGroup(process)
         let data = reader.waitUntilEOF(timeout: 0.25)
         if context.isCancelled { throw CancellationError() }
+        guard !reader.joinTimedOut else {
+            throw NSError(
+                domain: "Loudness",
+                code: 4,
+                userInfo: [NSLocalizedDescriptionKey: "ffmpeg-Lautheitsanalyse lieferte keine vollständige Werkzeugausgabe."]
+            )
+        }
         guard process.terminationStatus == 0, !background else {
             throw NSError(domain: "Loudness", code: 3, userInfo: [NSLocalizedDescriptionKey: "ffmpeg-Lautheitsanalyse fehlgeschlagen: \(String(decoding: data, as: UTF8.self))"])
         }

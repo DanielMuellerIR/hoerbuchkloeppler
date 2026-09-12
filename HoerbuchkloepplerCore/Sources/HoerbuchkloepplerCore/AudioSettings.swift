@@ -103,7 +103,9 @@ public struct AudioSettings: Codable, Equatable, Sendable {
             result.maxDurationHours = defaults.maxDurationHours
         }
         if let limit = result.workerLimit, !(1...32).contains(limit) { result.workerLimit = nil }
-        if !(1...8).contains(result.importWorkerLimit) { result.importWorkerLimit = 4 }
+        if !(1...8).contains(result.importWorkerLimit) {
+            result.importWorkerLimit = defaults.importWorkerLimit
+        }
         return result
     }
 }

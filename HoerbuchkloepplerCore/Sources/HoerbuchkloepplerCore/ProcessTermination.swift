@@ -395,8 +395,10 @@ extension FFmpegWrapper {
         guard isUsableExecutable(url) else { return nil }
         let result = runCapturedProcess(
             executableURL: url,
-            // Auch der kurze Versionsaufruf bekommt `-nostdin`: Ein ffmpeg,
-            // das auf ein geerbtes Terminal wartet, hängt im Hintergrund.
+            // Auch der kurze Versionsaufruf erfüllt den repo-weiten
+            // ffmpeg-Vertrag mit `-nostdin`. `runCapturedProcess` trennt stdin
+            // zusätzlich vom Terminal, damit beide Schutzschichten unabhängig
+            // von künftigen Aufrufwegen erhalten bleiben.
             arguments: name == "mediainfo" ? ["--Version"] : ["-nostdin", "-version"],
             timeout: 5
         )

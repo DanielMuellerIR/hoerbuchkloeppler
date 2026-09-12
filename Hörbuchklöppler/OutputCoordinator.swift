@@ -57,6 +57,7 @@ import HoerbuchkloepplerCore
     func confirmPreview(_ plan: ConversionPlan, session: ConversionSession) {
         showingConversionPreview = false
         preview = nil
+        previewPlan = nil
         let collisions = plan.outputURLsRequiringOverwriteConfirmation
         if collisions.isEmpty { start(plan, session: session); return }
         pendingPlan = plan
@@ -69,6 +70,7 @@ import HoerbuchkloepplerCore
 
     func start(_ plan: ConversionPlan, session: ConversionSession) {
         pendingPlan = nil
+        previewPlan = nil
         collidingOutputNames = []
         switch FFmpegWrapper.convert(session: session, plan: plan) {
         case .started: conversionStartError = nil
@@ -80,6 +82,14 @@ import HoerbuchkloepplerCore
     /// samt seiner Datei-Snapshots darf dann nicht die Sitzung überdauern.
     func cancelOverwrite() {
         pendingPlan = nil
+        previewPlan = nil
         collidingOutputNames = []
+    }
+
+    /// Verwirft die Vorschau und den darin festgehaltenen Datei-Snapshot.
+    func cancelPreview() {
+        showingConversionPreview = false
+        preview = nil
+        previewPlan = nil
     }
 }

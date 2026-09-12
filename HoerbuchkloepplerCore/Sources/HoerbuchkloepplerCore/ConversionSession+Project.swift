@@ -257,11 +257,19 @@ extension ConversionSession {
         var files = audioFiles; files.replaceSubrange(index...index, with: [first, second]); audioFiles = files
     }
 
-    public func mergeChapterWithNext(id: UUID) {
-        guard let index = audioFiles.firstIndex(where: { $0.id == id }), index + 1 < audioFiles.count else { return }
+    public func canMergeChapterWithNext(id: UUID) -> Bool {
+        guard let index = audioFiles.firstIndex(where: { $0.id == id }),
+              index + 1 < audioFiles.count else { return false }
         let first = audioFiles[index], second = audioFiles[index + 1]
-        guard first.url == second.url, first.sourceURL == second.sourceURL,
-              abs(first.startTime + first.duration - second.startTime) < 0.001 else { return }
+        return first.url == second.url
+            && first.sourceURL == second.sourceURL
+            && abs(first.startTime + first.duration - second.startTime) < 0.001
+    }
+
+    public func mergeChapterWithNext(id: UUID) {
+        guard canMergeChapterWithNext(id: id),
+              let index = audioFiles.firstIndex(where: { $0.id == id }) else { return }
+        let first = audioFiles[index], second = audioFiles[index + 1]
         let merged = AudioFile(foundFile: FoundFile(source: first.sourceURL, resolved: first.url), startTime: first.startTime, duration: first.duration + second.duration, chapterTitle: first.chapterTitle)
         var files = audioFiles; files.replaceSubrange(index...(index + 1), with: [merged]); audioFiles = files
     }

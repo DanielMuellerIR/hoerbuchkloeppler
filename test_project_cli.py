@@ -9,6 +9,8 @@ root=pathlib.Path(tempfile.mkdtemp(prefix='hk-project-cli-'))
 repo=pathlib.Path(__file__).resolve().parent
 cli=repo/'HoerbuchkloepplerCore/.build/debug/kloeppler'
 ffmpeg=repo/'HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/Resources/bin/ffmpeg'
+assert ffmpeg.exists(),f'ffmpeg fehlt: {ffmpeg} — vorher ./build.sh --deps-only ausführen'
+assert cli.exists(),f'kloeppler fehlt: {cli} — vorher swift build --package-path HoerbuchkloepplerCore ausführen'
 for name,freq in [('A',440),('B',660)]:
     with wave.open(str(root/f'{name}.wav'),'wb') as w:
         w.setnchannels(1);w.setsampwidth(2);w.setframerate(32000)
@@ -29,7 +31,7 @@ r=json.loads(run(['--project',path,'--inspect','--format','json','--output',root
 assert abs(r['duration']-1.3)<1e-9,r['duration']
 assert r['metadata']['narrator']=='Sprecher';assert not (root/'another').exists()
 # Nur der Standard-Modus: Den Parallel-Modus deckt tests/verify_cli_matrix.py ab.
-for mode in ['standard']:  # noqa: B007 - bewusst einelementig, siehe Kommentar
+for mode in ['standard']:
     output=root/f'{mode}.m4b'
     p=run(['--project',path,'--mode',mode,'--format','json','--output',output])
     events=[json.loads(l) for l in p.stdout.splitlines()]

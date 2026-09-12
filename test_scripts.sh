@@ -17,23 +17,25 @@ valid_three="$work_dir/version-three"
 invalid_empty="$work_dir/version-empty"
 invalid_suffix="$work_dir/version-suffix"
 invalid_path="$work_dir/version-path"
-# Syntaxprüfung aller Shell-Skripte. Vorher führte dieses Gate keines von ihnen
-# aus und prüfte auch keines — ein Tippfehler in `release.sh` oder
+# Syntaxprüfung aller Root-Shell-Skripte. Vorher führte dieses Gate keines von
+# ihnen aus und prüfte auch keines — ein Tippfehler in `release.sh` oder
 # `notary-profile.sh` wäre erst beim Release aufgefallen, also genau dann, wenn
-# er am meisten kostet.
-for script in build.sh install.sh release.sh sign-bundle.sh notary-profile.sh \
-              script-helpers.sh test_scripts.sh; do
+# er am meisten kostet. Die Liste wächst mit neu hinzugefügten Root-Skripten.
+for script_path in ./*.sh; do
+  [ -f "$script_path" ] || continue
+  script="${script_path#./}"
   if [ ! -r "$script" ]; then
     printf 'Fehler: Skript fehlt: %s\n' "$script" >&2
     exit 1
   fi
-  if ! bash -n "$script" 2>/tmp/hk-syntax.$$; then
+  syntax_log="$work_dir/syntax.log"
+  if ! bash -n "$script" 2>"$syntax_log"; then
     printf 'Fehler: Syntaxfehler in %s:\n' "$script" >&2
-    cat /tmp/hk-syntax.$$ >&2
-    rm -f /tmp/hk-syntax.$$
+    cat "$syntax_log" >&2
+    rm -f "$syntax_log"
     exit 1
   fi
-  rm -f /tmp/hk-syntax.$$
+  rm -f "$syntax_log"
 done
 
 # Eine nackte `[ … ]`-Zeile beendet den Lauf unter `set -e` zwar korrekt, sagt

@@ -102,13 +102,12 @@ es wieder und prüft integrierte Lautheit, Cover, Sprecher, Reihe, Band und
 Sprache — das setzt aber `Resources/bin/ffmpeg` voraus (`./build.sh --deps-only`);
 ohne die Binaries meldet der Test das ausdrücklich als Fehlschlag.
 
-`test_scripts.sh` prüft **nicht** die Skripte `build.sh`, `install.sh`,
-`release.sh`, `sign-bundle.sh` oder `notary-profile.sh` — es führt keines davon
-aus. Abgesichert sind die Versions-Syntaxtabelle, der Abgleich von `VERSION` mit
-`MARKETING_VERSION` im Xcode-Projekt und die Ein-Snapshot-Identität aus
-`script-helpers.sh`. Die Beenden-und-Ersetzen-Sequenz von `install.sh`, die
-DMG-/Notarisierungskette von `release.sh` und die Innen-nach-außen-Reihenfolge
-von `sign-bundle.sh` bleiben ungetestet.
+`test_scripts.sh` prüft die Syntax (`bash -n`) aller Root-Shell-Skripte — es
+führt keines davon aus. Abgesichert sind außerdem die Versions-Syntaxtabelle,
+der Abgleich von `VERSION` mit `MARKETING_VERSION` im Xcode-Projekt und die
+Ein-Snapshot-Identität aus `script-helpers.sh`. Die Beenden-und-Ersetzen-Sequenz
+von `install.sh`, die DMG-/Notarisierungskette von `release.sh` und die
+Innen-nach-außen-Reihenfolge von `sign-bundle.sh` bleiben ungetestet.
 
 Die geprüften Funktionen sind `internal` statt `private`, damit `@testable
 import` drankommt. Das ist Absicht, kein vergessenes `private`.

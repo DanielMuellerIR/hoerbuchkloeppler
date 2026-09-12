@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var miStatus = "Prüfe..."
     @State private var showingToolErrorAlert = false
     @State private var cliHandoffError: String?
+    @State private var coverError: String?
     /// Einmal aufgelöster CLI-Pfad. Die Auflösung durchsucht den gesamten PATH
     /// mit je einem Dateisystemzugriff pro Eintrag; im View-Body ausgewertet
     /// liefe das bei jedem Fortschritts-Update zweimal auf dem Main Actor und
@@ -69,8 +70,10 @@ struct ContentView: View {
                             // Datei kein lesbares Bild ist. Verworfen sah der Drop
                             // wie ein Erfolg aus, und das Buch blieb ohne Cover.
                             if !session.selectCover(url: url) {
-                                cliHandoffError = "Diese Datei ist kein lesbares Bild: \(url.lastPathComponent)"
+                                coverError = "Diese Datei ist kein lesbares Bild: \(url.lastPathComponent)"
                             }
+                        }, onDropFailed: { message in
+                            coverError = message
                         })
                             .frame(width: 180, height: 180).shadow(radius: 5)
                         if session.coverImage != nil || session.coverPath != nil {
@@ -145,10 +148,10 @@ struct ContentView: View {
                                     if let id = preview.playingID, let time = preview.absolutePlaybackTime {
                                         preview.stop(); session.splitChapter(id: id, at: time)
                                     }
-                                }.disabled(preview.playingID == nil).help("Kapitel an der aktuellen Abspielposition teilen")
+                                }.disabled(!preview.canSplit).help("Kapitel an der aktuellen Abspielposition teilen")
                                 Button("Zusammenführen") {
                                     if let id = selectedChapters.first { preview.stop(); session.mergeChapterWithNext(id: id) }
-                                }.disabled(selectedChapters.count != 1).help("Mit dem unmittelbar folgenden Zeitabschnitt derselben Quelle zusammenführen")
+                                }.disabled(!canMergeSelectedChapter).help("Mit dem unmittelbar folgenden Zeitabschnitt derselben Quelle zusammenführen")
                             }
                             .padding(.horizontal)
                             // Solange ein Import läuft, gehört die Liste ihm.
@@ -250,6 +253,11 @@ struct ContentView: View {
             fallback: "Das Terminal konnte nicht geöffnet werden."
         )
         .errorAlert(
+            "Cover nicht übernommen",
+            message: $coverError,
+            fallback: "Die Cover-Datei ließ sich nicht laden."
+        )
+        .errorAlert(
             "Vorschau nicht möglich",
             message: $preview.unplayableFile,
             fallback: "Die Quelldatei ließ sich nicht abspielen."
@@ -268,8 +276,7 @@ struct ContentView: View {
         .sheet(isPresented: $flow.showingConversionPreview) {
             if let plan = flow.previewPlan, let preview = flow.preview {
                 OutputPreviewView(preview: preview, onCancel: {
-                    flow.showingConversionPreview = false
-                    flow.preview = nil
+                    flow.cancelPreview()
                 }, onStart: {
                     // `confirmPreview` schließt die Vorschau selbst.
                     flow.confirmPreview(plan, session: session)
@@ -475,6 +482,12 @@ struct ContentView: View {
         }
         return "Öffnet das Terminal mit dem vollständigen Befehl für die aktuellen Einstellungen, Metadaten und das Cover."
     }
+
+    private var canMergeSelectedChapter: Bool {
+        guard selectedChapters.count == 1,
+              let id = selectedChapters.first else { return false }
+        return session.canMergeChapterWithNext(id: id)
+    }
 }
 
 struct CoverView: View {
@@ -484,6 +497,7 @@ struct CoverView: View {
     /// eingebettetes Cover (`embeddedCoverData`) verworfen wird — sonst gewänne
     /// beim Kodieren das alte eingebettete Artwork statt des gedroppten Bilds.
     var onDropped: (URL) -> Void
+    var onDropFailed: (String) -> Void
     var body: some View {
         ZStack {
             if let img = image { Image(nsImage: img).resizable().aspectRatio(contentMode: .fill) }
@@ -492,9 +506,15 @@ struct CoverView: View {
         .frame(width: 180, height: 180).cornerRadius(12).clipped()
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             if let provider = providers.first {
-                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                _ = provider.loadObject(ofClass: URL.self) { url, error in
                     Task { @MainActor in
-                        if let url { self.onDropped(url) }
+                        if let url {
+                            self.onDropped(url)
+                        } else if let error {
+                            self.onDropFailed("Cover-Datei konnte nicht geladen werden: \(error.localizedDescription)")
+                        } else {
+                            self.onDropFailed("Der Datei-Drop lieferte keine lesbare Cover-Datei.")
+                        }
                     }
                 }
             }

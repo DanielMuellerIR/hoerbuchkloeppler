@@ -154,7 +154,7 @@ struct AudioImportServiceTests {
         #expect(result["series"] == nil)
     }
 
-    @Test("ID3-Frames liefern Sprecher, Reihe und Bandnummer ohne Gesamtzahl")
+    @Test("ID3-Frames liefern Sprecher, Reihe und kanonische Bandnummer")
     func id3BookMetadata() async {
         func frame(_ key: String, _ value: String) -> AVMetadataItem {
             let item = AVMutableMetadataItem()
@@ -164,9 +164,25 @@ struct AudioImportServiceTests {
             return item
         }
         let result = await AudioImportService.bookMetadata(from: [
-            frame("TCOM", "Ada Beispiel"), frame("TIT1", "Testreihe"), frame("TPOS", "2/5")
+            frame("TCOM", "Ada Beispiel"), frame("TIT1", "Testreihe"), frame("TPOS", "0002/05")
         ])
         #expect(result == ["narrator": "Ada Beispiel", "series": "Testreihe", "volume_number": "2"])
+    }
+
+    @Test("Vorbis DISCNUMBER wird erkannt; ungültige Band-Tags werden ignoriert")
+    func vorbisVolumeMetadata() async {
+        func item(_ value: String) -> AVMetadataItem {
+            let item = AVMutableMetadataItem()
+            item.keySpace = .quickTimeMetadata
+            item.key = "DISCNUMBER" as NSString
+            item.value = value as NSString
+            return item
+        }
+        #expect(await AudioImportService.bookMetadata(from: [item("01/12")])
+            == ["volume_number": "1"])
+        for invalid in ["", "/", "/12", "0", "65536", "-1", "eins"] {
+            #expect(await AudioImportService.bookMetadata(from: [item(invalid)]).isEmpty)
+        }
     }
 
     @Test("Native MP4-Tags liefern Sprecher, Reihe und binäre Bandnummer")
