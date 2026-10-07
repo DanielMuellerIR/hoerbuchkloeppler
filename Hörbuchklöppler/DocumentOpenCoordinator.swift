@@ -2,22 +2,86 @@ import Foundation
 import Combine
 import HoerbuchkloepplerCore
 import UniformTypeIdentifiers
+import AppKit
+
+@MainActor
+final class DocumentOpenDelegate: NSObject, NSApplicationDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) {
+        DocumentOpenCoordinator.receiveSystemURLs(urls)
+    }
+}
 
 @MainActor
 final class DocumentOpenCoordinator: ObservableObject {
     static let projectType = UTType(exportedAs: "danielmueller.Hoerbuchkloeppler.project", conformingTo: .json)
+    static let windowID = "audiobook"
+    static var createWindow: (() -> Void)?
+    private static let receivers = NSMapTable<NSWindow, DocumentOpenCoordinator>.weakToWeakObjects()
+    private static var unroutedURLs: [URL] = []
+    private static var requestingWindow = false
 
     @Published var projectToConfirm: URL?
     @Published var errorMessage: String?
     private var pendingURLs: [URL] = []
     private var collectionTask: Task<Void, Never>?
     private var isOpening = false
+    private weak var window: NSWindow?
+    private weak var boundSession: ConversionSession?
+    private var beforeSystemOpening: (@MainActor () -> Void)?
+    private var windowCloseSubscription: AnyCancellable?
     private let importAudio: @MainActor ([URL], ConversionSession) async -> Void
 
     init(importAudio: @escaping @MainActor ([URL], ConversionSession) async -> Void = { urls, session in
         await ImportCoordinator.importURLs(urls, session: session)
     }) {
         self.importAudio = importAudio
+    }
+
+    func attach(to window: NSWindow?, session: ConversionSession, beforeOpening: @escaping @MainActor () -> Void) {
+        windowCloseSubscription = nil
+        if let previous = self.window { Self.receivers.removeObject(forKey: previous) }
+        self.window = window
+        boundSession = session
+        beforeSystemOpening = beforeOpening
+        if let window {
+            Self.receivers.setObject(self, forKey: window)
+            windowCloseSubscription = NotificationCenter.default.publisher(
+                for: NSWindow.willCloseNotification, object: window
+            ).sink { [weak self, weak window] _ in
+                guard let self, let window, self.window === window else { return }
+                Self.receivers.removeObject(forKey: window)
+                self.window = nil
+                self.windowCloseSubscription = nil
+            }
+            Self.requestingWindow = false
+            Self.routeSystemURLs()
+        }
+    }
+
+    // AppKit liefert die vollständige Dateiliste eines Öffnungsereignisses.
+    // SwiftUIs einzelner onOpenURL-Callback verlor hier weitere Dateien.
+    static func receiveSystemURLs(_ urls: [URL]) {
+        unroutedURLs.append(contentsOf: urls)
+        routeSystemURLs()
+    }
+
+    private static func routeSystemURLs() {
+        guard !unroutedURLs.isEmpty else { return }
+        let keyWindow = NSApp.keyWindow?.sheetParent ?? NSApp.keyWindow
+        let candidates = [keyWindow, NSApp.mainWindow].compactMap { $0 } + NSApp.orderedWindows + NSApp.windows
+        let receiver = candidates.compactMap { receivers.object(forKey: $0) }.first
+        guard let receiver, let session = receiver.boundSession,
+              let beforeOpening = receiver.beforeSystemOpening else {
+            if !requestingWindow, !NSApp.windows.contains(where: { $0.canBecomeMain && $0.isVisible }),
+               let createWindow {
+                requestingWindow = true
+                createWindow()
+            }
+            return
+        }
+        let urls = unroutedURLs
+        unroutedURLs = []
+        for url in urls { receiver.receive(url, session: session, beforeOpening: beforeOpening) }
     }
 
     func receive(_ url: URL, session: ConversionSession, beforeOpening: @escaping @MainActor () -> Void) {
@@ -32,8 +96,8 @@ final class DocumentOpenCoordinator: ObservableObject {
         pendingURLs.append(url)
         guard !isOpening else { return }
         collectionTask?.cancel()
-        // Launch Services liefert mehrere ausgewählte Dateien als einzelne
-        // URL-Ereignisse. Ein gemeinsamer Batch verhindert gegenseitigen Abbruch.
+        // Auch getrennte, kurz aufeinanderfolgende Öffnungsereignisse werden
+        // gebündelt, damit sie keinen gegenseitigen Importabbruch auslösen.
         collectionTask = Task { [weak self] in
             do { try await Task.sleep(for: .milliseconds(100)) }
             catch { return }

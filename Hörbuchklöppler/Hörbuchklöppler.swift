@@ -3,10 +3,13 @@ import SwiftUI
 
 @main
 struct Hörbuchklöppler: App {
+    @NSApplicationDelegateAdaptor(DocumentOpenDelegate.self) private var documentDelegate
+
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: DocumentOpenCoordinator.windowID) {
             ContentView()
         }
+        .handlesExternalEvents(matching: ["*"])
         .commands { ChapterUndoCommands() }
     }
 }

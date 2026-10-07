@@ -106,20 +106,23 @@ struct ChapterUndoCommands: Commands {
     }
 }
 
-struct ChapterUndoWindowReader: NSViewRepresentable {
+struct ProjectWindowReader: NSViewRepresentable {
     let router: ChapterUndoRouter
+    let onWindowChange: @MainActor (NSWindow?) -> Void
 
     func makeNSView(context: Context) -> WindowReader {
-        WindowReader(router: router)
+        WindowReader(router: router, onWindowChange: onWindowChange)
     }
 
     func updateNSView(_ nsView: WindowReader, context: Context) {}
 
     final class WindowReader: NSView {
         let router: ChapterUndoRouter
+        let onWindowChange: @MainActor (NSWindow?) -> Void
 
-        init(router: ChapterUndoRouter) {
+        init(router: ChapterUndoRouter, onWindowChange: @escaping @MainActor (NSWindow?) -> Void) {
             self.router = router
+            self.onWindowChange = onWindowChange
             super.init(frame: .zero)
         }
 
@@ -131,6 +134,7 @@ struct ChapterUndoWindowReader: NSViewRepresentable {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 router.attach(to: window)
+                onWindowChange(window)
             }
         }
     }

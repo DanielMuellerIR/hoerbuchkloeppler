@@ -33,10 +33,10 @@ Textneubau bei bloßen Fortschrittsupdates. Beides ist keine offene Optimierung.
   Spitzenbegrenzung kann das Ziel −18 LUFS verhindern; Dynamik wird erhalten.
 - Undo/Redo laufen seit 1.4.19 über einen fensterbezogenen Router und eine
   gemeinsame Menügruppe. Editierbare Textfelder verwenden ihren Text-Undo,
-  sonst greift die Kapitelhistorie. Die AppKit-Prüfung ist grün; die echte
-  GUI-Abnahme von Menü, Tastatur und Toolbar steht noch aus.
-- Visuelle GUI-Abnahme und subjektive Hörprüfung sind von automatischer
-  Kompilierung, Koordinationstests und vollständigem Dekodieren zu unterscheiden.
+  sonst greift die Kapitelhistorie. AppKit-Prüfung und echte Bedienung über
+  Menü, Tastatur und Toolbar sind seit 2026-10-07 geprüft.
+- Die geprüften GUI-Abläufe und vollständiges Dekodieren ersetzen keine
+  subjektive Hörprüfung. Details zum Prüfumfang: [build-and-test.md](build-and-test.md).
 
 ### Aus der CodeQA-Kampagne 2026-09-10 bewusst offen gelassen
 
@@ -53,18 +53,19 @@ ohne unverhältnismäßiges Risiko im Rahmen der Kampagne erledigen.
   und Ereignisse; `success` ist auch während des Laufs vorhanden (`null`). Bei
   Fehlern bleibt der letzte Arbeitsschritt erhalten. Projekt- und Inspect-
   Formate bleiben unabhängig bei Version 1. Vertrag: [projects.md](projects.md).
-- **Dokumentöffnung seit 1.4.27 umgesetzt; System-/GUI-Prüfung steht aus.**
-  Projekt- und Audio-Dokumenttypen, `onOpenURL` sowie Desktop-/Wechselmedien-
-  Beschreibungen sind ergänzt. Audio-URL-Ereignisse werden zu einem gemeinsamen
-  Import gebündelt; ein Projekt ersetzt einen vorhandenen Stand erst nach
-  Bestätigung. Automatische Koordinationsprüfungen sind grün; der tatsächliche
-  Systemweg wird noch im GUI-Test geprüft.
-- **Provider-Zeitlimit seit 1.4.28 umgesetzt; GUI-Prüfung steht aus.**
+- **Dokumentöffnung seit 1.4.31 über den Systemweg geprüft.**
+  Projekt- und Audio-Dokumenttypen sowie Desktop-/Wechselmedien-Beschreibungen
+  sind ergänzt. Der AppKit-Delegate übernimmt vollständige Dateilisten;
+  Audioereignisse werden gemeinsam importiert. Projekte ersetzen vorhandene
+  Daten erst nach Bestätigung. Appstart, mehrere Audiodateien, Bestätigen und
+  Abbrechen, Wiederöffnen nach Schließen und zwei Projektfenster sind geprüft.
+- **Provider-Zeitlimit seit 1.4.28 umgesetzt und mit 1.4.31 sichtbar geprüft.**
   Die Sammlung von Datei-Adressen endet nach 60 Sekunden. Ein unvollständiger
   Batch wird vollständig verworfen; vorhandene Daten bleiben erhalten. Der
   Dialog bietet Wiederholen/Abbrechen. Die Frist gilt vor der Audioanalyse;
   verspätete Antworten und Timer abgebrochener/ersetzter Imports sind entwertet.
-  Automatische Provider-Prüfungen sind grün, der sichtbare Dialog wird noch geprüft.
+  Automatische Provider-Prüfungen und beide Dialogaktionen nach der echten
+  60-Sekunden-Frist sind grün; Kapitelbearbeitung bleibt während des Imports gesperrt.
 - **Erledigt in 1.4.22: Kapitelanalyse auf eigener Queue.** Prozessstart,
   Pipe-Lesen, Warten, Parsing und Kapitelaufbau laufen auf einer eigenen
   parallelen Utility-Queue. Der Import begrenzt weiterhin die Workerzahl;

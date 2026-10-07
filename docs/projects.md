@@ -20,6 +20,9 @@ wird. Projektdateien sind auf 48 MiB und Coverdaten auf 32 MiB begrenzt.
 „Projekt öffnen …“ (Cmd+Shift+O) öffnet ihn. Cmd+O bleibt der Audioimport.
 Auch Finder beziehungsweise „Öffnen mit“ können Projekte und unterstützte
 Audiodateien an die App übergeben. Audiodateien werden gemeinsam importiert.
+Die vollständige Dateiliste wird vom AppKit-Delegate übernommen, auch beim
+Appstart. Systemöffnungen verwenden das aktive Projektfenster; nach dem
+Schließen des letzten Fensters wird bei Bedarf ein neues geöffnet.
 Ein Projekt öffnet sich im leeren Fenster direkt; ein vorhandenes Hörbuch wird
 erst nach Bestätigung ersetzt. Weitere Systemöffnungen während eines durch
 diesen Weg gestarteten Imports warten auf dessen Abschluss. Bei einem anderen

@@ -12,7 +12,9 @@ struct ContentView: View {
     @StateObject private var preview = ChapterPreviewPlayer()
     @StateObject private var undoRouter = ChapterUndoRouter()
     @StateObject private var documentOpen = DocumentOpenCoordinator()
-    @Environment(\.controlActiveState) private var controlActiveState
+    @Environment(\.openWindow) private var openWindow
+    private static let sidebarContentWidth: CGFloat = 250
+    private static let sidebarPadding: CGFloat = 16
     @State private var selectedChapters: Set<UUID> = []
     @State private var renamePrefix = "Kapitel"
     @State private var projectError: String?
@@ -67,57 +69,65 @@ struct ContentView: View {
         ZStack {
             HSplitView {
                 // --- Linke Sidebar (Cover & Metadaten) ---
-                VStack(spacing: 20) {
-                    VStack {
-                        CoverView(image: $session.coverImage, onDropped: { url in
-                            // `selectCover` meldet über den Rückgabewert, dass die
-                            // Datei kein lesbares Bild ist. Verworfen sah der Drop
-                            // wie ein Erfolg aus, und das Buch blieb ohne Cover.
-                            if !session.selectCover(url: url) {
-                                coverError = "Diese Datei ist kein lesbares Bild: \(url.lastPathComponent)"
+                GeometryReader { geometry in
+                    ScrollView {
+                        VStack(spacing: 20) {
+                            VStack {
+                                CoverView(image: $session.coverImage, onDropped: { url in
+                                    // `selectCover` meldet über den Rückgabewert, dass die
+                                    // Datei kein lesbares Bild ist. Verworfen sah der Drop
+                                    // wie ein Erfolg aus, und das Buch blieb ohne Cover.
+                                    if !session.selectCover(url: url) {
+                                        coverError = "Diese Datei ist kein lesbares Bild: \(url.lastPathComponent)"
+                                    }
+                                }, onDropFailed: { message in
+                                    coverError = message
+                                })
+                                    .frame(width: 180, height: 180).shadow(radius: 5)
+                                if session.coverImage != nil || session.coverPath != nil {
+                                    Button(action: { session.removeCover() }) {
+                                        Label("Cover entfernen", systemImage: "trash").font(.system(size: 11)).foregroundColor(.red)
+                                    }.buttonStyle(.plain).padding(.top, 5)
+                                }
                             }
-                        }, onDropFailed: { message in
-                            coverError = message
-                        })
-                            .frame(width: 180, height: 180).shadow(radius: 5)
-                        if session.coverImage != nil || session.coverPath != nil {
-                            Button(action: { session.removeCover() }) {
-                                Label("Cover entfernen", systemImage: "trash").font(.system(size: 11)).foregroundColor(.red)
-                            }.buttonStyle(.plain).padding(.top, 5)
+                            VStack(alignment: .leading, spacing: 12) {
+                                Group {
+                                    Label("Titel", systemImage: "text.alignleft")
+                                    TextField("Hörbuch Titel", text: $session.title).textFieldStyle(.roundedBorder)
+                                    Label("Autor", systemImage: "person")
+                                    TextField("Autor", text: $session.author).textFieldStyle(.roundedBorder)
+                                    Label("Genre", systemImage: "music.note")
+                                    TextField("Genre", text: $session.genre).textFieldStyle(.roundedBorder)
+                                    TextField("Sprecher", text: $session.narrator).textFieldStyle(.roundedBorder)
+                                    TextField("Reihe", text: $session.series).textFieldStyle(.roundedBorder)
+                                    TextField("Bandnummer", text: $session.volumeNumber).textFieldStyle(.roundedBorder)
+                                    TextField("Sprache (z. B. de)", text: $session.language).textFieldStyle(.roundedBorder)
+                                }.font(.system(size: 12, weight: .medium)).foregroundColor(.secondary)
+                            }
+                            .padding(.horizontal)
+                            Spacer() // Drückt alles nach oben und unten
+                            Button(action: { showingSettings.toggle() }) {
+                                Label("Einstellungen", systemImage: "gearshape").font(.system(size: 16, weight: .medium))
+                            }.buttonStyle(.bordered).padding(.bottom, 10)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("System-Check").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
+                                Text("FFmpeg: \(ffmpegStatus)").foregroundColor(ffmpegStatus.contains("OK") ? .secondary : .red)
+                                Text("MediaInfo: \(miStatus)").foregroundColor(miStatus.contains("OK") ? .secondary : .red)
+                            }
+                            .font(.system(size: 10, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding()
+                            .background(Color.gray.opacity(0.1))
+                            .cornerRadius(8)
+                            .padding(.horizontal)
                         }
+                        .frame(width: Self.sidebarContentWidth)
+                        .padding(Self.sidebarPadding)
+                        .frame(minHeight: geometry.size.height)
                     }
-                    VStack(alignment: .leading, spacing: 12) {
-                        Group {
-                            Label("Titel", systemImage: "text.alignleft")
-                            TextField("Hörbuch Titel", text: $session.title).textFieldStyle(.roundedBorder)
-                            Label("Autor", systemImage: "person")
-                            TextField("Autor", text: $session.author).textFieldStyle(.roundedBorder)
-                            Label("Genre", systemImage: "music.note")
-                            TextField("Genre", text: $session.genre).textFieldStyle(.roundedBorder)
-                            TextField("Sprecher", text: $session.narrator).textFieldStyle(.roundedBorder)
-                            TextField("Reihe", text: $session.series).textFieldStyle(.roundedBorder)
-                            TextField("Bandnummer", text: $session.volumeNumber).textFieldStyle(.roundedBorder)
-                            TextField("Sprache (z. B. de)", text: $session.language).textFieldStyle(.roundedBorder)
-                        }.font(.system(size: 12, weight: .medium)).foregroundColor(.secondary)
-                    }
-                    .padding(.horizontal)
-                    Spacer() // Drückt alles nach oben und unten
-                    Button(action: { showingSettings.toggle() }) {
-                        Label("Einstellungen", systemImage: "gearshape").font(.system(size: 16, weight: .medium))
-                    }.buttonStyle(.bordered).padding(.bottom, 10)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("System-Check").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
-                        Text("FFmpeg: \(ffmpegStatus)").foregroundColor(ffmpegStatus.contains("OK") ? .secondary : .red)
-                        Text("MediaInfo: \(miStatus)").foregroundColor(miStatus.contains("OK") ? .secondary : .red)
-                    }
-                    .font(.system(size: 10, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding()
-                    .background(Color.gray.opacity(0.1))
-                    .cornerRadius(8)
-                    .padding(.horizontal)
                 }
-                .frame(width: 250).padding().background(Color(NSColor.windowBackgroundColor))
+                .frame(width: Self.sidebarContentWidth + 2 * Self.sidebarPadding)
+                .background(Color(NSColor.windowBackgroundColor))
 
                 // --- Rechte Seite (Dateiliste & Progress) ---
                 VStack {
@@ -295,7 +305,8 @@ struct ContentView: View {
             Text("Das aktuelle Hörbuch wird durch \(url.lastPathComponent) ersetzt. Nicht gespeicherte Änderungen gehen dabei verloren.")
         }
         .onAppear { checkTools() }
-        .frame(minWidth: 850, minHeight: 650) // Fenster etwas höher gemacht (650 statt 550)
+        .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
+        .frame(minWidth: 850, minHeight: 650)
         .sheet(isPresented: $showingSettings) { SettingsView(session: session, isPresented: $showingSettings) }
         .alert("Datei existiert bereits", isPresented: $flow.showingOverwriteAlert) {
             Button("Abbrechen", role: .cancel) { flow.cancelOverwrite() }
@@ -365,13 +376,16 @@ struct ContentView: View {
             importProviders(providers)
             return true
         }
-        .background(ChapterUndoWindowReader(router: undoRouter))
+        .background(ProjectWindowReader(router: undoRouter) { [weak documentOpen, weak session, weak preview] window in
+            guard let documentOpen, let session else { return }
+            documentOpen.attach(to: window, session: session, beforeOpening: { [weak preview] in preview?.stop() })
+        })
         .focusedSceneObject(undoRouter)
-        .handlesExternalEvents(preferring: controlActiveState == .key ? ["*"] : [], allowing: ["*"])
-        .onOpenURL { url in
-            documentOpen.receive(url, session: session, beforeOpening: { preview.stop() })
+        .onAppear {
+            undoRouter.configure(session: session, beforeChapterEdit: { preview.stop() })
+            let action = openWindow
+            DocumentOpenCoordinator.createWindow = { action(id: DocumentOpenCoordinator.windowID) }
         }
-        .onAppear { undoRouter.configure(session: session, beforeChapterEdit: { preview.stop() }) }
     }
 
     private func moveSelection(by offset: Int) {

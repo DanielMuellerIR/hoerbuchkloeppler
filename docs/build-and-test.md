@@ -242,10 +242,15 @@ Deshalb laufen alle Terminal-Ausgaben der CLI über `TerminalRenderer` in
   2026-08-25 wurden SIGINT und SIGTERM während eines realen ffmpeg-Laufs je
   dreimal mit Exit 130 beziehungsweise 143, ohne finale Ausgabe und ohne
   Staging-Reste geprüft; weitere 24 Läufe deckten die Abschluss-Rennbedingung ab.
-- **Appstart geprüft (2026-09-05):** Release-App im Hintergrund gestartet und
-  beendet; die aktive Anwendung blieb unverändert. GUI-Dateiprovider sind
-  zusätzlich fensterlos geprüft. Visuelle Bedienung und Audioqualität nach
-  Gehör bleiben ungeprüft.
+- **GUI-Abläufe geprüft (2026-10-07, 1.4.31):** notarisiertes Release-Bundle
+  über Launch Services mit Projekt gestartet. Text- und Kapitel-Undo über
+  Menü, Tastenkürzel und Toolbar, Ersetzen/Abbrechen, gemeinsamer Audioimport,
+  erneutes Öffnen nach Schließen sowie zwei unabhängige Projektfenster geprüft.
+  Ein privater Provider-Testaufbau verwendet dieselbe Import-/Dialoglogik und
+  prüft die tatsächliche 60-Sekunden-Frist samt Wiederholen, Abbrechen und
+  gesperrter Kapitelbearbeitung. Großes Cover sowie kleine/große Fenster und
+  Scrollen der Seitenleiste visuell geprüft. Dies deckt gezielte Zustände ab;
+  Audioqualität nach Gehör und sämtliche übrigen Ansichten bleiben ungeprüft.
 
 ## GUI-Import
 
@@ -315,20 +320,23 @@ prüft acht Dateien, Fortschritt, hängende/verspätete Provider, Timeout mit
 Erhalt des Bestands, Wiederholen desselben Batches, Benutzerabbruch sowie
 einen neuen Import vor Ablauf des alten Timers. Die schnellen Fälle verwenden
 eine verkürzte Frist; `--default-timeout` misst zusätzlich die echte
-Standardfrist. Der sichtbare Timeoutdialog wird gesondert im App-Bundle geprüft.
+Standardfrist. Der sichtbare Timeoutdialog und beide Aktionen wurden zusätzlich
+im laufenden Test-Bundle mit derselben Importlogik geprüft.
 `bash tests/verify_gui_undo.sh` prüft echtes AppKit-Text-Undo und Kapitel-Undo
 ohne sichtbare Fenster, einschließlich leerem Textverlauf, anderem aktivem
-Fenster und Sperren während Import/Konvertierung. Menüeinbindung und
-Tastenkürzel im laufenden App-Bundle benötigen zusätzlich eine GUI-Prüfung.
+Fenster und Sperren während Import/Konvertierung. Menüeinbindung, Toolbar und
+Tastenkürzel sind zusätzlich im laufenden App-Bundle geprüft.
 
-`bash tests/verify_document_open.sh` prüft den System-URL-Koordinator ohne
-Fenster: mehrere Audioereignisse als ein vollständiger Import, Projektöffnung
+`bash tests/verify_document_open.sh` prüft den System-URL-Koordinator mit
+unsichtbaren AppKit-Fenstern: die vollständige Delegate-Dateiliste vor der
+ersten Fensterregistrierung, das Abmelden eines noch gehaltenen geschlossenen
+Fensters, mehrere Audioereignisse als ein vollständiger Import, Projektöffnung
 im leeren Fenster, Bestätigung/Abbrechen vor Ersetzen, eine bereits aufgelöste
 Alert-Bindung, defekte Projekte, gemischte Auswahl und laufenden Import.
 Ein kontrolliert verzögerter Import prüft zusätzlich später eintreffende
 System-URLs außerhalb der anfänglichen Sammelfrist.
-Finder-/Launch-Services-Zuordnung und tatsächliche Alert-Bedienung benötigen
-zusätzlich die Prüfung im App-Bundle.
+Launch-Services-Öffnung und tatsächliche Alert-Bedienung sind zusätzlich im
+App-Bundle geprüft. Die Prüfung eines Finder-Doppelklicks ist davon unabhängig.
 `python3 tests/verify_terminal_renderer.py` prüft physische Statuszeilen an
 PTYs mit 12/24/40/80 Spalten, Unicode, kleinem Fenster und Größenwechseln.
 Die Anzeige reserviert die letzte Spalte gegen automatischen Umbruch und

@@ -115,9 +115,13 @@ in [opportunities.md](opportunities.md).
 - `ImportCoordinator.swift`: GUI-Providerkoordination über Core-Importtokens;
   abbrechbare Adressensammlung mit 60-Sekunden-Frist, einmaligem Abschluss
   und entwerteten späten Callbacks vor der eigentlichen Audioanalyse.
-- `DocumentOpenCoordinator.swift`: System-URL-Ereignisse bündeln, Audioimport
-  und Projektöffnung mit Bestätigung koordinieren; spätere Ereignisse während
-  eines eigenen Imports serialisieren. Das aktive Fenster hat Vorrang.
+- `DocumentOpenCoordinator.swift`: AppKit-Delegate übernimmt vollständige
+  System-Dateilisten; der Koordinator bündelt Audioimport und Projektöffnung
+  mit Bestätigung und serialisiert spätere Ereignisse während eines eigenen
+  Imports. Das aktive Projektfenster hat Vorrang. Vor der ersten Registrierung
+  bleiben URLs erhalten; geschlossene Fenster werden sofort abgemeldet.
+- `ChapterUndoRouter.swift`: fensterbezogenes Text-/Projekt-Undo;
+  `ProjectWindowReader` registriert das AppKit-Fenster auch für Systemöffnungen.
 - `OutputPreviewView.swift`: konkrete Zielpfade und geschätzter Volume-Bedarf.
 
 Details zum Speicherformat und zu Bearbeitungsgrenzen: [Projekte](projects.md).

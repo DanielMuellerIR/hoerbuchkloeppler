@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import AppKit
 import HoerbuchkloepplerCore
 
 @MainActor
@@ -33,6 +34,36 @@ struct DocumentOpenCheck {
             let file = try AVAudioFile(forWriting: url, settings: format.settings)
             try file.write(from: buffer)
         }
+        _ = NSApplication.shared
+        let startupSession = ConversionSession(settings: AudioSettings())
+        startupSession.logSink = { _ in }
+        let startupOpener = DocumentOpenCoordinator()
+        let delegate = DocumentOpenDelegate()
+        delegate.application(NSApp, open: Array(urls.prefix(2)))
+        let window = NSWindow(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        startupOpener.attach(to: window, session: startupSession, beforeOpening: {})
+        try await waitFor { startupSession.audioFiles.count == 2 && !startupSession.isImporting }
+        precondition(Set(startupSession.audioFiles.map(\.url)) == Set(urls.prefix(2)))
+        window.close()
+        print("PASS: vollständige AppKit-Dateiliste vor dem ersten Fenster bleibt bis zur Registrierung erhalten")
+        let reopenedSession = ConversionSession(settings: AudioSettings())
+        reopenedSession.logSink = { _ in }
+        let reopenedOpener = DocumentOpenCoordinator()
+        let reopenedWindow = NSWindow(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
+        reopenedWindow.isReleasedWhenClosed = false
+        var windowRequests = 0
+        DocumentOpenCoordinator.createWindow = {
+            windowRequests += 1
+            reopenedOpener.attach(to: reopenedWindow, session: reopenedSession, beforeOpening: {})
+        }
+        delegate.application(NSApp, open: [urls[2]])
+        try await waitFor { reopenedSession.audioFiles.count == 1 && !reopenedSession.isImporting }
+        precondition(windowRequests == 1 && startupSession.audioFiles.count == 2 && !window.isVisible)
+        withExtendedLifetime(startupOpener) {}
+        reopenedWindow.close()
+        DocumentOpenCoordinator.createWindow = nil
+        print("PASS: geschlossenes, noch gehaltenes Fenster erhält keine neuen Systemdateien")
         let session = ConversionSession(settings: AudioSettings())
         session.logSink = { _ in }
         let opener = DocumentOpenCoordinator()
