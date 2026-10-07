@@ -363,7 +363,7 @@ private final class ConversionCoordinator: @unchecked Sendable {
 private enum ConversionEvent: Sendable {
     case log(String, LogType, UUID)
     case verboseLog(String, UUID)
-    case segmentReset(String?, UUID)
+    case segmentReset(String?, ConversionPhase, UUID)
     case segmentInitialization(Int, String, UUID)
     case progress(Double, Int?, Double?, UUID)
     case finished(Bool, Bool, [URL], UUID)
@@ -831,9 +831,10 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
     nonisolated func enqueueSegmentReset(
         title: String?,
+        phase: ConversionPhase = .encoding,
         runID: UUID
     ) {
-        conversionEventQueue.send(.segmentReset(title, runID))
+        conversionEventQueue.send(.segmentReset(title, phase, runID))
     }
 
     nonisolated func enqueueSegmentInitialization(
@@ -892,9 +893,10 @@ public final class ConversionSession: ObservableObject, Identifiable {
             guard isCurrentConversion(runID) else { return }
             logVerbose(message)
 
-        case let .segmentReset(title, runID):
+        case let .segmentReset(title, phase, runID):
             guard isCurrentConversion(runID) else { return }
             conversionPhase = title ?? "AAC-Encoding"
+            runState.machinePhase = phase
             segmentProgress = [:]
             if let title {
                 initSegmentProgress(index: 0, filename: title, runID: runID)

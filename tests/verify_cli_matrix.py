@@ -66,6 +66,9 @@ for mode in ['standard','parallel']:
     p=run([*files,*metadata,'--mode',mode,'--max-duration','1','--samplerate','8000','--bitrate','24k','--workers','2','--format','json','--output',ROOT/f'{mode}.m4b'])
     events=[json.loads(line) for line in p.stdout.splitlines()]
     assert events[-1]['event']=='finished' and events[-1]['success'],events[-1]
+    assert all(e['schemaVersion']==2 and 'success' in e for e in events),events
+    assert all(e['success'] is None for e in events if e['event'] in ('started','progress')),events
+    assert all(e['phase'] in ('input','preparing','measuring_loudness','decoding','encoding','muxing') for e in events),events
     outputs=list(map(pathlib.Path,events[-1]['outputs']));assert len(outputs)==2,outputs
     for index,path in enumerate(outputs):
         r=inspect(path)

@@ -1063,6 +1063,7 @@ public struct FFmpegWrapper {
 
         session.enqueueSegmentReset(
             title: showIndividualPacmans ? nil : "Audio-Dekodierung (WAV)",
+            phase: showIndividualPacmans ? .encoding : .decoding,
             runID: context.id
         )
 
@@ -1358,7 +1359,8 @@ public struct FFmpegWrapper {
         segmentProgressFraction: Double,
         audioCodecArguments: [String],
         logMessage: String,
-        pacmanTitle: String
+        pacmanTitle: String,
+        phase: ConversionPhase = .encoding
     ) -> Bool {
         let listFile = tempDir.appendingPathComponent("audio_list.txt")
         let metaFile = tempDir.appendingPathComponent("chapters.txt")
@@ -1393,6 +1395,7 @@ public struct FFmpegWrapper {
             phaseDuration: group.reduce(0) { $0 + $1.duration },
             logMessage: logMessage,
             pacmanTitle: pacmanTitle,
+            phase: phase,
             stagingURL: finalURL,
             expectedStagingOwnership: stagingOwnership,
             stagingHandle: stagingHandle
@@ -1479,7 +1482,8 @@ public struct FFmpegWrapper {
             segmentProgressFraction: 0.9,
             audioCodecArguments: ["-c:a", "copy"],
             logMessage: "🛠️ Finaler Stream-Copy & MP4-Muxing gestartet...",
-            pacmanTitle: "Finaler Zusammenbau"
+            pacmanTitle: "Finaler Zusammenbau",
+            phase: .muxing
         )
     }
 
@@ -1492,13 +1496,14 @@ public struct FFmpegWrapper {
         phaseDuration: TimeInterval,
         logMessage: String,
         pacmanTitle: String,
+        phase: ConversionPhase = .encoding,
         stagingURL: URL? = nil,
         expectedStagingOwnership: StagingOwnership? = nil,
         stagingHandle: StagingOutputHandle? = nil,
         beforeProcessStart: (() -> Void)? = nil,
         executableURL: URL? = nil
     ) -> Bool {
-        session.enqueueSegmentReset(title: pacmanTitle, runID: context.id)
+        session.enqueueSegmentReset(title: pacmanTitle, phase: phase, runID: context.id)
         if context.isCancelled { return false }
         session.enqueueLog(logMessage, type: .highlight, runID: context.id)
         
@@ -1765,7 +1770,7 @@ extension FFmpegWrapper {
         }), let executable = getBinaryURL(name: "ffmpeg") else {
             throw NSError(domain: "Loudness", code: 2, userInfo: [NSLocalizedDescriptionKey: "Buchdekodierung fehlgeschlagen oder abgebrochen."])
         }
-        session.enqueueSegmentReset(title: "Buchlautheit messen", runID: context.id)
+        session.enqueueSegmentReset(title: "Buchlautheit messen", phase: .measuringLoudness, runID: context.id)
         let list = folder.appendingPathComponent("analysis.txt")
         // Die erzeugten Segmentnamen liegen ausschließlich im eigenen UUID-Ordner.
         try paths.map { "file '\($0.replacingOccurrences(of: "'", with: "'\\''"))'" }.joined(separator: "\n").write(to: list, atomically: true, encoding: .utf8)

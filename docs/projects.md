@@ -59,11 +59,29 @@ im Bericht sichtbar und liefern Exit 1.
 
 Bei einer Konvertierung erzeugt `--format json` JSON Lines: `started`,
 `progress` und genau ein terminales `finished`, `failed` oder `cancelled`.
-Jedes Ereignis enthält `schemaVersion: 1`, Phase, Gesamtfortschritt und
-Ausgabepfade; terminale Ereignisse nennen tatsächlich erfolgreiche Dateien und
-`success`. Diagnosen bleiben auf stderr. Ein früher Eingabe-/Projektfehler
+Jedes Ereignis enthält `schemaVersion: 2`, Phase, Gesamtfortschritt,
+Ausgabepfade und `success`. Für `started` und `progress` ist `success: null`,
+für `finished` ist es `true`, für `failed` und `cancelled` ist es `false`.
+Terminale Ereignisse nennen ausschließlich tatsächlich erfolgreiche Dateien.
+Diagnosen bleiben auf stderr. Ein früher Eingabe-/Projektfehler
 liefert `failed`, auch wenn kein `started` vorausging. ArgumentParser meldet
 Syntaxfehler weiterhin auf stderr. Exit-Codes bleiben unverändert.
+
+`phase` ist sprachunabhängig und beschreibt den letzten Arbeitsschritt:
+
+| Wert | Arbeitsschritt |
+| --- | --- |
+| `input` | Eingaben laden und prüfen |
+| `preparing` | Konvertierung vorbereiten |
+| `measuring_loudness` | Buchlautheit messen |
+| `decoding` | Audio in WAV-Zwischenstände dekodieren |
+| `encoding` | AAC kodieren |
+| `muxing` | Kodiertes Audio, Kapitel und Cover zusammenbauen |
+
+Auch nach einem Fehler oder Abbruch bleibt der letzte Arbeitsschritt erhalten;
+das Ergebnis steht in `event` und `success`. Die deutschen UI-Beschriftungen
+werden nicht als Maschinenwerte verwendet. Schema 2 ersetzt das frühere
+Laufbericht-Schema 1; Projektformat und Inspect-Bericht bleiben bei Version 1.
 
 Die GUI berechnet Quellenhashes beim Öffnen/Speichern außerhalb des Main Actors.
 `ProjectFingerprintStore` bindet den wiederverwendeten Hash an Gerät, Inode,

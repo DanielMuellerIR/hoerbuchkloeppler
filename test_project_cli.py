@@ -20,7 +20,7 @@ def run(args,code=0):
     assert p.returncode==code,(args,p.returncode,p.stderr.decode()[-2000:])
     return p
 p=run(['--file',root/'B.wav','--file',root/'A.wav','--inspect','--format','json','--no-cover','--output',root/'new'/'out.m4b'])
-r=json.loads(p.stdout);assert [pathlib.Path(c['source']).name for c in r['chapters']]==['B.wav','A.wav'];assert not (root/'new').exists()
+r=json.loads(p.stdout);assert r['schemaVersion']==1;assert [pathlib.Path(c['source']).name for c in r['chapters']]==['B.wav','A.wav'];assert not (root/'new').exists()
 sources=[];sections=[]
 for name,start,duration in [('B',0.2,0.6),('A',0.1,0.7)]:
     sid=str(uuid.uuid4());sources.append(dict(id=sid,location=dict(path=f'{name}.wav',isRelative=True),readLocation=dict(path=f'{name}.wav',isRelative=True),sha256=hashlib.sha256((root/f'{name}.wav').read_bytes()).hexdigest()))
@@ -36,7 +36,10 @@ for mode in ['standard']:
     p=run(['--project',path,'--mode',mode,'--format','json','--output',output])
     events=[json.loads(l) for l in p.stdout.splitlines()]
     assert events[-1]['event']=='finished' and events[-1]['success']
-    assert all(e['schemaVersion']==1 for e in events)
+    assert all(e['schemaVersion']==2 for e in events)
+    assert all('success' in e for e in events)
+    assert all(e['success'] is None for e in events if e['event'] in ('started','progress'))
+    assert all(e['phase'] in ('input','preparing','measuring_loudness','decoding','encoding','muxing') for e in events)
     d=subprocess.run([str(ffmpeg),'-v','error','-i',str(output),'-map','0:a:0','-f','f32le','-ac','1','-ar','32000','-'],capture_output=True,check=True)
     duration=len(d.stdout)/4/32000
     assert abs(duration-1.3)<0.1,(mode,duration)
@@ -48,5 +51,6 @@ p=run(['--project',path,'--inspect','--format','json'],1)
 assert len(json.loads(p.stdout)['sourceIssues'])==1
 p=run(['--project',path,'--format','json','--output',root/'invalid.m4b'],1)
 events=[json.loads(l) for l in p.stdout.splitlines()];assert events[-1]['event']=='failed'
+assert events[-1]['phase']=='input' and events[-1]['success'] is False,events[-1]
 assert not (root/'invalid.m4b').exists()
 print('verified',root)

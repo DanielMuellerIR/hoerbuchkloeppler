@@ -48,13 +48,10 @@ ohne unverhältnismäßiges Risiko im Rahmen der Kampagne erledigen.
   früheren Statusrest bei zwölf Spalten und dessen Korrektur. Logzeilen bleiben
   bei 12/24/40/80 Spalten erhalten. Nach Resize bleibt der alte Status bewusst
   einmal stehen. Details und Reproduktion: [build-and-test.md](build-and-test.md).
-- **`RunReport.phase` mischt zwei Vokabulare**: `session.conversionPhase` liefert
-  deutsche UI-Beschriftungen („Bereit“, „Buchlautheit messen“), während die CLI
-  daneben englische Maschinen-Token („input“, „preparing“) fest verdrahtet. Ein
-  gescheiterter Lauf meldet als Phase „Bereit“. Ebenso fehlt `success` auf
-  nicht-terminalen Zeilen, statt `null` zu sein. Beides zu vereinheitlichen ändert
-  eine versionierte Schnittstelle und gehört mit einem `schemaVersion`-Sprung
-  entschieden.
+- **Laufbericht-Schema 2 (2026-10-07):** typisierte, sprachunabhängige Phasen
+  und Ereignisse; `success` ist auch während des Laufs vorhanden (`null`). Bei
+  Fehlern bleibt der letzte Arbeitsschritt erhalten. Projekt- und Inspect-
+  Formate bleiben unabhängig bei Version 1. Vertrag: [projects.md](projects.md).
 - **`info.plist` deklariert keine Dokumententypen.** Weder `.hkproject` noch die
   unterstützten Audioendungen sind eingetragen, und die App hat kein `onOpenURL`.
   Ein Doppelklick auf eine Projektdatei im Finder öffnet die App deshalb nicht,

@@ -366,7 +366,7 @@ struct KloepplerCLI: AsyncParsableCommand {
         let sourceURL = URL(fileURLWithPath: options.project ?? options.files.first ?? folderPath)
         var isDir: ObjCBool = false
         guard options.project != nil || !options.files.isEmpty || (FileManager.default.fileExists(atPath: folderPath, isDirectory: &isDir) && isDir.boolValue) else {
-            if machineOutput { try emitJSON(RunReport(event: "failed", phase: "input", progress: 0, success: false)) }
+            if machineOutput { try emitJSON(RunReport(event: .failed, phase: .input, progress: 0)) }
             throw reportedFailure("Fehler: Der Pfad \(folderPath) existiert nicht oder ist kein Ordner.")
         }
         // Nach der Existenzprüfung den physischen Ordner festhalten. Sonst kann
@@ -378,6 +378,7 @@ struct KloepplerCLI: AsyncParsableCommand {
         // CLI-Aufrufe sind reproduzierbar: nicht gesetzte Optionen verwenden die
         // dokumentierten Defaults und hängen nicht von GUI-settings.json ab.
         let session = ConversionSession(settings: AudioSettings())
+        var reportPhase: ConversionPhase = .input
         if let workers = options.importWorkers { session.settings.importWorkerLimit = workers }
 
         // Ab hier gehört das Terminal dem Renderer: Alle Session-Logs laufen über
@@ -606,7 +607,8 @@ struct KloepplerCLI: AsyncParsableCommand {
                 throw ExitCode.success
             }
             guard session.projectSourceIssues.isEmpty else { throw reportedFailure("Projektquellen fehlen oder wurden verändert.") }
-            if machineOutput { try emitJSON(RunReport(event: "started", phase: "preparing", progress: 0, outputs: conversionPlan.outputURLs)) }
+            reportPhase = .preparing
+            if machineOutput { try emitJSON(RunReport(event: .started, phase: .preparing, progress: 0, outputs: conversionPlan.outputURLs)) }
             print("Starte Konvertierung...")
             print(conversionPlan.outputURLs.count == 1 ? "Zieldatei:" : "Zieldateien:")
             conversionPlan.outputURLs.forEach { print("  \($0.path)") }
@@ -691,7 +693,7 @@ struct KloepplerCLI: AsyncParsableCommand {
 
                 // Auch Fortschrittsereignisse nennen die Zielpfade, wie in
                 // docs/projects.md für jedes Ereignis zugesagt.
-                if machineOutput { try emitJSON(RunReport(event: "progress", phase: session.conversionPhase, progress: session.progress, outputs: conversionPlan.outputURLs)) }
+                if machineOutput { try emitJSON(RunReport(event: .progress, phase: session.runState.machinePhase, progress: session.progress, outputs: conversionPlan.outputURLs)) }
                 else { renderer.drawBlock(output) }
             }
 
@@ -732,8 +734,9 @@ struct KloepplerCLI: AsyncParsableCommand {
         // JSON-Zeile aus. Scheitert es davor, blieb stdout bisher leer und ein
         // Konsument bekam statt einer Fehlermeldung einen Parserfehler.
         if machineOutput, !options.inspect || !emittedInspectionReport {
-            let event = receivedSignal != nil ? "cancelled" : (executionError != nil ? "failed" : "finished")
-            try emitJSON(RunReport(event: event, phase: session.conversionPhase, progress: session.progress, outputs: session.completedOutputURLs, success: receivedSignal == nil && executionError == nil && session.lastConversionSucceeded == true))
+            let event: RunReport.Event = receivedSignal != nil ? .cancelled : (executionError != nil ? .failed : .finished)
+            let phase = session.runState.machinePhase == .idle ? reportPhase : session.runState.machinePhase
+            try emitJSON(RunReport(event: event, phase: phase, progress: session.progress, outputs: session.completedOutputURLs))
         }
         if let receivedSignal { throw ExitCode(128 + receivedSignal) }
         if let executionError { throw executionError }

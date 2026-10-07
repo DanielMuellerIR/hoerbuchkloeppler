@@ -2,15 +2,41 @@ import Foundation
 
 /// Versionierter Laufbericht für JSON Lines; Diagnosen gehören auf stderr.
 public struct RunReport: Codable, Sendable {
-    public var schemaVersion = 1
-    public var event: String
-    public var phase: String
-    public var progress: Double
-    public var outputs: [String]
-    public var success: Bool?
-    public init(event: String, phase: String, progress: Double, outputs: [URL] = [], success: Bool? = nil) {
+    public enum Event: String, Codable, Sendable, CaseIterable {
+        case started, progress, finished, failed, cancelled
+    }
+
+    public let schemaVersion: Int
+    public let event: Event
+    public let phase: ConversionPhase
+    public let progress: Double
+    public let outputs: [String]
+    public let success: Bool?
+
+    public init(event: Event, phase: ConversionPhase, progress: Double, outputs: [URL] = []) {
+        schemaVersion = 2
         self.event = event; self.phase = phase; self.progress = progress
-        self.outputs = outputs.map(\.path); self.success = success
+        self.outputs = outputs.map(\.path)
+        switch event {
+        case .started, .progress: success = nil
+        case .finished: success = true
+        case .failed, .cancelled: success = false
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, event, phase, progress, outputs, success
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(schemaVersion, forKey: .schemaVersion)
+        try values.encode(event, forKey: .event)
+        try values.encode(phase, forKey: .phase)
+        try values.encode(progress, forKey: .progress)
+        try values.encode(outputs, forKey: .outputs)
+        if let success { try values.encode(success, forKey: .success) }
+        else { try values.encodeNil(forKey: .success) }
     }
 }
 
