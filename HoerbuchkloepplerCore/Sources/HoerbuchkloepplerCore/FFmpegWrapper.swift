@@ -612,17 +612,8 @@ public struct FFmpegWrapper {
               Darwin.fstat(descriptor, &after) == 0,
               FileSystemIdentity(stat: before).matchesContentSnapshot(FileSystemIdentity(stat: after)),
               !isCancelled(),
-              let source = CGImageSourceCreateWithData(data as CFData, nil),
-              CGImageSourceGetCount(source) > 0 else { return nil }
-        let options = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: 32,
-            kCGImageSourceShouldCacheImmediately: true
-        ] as CFDictionary
-        guard !isCancelled() else { return nil }
-        guard CGImageSourceCreateThumbnailAtIndex(source, 0, options) != nil else {
-            return nil
-        }
+              CoverArtwork.thumbnail(from: data, maximumDimension: 32) != nil,
+              !isCancelled() else { return nil }
         return data
     }
 

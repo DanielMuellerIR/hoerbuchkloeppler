@@ -212,14 +212,12 @@ public final class AudioImportService: @unchecked Sendable {
 
     func artwork(from analysis: ImportedSourceAnalysis) async -> Data? {
         guard !Task.isCancelled, analysis.isCurrent() else { return nil }
-        for item in analysis.artworkItems {
-            guard !Task.isCancelled else { return nil }
-            lock.withLock { counters.artworkDataRequests += 1 }
-            let data = try? await item.load(.dataValue)
-            guard !Task.isCancelled, analysis.isCurrent() else { return nil }
-            if let valid = AudioFile.validatedEmbeddedArtworkData(data) { return valid }
-        }
-        return nil
+        let data = await AudioFile.extractEmbeddedArtwork(
+            from: analysis.file.url,
+            candidateCount: analysis.artworkItems.count
+        ) { [self] in lock.withLock { counters.artworkDataRequests += 1 } }
+        guard !Task.isCancelled, analysis.isCurrent() else { return nil }
+        return data
     }
 
     /// Höchstens `workerLimit` Aufgaben gleichzeitig. Das Ergebnis behält die

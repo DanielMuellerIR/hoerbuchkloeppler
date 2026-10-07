@@ -82,7 +82,7 @@ extension ConversionSession {
         bookMetadata = project.metadata
         settings = project.settings.normalized()
         if project.coverSuppressed { removeCover() }
-        else { embeddedCoverData = project.coverData; coverImage = project.coverData.flatMap(NSImage.init(data:)) }
+        else { embeddedCoverData = project.coverData; coverImage = project.coverData.flatMap(CoverArtwork.preview(from:)) }
         projectSources = project.sources; loadedProjectURL = url
         undoChapters = []; redoChapters = []; updateHistoryAvailability()
         refreshProjectSourceIssues()
@@ -208,7 +208,7 @@ extension ConversionSession {
             if snapshot.coverSuppressed { removeCover() }
             else {
                 embeddedCoverData = snapshot.coverData
-                coverImage = snapshot.coverData.flatMap(NSImage.init(data:))
+                coverImage = snapshot.coverData.flatMap(CoverArtwork.preview(from:))
                 coverPath = snapshot.coverPath
             }
             isCoverSuppressed = snapshot.coverSuppressed

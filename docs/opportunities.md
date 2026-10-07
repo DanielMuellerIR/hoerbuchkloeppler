@@ -71,9 +71,17 @@ ohne unverhältnismäßiges Risiko im Rahmen der Kampagne erledigen.
   Task-Abbruch bleibt über einen gesperrten Abbruchzustand erreichbar.
   Die Probe mit 12.000 Kapiteln bestätigt unveränderte Werte und die Ausführung
   außerhalb des aufrufenden Tasks. Sie belegt keine allgemeine Beschleunigung.
-- **Die 32-MiB-Grenze für eingebettetes Artwork greift erst nach dem vollständigen
-  Laden** (`item.load(.dataValue)`), und ein sehr großes PNG muss zum Erzeugen der
-  32-px-Vorschau ganz dekodiert werden.
+- **Erledigt in 1.4.29: Cover-Extraktion und Vorschau begrenzt.** Eingebettete
+  Bildpakete kommen unverändert über eine 32-MiB-Pipe aus ffmpeg; die Extraktion
+  läuft auf der Utility-Queue, mit Abbruch und insgesamt 15 Sekunden pro Quelle.
+  Höchstens 64 Cover-Streams werden versucht. Einzelne ffmpeg-Allokationen sind
+  ebenfalls auf 32 MiB begrenzt; das ist keine Obergrenze für den gesamten
+  Prozessspeicher. Manuelle Cover werden weiterhin vor dem Lesen begrenzt.
+  ImageIO erzeugt direkt eine Vorschau mit höchstens 2.000 Pixeln pro Achse,
+  auch beim Öffnen von Projekten und beim Undo. Export und Projekte behalten
+  die unveränderten Originalbytes. AVFoundation kann bei der allgemeinen
+  Metadatenanalyse weiterhin eigene Containerpuffer anlegen; die Pipe-Grenze
+  begrenzt die Cover-Übernahme, nicht sämtliche internen Framework-Allokationen.
 - **Signierung, Installation, DMG-Release und Build-Lifecycle geprüft.**
   `test_scripts.sh` führt `sign-bundle.sh` seit 1.4.23 mit echten Ad-hoc-Bundles
   und kontrollierten Werkzeugfehlern aus. Seit 1.4.24 prüft es außerdem den

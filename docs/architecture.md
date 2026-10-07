@@ -26,8 +26,10 @@ Core.
   `ConversionContext` hält den Abschluss bis zum Ende einer bereits laufenden
   Abbruchbereinigung zurück, damit deren Warnungen nicht hinter dem Abschluss
   verloren gehen.
-- **Asynchrone Audioanalyse:** Dauer, Metadaten, Tag-Werte und Artwork werden über
-  `AVAsset.load(...)` beziehungsweise `AVMetadataItem.load(...)` geladen. GUI
+- **Asynchrone Audioanalyse:** Dauer, Metadaten und Tag-Werte werden über
+  `AVAsset.load(...)` beziehungsweise `AVMetadataItem.load(...)` geladen. Cover
+  kommen unverändert über eine auf 32 MiB begrenzte ffmpeg-Pipe; ein ImageIO-
+  Thumbnail begrenzt die Vorschau auf 2.000 Pixel pro Achse. GUI
   und CLI erwarten denselben asynchronen Import-Lebenszyklus; die frühere
   `metadataGroup: DispatchGroup`-Sonderbehandlung der CLI entfällt. Kapitel-
   Prozesse, Pipe-Lesen, Parsing und Kapitelaufbau laufen auf einer eigenen
@@ -85,9 +87,10 @@ Symbolnamen als Anker (bewusst **ohne** Zeilennummern — die driften bei jeder
 | `OutputStaging.swift` | Dateisystem-Sicherheitsgrenze: Eintrag über Gerät und Inode wiedererkennen, exklusiv anlegen, prozessübergreifend sperren, atomar ins Ziel tauschen, nur nachweislich Eigenes bereinigen | `FileSystemIdentity` · `StagingOwnership` · `OutputLeaseSet` · `acquireOutputLeases` · `createProtectedStagingOutput` · `commitStagedOutput` · `removeOrphanedStagedOutputs` · `removeOwnedTempDirectory` |
 | `CLIInvocation.swift` | Vollständiger, POSIX-shell-sicherer GUI→CLI-Handoff | `CLIInvocation.arguments` · `shellCommand` |
 | `ConversionSession.swift` | Main-Actor-isolierter Lebenszyklus und `@Published`-State, gemeinsame Pfad-/Symlink-Auflösung, atomarer und abbrechbarer asynchroner Import, Worker→UI-Nachrichten | `FoundFile` · `AudioLoadResult` · `beginImport` · `finishImport` · `foundFile(at:)` · `deduplicateFoundFiles` · `loadAudioFiles` · `processIncomingFiles` · `scanFolder` · `prepareFolder` · `addFolder` · `addLog` |
+| `CoverArtwork.swift` | ImageIO-Validierung und Thumbnail-Vorschau ohne vorherigen NSImage-Voll-Decode | `thumbnail` · `preview` |
 | `AudioSettings.swift` | Einstellungs-Struct (`Codable`) | Felder → [settings.md](settings.md) |
 | `SettingsManager.swift` | Laden/Speichern `~/.Hoerbuchkloeppler/settings.json` | `shared` · `loadSettings` · `saveSettings` |
-| `AudioFile+Extensions.swift` | Asynchrone AVFoundation-Artwork-Analyse; Kapitel-Extraktion via **gebündeltem ffmpeg** (`-f ffmetadata`) auf eigener Utility-Queue mit Task-/Importabbruch | `extractEmbeddedArtwork` · `extractChapters` · `parseFFMetadataChapters` |
+| `AudioFile+Extensions.swift` | Begrenzte ffmpeg-Artwork-Extraktion; Kapitel-Extraktion via **gebündeltem ffmpeg** (`-f ffmetadata`) auf eigener Utility-Queue mit Task-/Importabbruch | `extractEmbeddedArtwork` · `extractChapters` · `parseFFMetadataChapters` |
 | `KloepplerCLI.swift` | AsyncParsableCommand-CLI: erwarteter Import, TTY-abhängige ANSI-Animation, Klartextstatus in Pipes, SIGINT-Phasen, ASCII-Cover — Optionen siehe [build-and-test.md](build-and-test.md) | `KloepplerCLI` (`@main`) · `execute(_:)` · `validate()` · `resolveOutputFile` · `sanitizeFilename` · `buildPacmanBar` · `generateAsciiArt` |
 | `TerminalRenderer.swift` | Physische Statuszeilen, Unicode-Anzeigebreite und sichere Neuzeichnung bei Terminal-Größenwechseln | `TerminalRenderer` · `TerminalGeometry` |
 

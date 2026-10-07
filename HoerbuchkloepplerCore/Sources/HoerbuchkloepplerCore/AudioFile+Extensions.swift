@@ -16,7 +16,7 @@ private enum ChapterMetadataResult: Sendable {
     case cancelled
 }
 
-private final class ChapterAnalysisCancellation: @unchecked Sendable {
+private final class AudioAnalysisCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
     private let process: Process
@@ -31,7 +31,7 @@ private final class ChapterAnalysisCancellation: @unchecked Sendable {
     }
 }
 
-private enum ChapterAnalysisExecutor {
+private enum AudioAnalysisExecutor {
     // Die Import-Pipeline begrenzt die Zahl gleichzeitig laufender Analysen.
     // Eine serielle Queue würde auch unabhängige Quellen hinter einem hängenden
     // Werkzeug aufstauen. Keine dieser blockierenden Arbeiten gehört in einen Task.
@@ -57,19 +57,72 @@ extension AudioFile {
     static let maximumFFMetadataByteCount = 8 * 1024 * 1024
     static let chapterExtractionTimeout: TimeInterval = 30
 
-    /// Extrahiert das eingebettete Cover aus einer Audiodatei.
-    /// Nutzt sowohl Common-Keys als auch Raw-Keys für maximale Kompatibilität (MP3, M4A, etc.)
+    /// Liest Cover als unveränderte Bildpakete durch eine begrenzte Pipe. Die
+    /// AVMetadataItem-Daten würden erst nach vollständigem Laden prüfbar sein.
     public static func extractEmbeddedArtwork(from url: URL) async -> Data? {
-        guard !taskCancellationRequested() else { return nil }
-        let asset = AVAsset(url: url)
+        await extractEmbeddedArtwork(from: url, candidateCount: 64)
+    }
 
-        guard let metadata = try? await asset.load(.metadata) else { return nil }
-        guard !taskCancellationRequested() else { return nil }
-        for item in metadata where isArtworkItem(item) {
+    static func extractEmbeddedArtwork(
+        from url: URL,
+        candidateCount: Int,
+        onRequest: @Sendable () -> Void = {}
+    ) async -> Data? {
+        guard candidateCount > 0, !taskCancellationRequested(),
+              let executable = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else { return nil }
+        let extractionStart = DispatchTime.now().uptimeNanoseconds
+        for index in 0..<min(64, candidateCount) {
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds - extractionStart) / 1_000_000_000
+            let remainingTimeout = 15 - elapsed
+            guard remainingTimeout > 0, !taskCancellationRequested() else { return nil }
+            let process = Process()
+            process.executableURL = executable
+            process.arguments = [
+                "-nostdin", "-v", "quiet", "-max_alloc", String(FFmpegWrapper.maximumCoverByteCount),
+                "-i", url.path, "-map", "0:v:disp:attached_pic:\(index)",
+                "-c", "copy", "-frames:v", "1", "-f", "image2pipe", "pipe:1"
+            ]
+            let cancellation = AudioAnalysisCancellation(process: process)
+            onRequest()
+            let result: (data: Data?, streamFound: Bool) = await withTaskCancellationHandler {
+                await AudioAnalysisExecutor.perform {
+                    guard !cancellation.isCancelled else { return (nil, false) }
+                    let pipe = Pipe()
+                    defer {
+                        try? pipe.fileHandleForReading.close()
+                        try? pipe.fileHandleForWriting.close()
+                    }
+                    process.standardInput = FileHandle.nullDevice
+                    process.standardOutput = pipe
+                    process.standardError = FileHandle.nullDevice
+                    do {
+                        try process.run()
+                        ProcessTerminator.recordOwnedProcessGroup(process)
+                        defer { ProcessTerminator.forgetOwnedProcessGroup(process) }
+                        try? pipe.fileHandleForWriting.close()
+                        let start = DispatchTime.now().uptimeNanoseconds
+                        let output = readAnalysisOutput(
+                            from: pipe.fileHandleForReading,
+                            maximumByteCount: FFmpegWrapper.maximumCoverByteCount,
+                            timeout: remainingTimeout,
+                            shouldCancel: { cancellation.isCancelled }
+                        ) { ProcessTerminator.terminateAndWait([process]) }
+                        let elapsed = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000
+                        if !waitForProcessExit(process, timeout: max(0, remainingTimeout - elapsed)) {
+                            ProcessTerminator.terminateAndWait([process])
+                        }
+                        if !process.isRunning { process.waitUntilExit() }
+                        ProcessTerminator.terminateRemainingOwnedGroup(process)
+                        guard !cancellation.isCancelled, !process.isRunning,
+                              process.terminationStatus == 0,
+                              !output.exceededLimit, !output.timedOut, !output.readFailed else { return (nil, false) }
+                        return (validatedEmbeddedArtworkData(output.data), true)
+                    } catch { return (nil, false) }
+                }
+            } onCancel: { cancellation.cancel() }
             guard !taskCancellationRequested() else { return nil }
-            let data = try? await item.load(.dataValue)
-            guard !taskCancellationRequested() else { return nil }
-            if let data = validatedEmbeddedArtworkData(data) { return data }
+            if let data = result.data { return data }
+            if !result.streamFound { break }
         }
         return nil
     }
@@ -85,19 +138,7 @@ extension AudioFile {
     /// der Dateipfad für ein manuell gewähltes Cover. Ein kaputter erster
     /// Artwork-Tag darf die Suche nach einem späteren gültigen Tag nicht beenden.
     static func validatedEmbeddedArtworkData(_ data: Data?) -> Data? {
-        guard let data,
-              !data.isEmpty,
-              data.count <= FFmpegWrapper.maximumCoverByteCount,
-              let source = CGImageSourceCreateWithData(data as CFData, nil),
-              CGImageSourceGetCount(source) > 0 else { return nil }
-        let options = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: 32,
-            kCGImageSourceShouldCacheImmediately: true
-        ] as CFDictionary
-        guard CGImageSourceCreateThumbnailAtIndex(source, 0, options) != nil else {
-            return nil
-        }
+        guard let data, CoverArtwork.thumbnail(from: data, maximumDimension: 32) != nil else { return nil }
         return data
     }
 
@@ -152,9 +193,9 @@ extension AudioFile {
         process.arguments = ["-nostdin", "-v", "quiet", "-i", url.path, "-f", "ffmetadata", "-"]
         let pipe = Pipe()
 
-        let cancellation = ChapterAnalysisCancellation(process: process)
+        let cancellation = AudioAnalysisCancellation(process: process)
         return await withTaskCancellationHandler {
-            let metadata: ChapterMetadataResult = await ChapterAnalysisExecutor.perform {
+            let metadata: ChapterMetadataResult = await AudioAnalysisExecutor.perform {
                 defer {
                     try? pipe.fileHandleForWriting.close()
                     try? pipe.fileHandleForReading.close()
@@ -188,7 +229,7 @@ extension AudioFile {
                     // bleibt begrenzt; bei Überschreitung beendet der Leser ffmpeg und
                     // kehrt ohne weitere Datenübernahme zurück.
                     let extractionStart = DispatchTime.now().uptimeNanoseconds
-                    let output = readFFMetadata(
+                    let output = readAnalysisOutput(
                         from: pipe.fileHandleForReading,
                         timeout: chapterExtractionTimeout,
                         shouldCancel: { shouldCancel() || cancellation.isCancelled }
@@ -265,7 +306,7 @@ extension AudioFile {
                 totalDuration = sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
             }
             guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
-            let resolvedChapters: [AudioFile]? = await ChapterAnalysisExecutor.perform {
+            let resolvedChapters: [AudioFile]? = await AudioAnalysisExecutor.perform {
                 guard !shouldCancel(), !cancellation.isCancelled else { return nil }
                 var chapters = parsedChapters
                 // Das LETZTE Kapitel hat in FFMETADATA oft keine END-Zeit — es gibt kein
@@ -328,11 +369,11 @@ extension AudioFile {
         return ProcessTerminator.wait(upTo: boundedTimeout) { process.isRunning }
     }
 
-    /// Liest eine ffmetadata-Pipe bis zu einer festen Obergrenze und Frist.
+    /// Liest eine Analyse-Pipe bis zu einer festen Obergrenze und Frist.
     /// `poll` hält die Frist auch dann ein, wenn weder Daten noch EOF kommen.
     /// Beim ersten Grenzfehler beendet `onAbort` den direkten Kindprozess; der
     /// Leser kehrt danach sofort zurück und wartet nicht auf vererbte Pipe-Enden.
-    static func readFFMetadata(
+    static func readAnalysisOutput(
         from handle: FileHandle,
         maximumByteCount: Int = maximumFFMetadataByteCount,
         timeout: TimeInterval = chapterExtractionTimeout,

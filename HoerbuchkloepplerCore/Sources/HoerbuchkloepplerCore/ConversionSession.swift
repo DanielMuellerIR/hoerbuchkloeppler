@@ -1410,7 +1410,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
                     // Manche Container deklarieren beliebige Binärdaten als
                     // Artwork. Nur tatsächlich dekodierbare Bilder dürfen in
                     // den späteren ffmpeg-Auftrag gelangen.
-                    guard let image = NSImage(data: artworkData) else { continue }
+                    guard let image = CoverArtwork.preview(from: artworkData) else { continue }
                     guard let self, self.artworkRequest == request else { return }
                     guard self.coverRevision == expectedCoverRevision,
                           !self.isCoverSuppressed,
@@ -1969,14 +1969,14 @@ public final class ConversionSession: ObservableObject, Identifiable {
     }
 
     /// Erstes dekodierbares eingebettetes Cover der Kandidaten. Manche Container
-    /// deklarieren beliebige Binärdaten als Artwork, deshalb muss `NSImage` sie
-    /// tatsächlich lesen können.
+    /// deklarieren beliebige Binärdaten als Artwork, deshalb muss ImageIO eine
+    /// begrenzte Vorschau daraus erzeugen können.
     private nonisolated func firstEmbeddedArtwork(in files: [AudioFile]) async -> EmbeddedArtworkSearch {
         for audioFile in Self.uniqueArtworkCandidates(files) {
             if preparationCancellationRequested() { return .cancelled }
             if let artworkData = await importService.artwork(at: audioFile.url) {
                 if preparationCancellationRequested() { return .cancelled }
-                if NSImage(data: artworkData) != nil { return .found(artworkData) }
+                if CoverArtwork.preview(from: artworkData) != nil { return .found(artworkData) }
             }
         }
         return preparationCancellationRequested() ? .cancelled : .none
@@ -2083,7 +2083,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         if coverRevision == expectedCoverRevision, !isCoverSuppressed,
            coverImage == nil, coverPath == nil,
            let artworkData = embeddedArtwork,
-           let image = NSImage(data: artworkData) {
+           let image = CoverArtwork.preview(from: artworkData) {
             coverImage = image
             coverPath = nil
             // Rohdaten merken (siehe processIncomingFiles): nur so landet ein
@@ -2133,10 +2133,11 @@ public final class ConversionSession: ObservableObject, Identifiable {
         // gelöschtes oder ausgetauschtes Bild zwischen Auswahl und Start weder
         // das ausdrücklich gewählte Cover verlieren noch fremde Daten einsetzen.
         guard let data = FFmpegWrapper.loadCoverSnapshot(at: url),
-              let image = NSImage(data: data) else { return false }
+              let image = CoverArtwork.preview(from: data) else { return false }
         coverRevision &+= 1
         invalidateArtworkWork()
-        self.coverImage = resizeImage(image, maxDimension: 2000); self.coverPath = url.path
+        self.coverImage = image
+        self.coverPath = url.path
         // Gewählte Datei hat Vorrang vor eingebettetem Artwork.
         self.embeddedCoverData = data
         self.isCoverSuppressed = false
@@ -2152,19 +2153,6 @@ public final class ConversionSession: ObservableObject, Identifiable {
         isCoverSuppressed = true
     }
 
-    private func resizeImage(_ image: NSImage, maxDimension: CGFloat) -> NSImage {
-        let size = image.size
-        // Ungültige Bildmaße nicht skalieren (würde durch null teilen).
-        guard size.width > 0, size.height > 0 else { return image }
-        if size.width <= maxDimension && size.height <= maxDimension { return image }
-        let ratio = size.width / size.height
-        let newSize = ratio > 1 ? NSSize(width: maxDimension, height: maxDimension / ratio) : NSSize(width: maxDimension * ratio, height: maxDimension)
-        let newImage = NSImage(size: newSize)
-        newImage.lockFocus()
-        image.draw(in: NSRect(origin: .zero, size: newSize), from: .zero, operation: .copy, fraction: 1.0)
-        newImage.unlockFocus()
-        return newImage
-    }
 
 }
 

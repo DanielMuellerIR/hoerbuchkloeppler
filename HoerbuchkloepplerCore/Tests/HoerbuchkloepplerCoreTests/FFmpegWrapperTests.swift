@@ -838,7 +838,7 @@ struct ParseFFMetadataChaptersTests {
         pipe.fileHandleForWriting.closeFile()
         var limitCallbackCount = 0
 
-        let output = AudioFile.readFFMetadata(
+        let output = AudioFile.readAnalysisOutput(
             from: pipe.fileHandleForReading,
             maximumByteCount: 8,
             onAbort: { limitCallbackCount += 1 }
@@ -856,7 +856,7 @@ struct ParseFFMetadataChaptersTests {
         let pipe = Pipe()
         var abortCallbackCount = 0
 
-        let output = AudioFile.readFFMetadata(
+        let output = AudioFile.readAnalysisOutput(
             from: pipe.fileHandleForReading,
             maximumByteCount: 8,
             timeout: 0.01,

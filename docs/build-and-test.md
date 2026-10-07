@@ -331,3 +331,14 @@ bleibt der vorige Status einmal stehen; der nächste Block beginnt darunter,
 damit kein Cursor-Sprung mit veralteter Geometrie Logzeilen trifft.
 Die CLI-Matrix erzeugt lange stille Testquellen für echte Stunden-Splits.
 AAC-Toleranzen und gemessene Performance-Kapitelversätze stehen in encoding.md.
+
+### Cover-Grenzen
+
+`tests/verify_artwork.sh` erzeugt eigene MP3-/M4A- und PNG-Fixtures: 96 Millionen
+Pixel, ein gültiges PNG mit 33 MiB Zusatzdaten, ungültige Bilder und ein späteres
+gültiges Cover. Es prüft begrenzte Vorschau, unveränderte Exportbytes und den
+Erhalt einer bestehenden Auswahl bei Fehlern. Getrennte Prozesse vergleichen
+maximales RSS des alten NSImage-Skalierablaufs und der Thumbnail-Übernahme;
+die Baseline lädt absichtlich das große Original. Der Vergleich misst weder
+allgemeine Importleistung noch eine feste RSS-Obergrenze. Temporäre Fixtures
+werden nach dem Lauf entfernt. Die gebündelte ffmpeg-Version muss vorhanden sein.
