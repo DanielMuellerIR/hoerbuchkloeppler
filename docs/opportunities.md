@@ -76,7 +76,7 @@ ohne unverhältnismäßiges Risiko im Rahmen der Kampagne erledigen.
 - **Die 32-MiB-Grenze für eingebettetes Artwork greift erst nach dem vollständigen
   Laden** (`item.load(.dataValue)`), und ein sehr großes PNG muss zum Erzeugen der
   32-px-Vorschau ganz dekodiert werden.
-- **Signierung, Installation und DMG-Release geprüft; Build-Fehlerpfade offen.**
+- **Signierung, Installation, DMG-Release und Build-Lifecycle geprüft.**
   `test_scripts.sh` führt `sign-bundle.sh` seit 1.4.23 mit echten Ad-hoc-Bundles
   und kontrollierten Werkzeugfehlern aus. Seit 1.4.24 prüft es außerdem den
   wirklichen Installationsaustausch/Rollback mit kontrollierten Diensten und
@@ -85,8 +85,11 @@ ohne unverhältnismäßiges Risiko im Rahmen der Kampagne erledigen.
   Seit 1.4.25 prüfen kontrollierte Release-Fixtures zusätzlich die DMG-/Notary-
   Reihenfolge, Lizenzhinweise, den Erhalt früherer guter Images und die
   Bereinigung. Ein unbekannter Mount-Status erhält nun temporäre Daten und
-  verhindert die Konvertierung. Eigene Lifecycle-Fixtures für die Fehlerpfade
-  von `build.sh` fehlen weiterhin.
+  verhindert die Konvertierung. Seit 1.4.26 prüft es auch Build-Optionen,
+  Abhängigkeiten/Downloads, Fehler von CLI-/App-Build sowie den Ad-hoc-Vertrag.
+  Beim MediaInfo-Download bleiben aktive oder unbekannte Mounts samt Daten
+  erhalten. Download-, Compiler- und Apple-Dienste sind dabei kontrolliert;
+  wirkliche positive Builds und Dependency-Prüfungen ergänzen diese Tests.
 
 Die historische CodeQA-Abdeckung in `.codeqa/coverage.json` wird nicht als Prüfung
 der neuen Funktionen ausgegeben. Neue/erweiterte Bereiche stehen dort zur

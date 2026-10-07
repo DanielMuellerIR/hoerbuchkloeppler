@@ -78,12 +78,23 @@ fetch_ffmpeg() (
 fetch_mediainfo() (
     set -euo pipefail
     log "Lade mediainfo CLI ${MEDIAINFO_VERSION} (mediaarea, universal) …"
-    local tmp mnt mounted=0
+    local tmp mnt mount_state
     tmp="$(mktemp -d)"
+    tmp="$(cd "$tmp" && pwd -P)"
     mnt="$tmp/mnt"
     cleanup_mediainfo_download() {
-        if [[ "$mounted" == 1 ]]; then
-            hdiutil detach "$mnt" >/dev/null 2>&1 || true
+        local state=0
+        # Auch attach kann nach dem Einhängen fehlschlagen. Daher den wirklichen
+        # Zustand prüfen, statt nur einen Erfolgsmarker des Aufrufs zu verwenden.
+        hoerbuchkloeppler_mount_is_active "$mnt" || state=$?
+        if [[ "$state" == 0 ]]; then
+            hdiutil detach "$mnt" -force >/dev/null 2>&1 || true
+        fi
+        state=0
+        hoerbuchkloeppler_mount_is_active "$mnt" || state=$?
+        if [[ "$state" != 1 ]]; then
+            echo "Warnung: MediaInfo-DMG ist eingehängt oder sein Status unbekannt; temporäre Daten bleiben erhalten: $tmp" >&2
+            return
         fi
         rm -rf "$tmp"
     }
@@ -91,7 +102,6 @@ fetch_mediainfo() (
     curl -fSL --retry 3 --max-time 300 "$MEDIAINFO_URL" -o "$tmp/mediainfo.dmg"
     verify_sha256 "$tmp/mediainfo.dmg" "$MEDIAINFO_ARCHIVE_SHA256" "MediaInfo-Archiv"
     hdiutil attach "$tmp/mediainfo.dmg" -nobrowse -readonly -mountpoint "$mnt" >/dev/null
-    mounted=1
     # Das DMG enthält keinen losen Binary, sondern einen Installer 'mediainfo.pkg'.
     # Payload entpacken (ohne zu installieren) und die Binary herausziehen.
     local pkg; pkg="$(find "$mnt" -maxdepth 1 -name '*.pkg' -print -quit)"
@@ -100,7 +110,12 @@ fetch_mediainfo() (
     fi
     pkgutil --expand-full "$pkg" "$tmp/expanded" >/dev/null
     hdiutil detach "$mnt" >/dev/null
-    mounted=0
+    mount_state=0
+    hoerbuchkloeppler_mount_is_active "$mnt" || mount_state=$?
+    if [[ "$mount_state" != 1 ]]; then
+        echo "Fehler: MediaInfo-DMG ist eingehängt oder sein Status unbekannt." >&2
+        exit 1
+    fi
     local found; found="$(find "$tmp/expanded" -type f -name mediainfo -print -quit)"
     if [[ -z "$found" ]]; then
         echo "Fehler: 'mediainfo'-Binary im pkg-Payload nicht gefunden." >&2; exit 1

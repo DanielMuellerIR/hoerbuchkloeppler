@@ -22,6 +22,15 @@ hoerbuchkloeppler_directory_identity() {
   stat -f '%d:%i' "$1"
 }
 
+hoerbuchkloeppler_mount_is_active() {
+  local mount_dir="$1" mount_info
+  # Rückgabe: 0 aktiv, 1 sicher inaktiv, 2 Status unbekannt. Ein fehlgeschlagener
+  # Statusabruf darf keine Löschung eines möglicherweise aktiven Mounts erlauben.
+  mount_info="$(hdiutil info)" || return 2
+  # grep muss alles lesen, damit unter pipefail kein SIGPIPE den Treffer ersetzt.
+  printf '%s\n' "$mount_info" | grep -F "$mount_dir" >/dev/null
+}
+
 # Startzeit und vollständiges Kommando stammen bewusst aus EINEM ps-Snapshot.
 # Zwei getrennte Abfragen könnten bei einer wiederverwendeten PID verschiedene
 # Prozesse beobachten und damit die spätere TERM/KILL-Prüfung falsch binden.

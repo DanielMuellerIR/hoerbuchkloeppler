@@ -154,7 +154,17 @@ Bereinigung erlauben. Der Test verwendet keine echten Mounts, keine
 Apple-Dienste und keinen Finder. Er gehört ebenfalls zu `test_scripts.sh`.
 Ein ergänzender echter, unsichtbarer HFS+-DMG-Probelauf am 2026-10-07 belegte
 das vollständige App-Bundle im Wurzelverzeichnis und sauberes Aushängen.
-Die Fehlerpfade von `build.sh` benötigen noch eigene Lifecycle-Fixtures.
+`tests/verify_build_lifecycle.py` prüft außerdem eine unveränderte Kopie von
+`build.sh`: Optionen, vorhandene/fehlende/beschädigte Abhängigkeiten, Download-,
+Archiv-/Binary-Prüfsummen- und Extraktionsfehler, Startproben sowie
+CLI-/App-Build und Ad-hoc-Signierungsvertrag. Compiler, Prüfsummenausgaben und
+Downloads sind kontrollierte Fixtures; sie ersetzen keine echten Builds oder
+kryptografische Prüfung der Upstream-Binaries. Ein ergänzender realer
+`build.sh --deps-only`-Lauf am 2026-10-07 bestätigte deren Prüfsummen und Start.
+Die MediaInfo-Mounts sind im Fixture ebenfalls kontrolliert: Nach teilweise
+erfolgreichem Attach wird aufgeräumt; aktive oder unbekannte Mounts bleiben mit
+ihren Daten erhalten. Der Test gehört zu `test_scripts.sh` und arbeitet ohne
+Netzwerk, reale Mounts oder Installationen.
 
 Die geprüften Funktionen sind `internal` statt `private`, damit `@testable
 import` drankommt. Das ist Absicht, kein vergessenes `private`.

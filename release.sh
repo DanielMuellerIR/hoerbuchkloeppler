@@ -70,13 +70,7 @@ MOUNT_ROOT="$(cd "$MOUNT_ROOT" && pwd -P)"
 MOUNT_DIR="$MOUNT_ROOT/volume"
 
 mount_is_active() {
-  local mount_info
-  # Ein fehlgeschlagener Statusabruf belegt keinen ausgehängten Datenträger.
-  # Rückgabe: 0 aktiv, 1 sicher inaktiv, 2 Status unbekannt.
-  mount_info="$(hdiutil info)" || return 2
-  # Ohne `grep -q`: Die gesamte Ausgabe muss verbraucht werden, damit unter
-  # pipefail kein SIGPIPE des schreibenden Prozesses den Treffer überschreibt.
-  printf '%s\n' "$mount_info" | grep -F "$MOUNT_DIR" >/dev/null
+  hoerbuchkloeppler_mount_is_active "$MOUNT_DIR"
 }
 
 cleanup() {

@@ -80,6 +80,12 @@ und RW-Image zur späteren Prüfung erhalten. Auch nach einem erfolgreichen
 Detach-Aufruf muss der Status sicher inaktiv sein, bevor das Image konvertiert
 wird. Das DMG bleibt ausschließlich für eigene Macs bestimmt.
 
+Dieselbe Mount-Statusprüfung schützt den MediaInfo-Download in `build.sh`.
+Auch ein nach dem Einhängen fehlgeschlagener Attach-Aufruf wird berücksichtigt.
+Solange das private, schreibgeschützte Download-Image aktiv oder sein Zustand
+unbekannt ist, wird sein Arbeitsverzeichnis nicht gelöscht. Der gemeldete
+Pfad bleibt für eine spätere gezielte Prüfung erhalten.
+
 ## Ausführungsrecht der Binaries
 
 Falls `Process()` die Binaries nicht starten kann (`Permission denied`), fehlt
