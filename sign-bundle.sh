@@ -43,7 +43,8 @@ fi
 #    Binärdateien; ffmpeg und mediainfo kommen fertig von außen.
 for eigene in "$APP/Contents/MacOS/"* "$FRAMEWORK/Versions/A/HoerbuchkloepplerCore"; do
   [ -f "$eigene" ] || continue
-  if file -b "$eigene" 2>/dev/null | grep -q 'Mach-O'; then
+  file_type="$(file -b "$eigene")"
+  if [[ "$file_type" == *Mach-O* ]]; then
     strip -S "$eigene"
   fi
 done
@@ -67,7 +68,10 @@ fi
 # das äußere Bundle könnte trotz unvollständigem Innenscan signiert werden.
 find "$RESOURCE_DIR" -type f -print0 \
   | while IFS= read -r -d '' embedded_file; do
-      if file -b "$embedded_file" 2>/dev/null | grep -q 'Mach-O'; then
+      # Ein Werkzeugfehler darf ein eingebettetes Programm nicht still von der
+      # Signierung ausschließen. Die Zuweisung steht deshalb außerhalb des if.
+      file_type="$(file -b "$embedded_file")"
+      if [[ "$file_type" == *Mach-O* ]]; then
         codesign "${SIGN_ARGS[@]}" "$embedded_file"
       fi
     done

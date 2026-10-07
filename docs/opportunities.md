@@ -76,11 +76,12 @@ ohne unverhältnismäßiges Risiko im Rahmen der Kampagne erledigen.
 - **Die 32-MiB-Grenze für eingebettetes Artwork greift erst nach dem vollständigen
   Laden** (`item.load(.dataValue)`), und ein sehr großes PNG muss zum Erzeugen der
   32-px-Vorschau ganz dekodiert werden.
-- **`test_scripts.sh` führt weiterhin keines der Build-, Installations- oder
-  Release-Skripte aus.** Seit 1.4.16 prüft es alle sieben auf Syntax; die
-  Beenden-und-Ersetzen-Sequenz von `install.sh`, die DMG- und
-  Notarisierungskette von `release.sh` und die Innen-nach-außen-Reihenfolge von
-  `sign-bundle.sh` bleiben ungetestet.
+- **Signierungs-Lifecycle seit 1.4.23 geprüft; Installation/Release bleiben offen.**
+  `test_scripts.sh` führt `sign-bundle.sh` mit echten Ad-hoc-Bundles und
+  kontrollierten Werkzeugfehlern aus. Ein Fehler der Mach-O-Erkennung beendet
+  jetzt den Lauf, statt ein eingebettetes Programm still auszulassen.
+  Für Beenden/Ersetzen/Rollback in `install.sh` und die DMG-/Notarisierungskette
+  von `release.sh` fehlen weiterhin vollständige Verhaltens-Fixtures.
 
 Die historische CodeQA-Abdeckung in `.codeqa/coverage.json` wird nicht als Prüfung
 der neuen Funktionen ausgegeben. Neue/erweiterte Bereiche stehen dort zur

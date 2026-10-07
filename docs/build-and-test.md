@@ -125,12 +125,17 @@ Startprüfung und Prozessstart. Die Prozessgruppen-Suite prüft weiterhin den
 Abbruch eines laufenden Kapitelwerkzeugs einschließlich seiner Nachkommen.
 Die gemessene Laufzeit dieser Probe ist kein Leistungsvergleich für Hörbücher.
 
-`test_scripts.sh` prüft die Syntax (`bash -n`) aller Root-Shell-Skripte — es
-führt keines davon aus. Abgesichert sind außerdem die Versions-Syntaxtabelle,
-der Abgleich von `VERSION` mit `MARKETING_VERSION` im Xcode-Projekt und die
-Ein-Snapshot-Identität aus `script-helpers.sh`. Die Beenden-und-Ersetzen-Sequenz
-von `install.sh`, die DMG-/Notarisierungskette von `release.sh` und die
-Innen-nach-außen-Reihenfolge von `sign-bundle.sh` bleiben ungetestet.
+`test_scripts.sh` prüft die Syntax (`bash -n`) aller Root-Shell-Skripte,
+die Versions-Syntaxtabelle, den Abgleich von `VERSION` mit `MARKETING_VERSION`
+und die Ein-Snapshot-Identität aus `script-helpers.sh`. Es führt außerdem
+`tests/verify_sign_bundle.py` aus: echte kleine Ad-hoc-App-/Tool-/Framework-
+Signaturen, statischer Core, Reihenfolge, Strip-/Modulbereinigung,
+Vorbedingungen sowie kontrollierte Fehler von `codesign`, `find` und `file`.
+Die Developer-ID-Flags werden geprüft, der kontrollierte Aufruf endet vor
+einer echten Signierung. Dafür werden macOS, Python, Clang und die Apple-
+Signierwerkzeuge benötigt; alle Test-Bundles bleiben außerhalb `/Applications`.
+Die Beenden-und-Ersetzen-Sequenz von `install.sh` und die DMG-/Notarisierungskette
+von `release.sh` bleiben weiterhin ohne vollständige Lifecycle-Fixtures.
 
 Die geprüften Funktionen sind `internal` statt `private`, damit `@testable
 import` drankommt. Das ist Absicht, kein vergessenes `private`.

@@ -17,10 +17,8 @@ valid_three="$work_dir/version-three"
 invalid_empty="$work_dir/version-empty"
 invalid_suffix="$work_dir/version-suffix"
 invalid_path="$work_dir/version-path"
-# Syntaxprüfung aller Root-Shell-Skripte. Vorher führte dieses Gate keines von
-# ihnen aus und prüfte auch keines — ein Tippfehler in `release.sh` oder
-# `notary-profile.sh` wäre erst beim Release aufgefallen, also genau dann, wenn
-# er am meisten kostet. Die Liste wächst mit neu hinzugefügten Root-Skripten.
+# Syntaxprüfung aller Root-Shell-Skripte. Ergänzende Verhaltensprüfungen stehen
+# nach den gemeinsamen Versions- und Prozessidentitätsprüfungen.
 for script_path in ./*.sh; do
   [ -f "$script_path" ] || continue
   script="${script_path#./}"
@@ -111,5 +109,7 @@ if hoerbuchkloeppler_process_matches_snapshot 12345 "$snapshot" "$target"; then
 fi
 assert_equal "$(wc -l < "$ps_calls" | tr -d ' ')" "2" "Zweiter Abgleich muss ps erneut aufrufen"
 unset -f ps
+
+PYTHONDONTWRITEBYTECODE=1 python3 tests/verify_sign_bundle.py
 
 echo "Shell-Sicherheitstests bestanden."
