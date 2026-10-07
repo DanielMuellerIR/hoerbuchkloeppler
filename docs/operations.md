@@ -56,7 +56,12 @@ Das Skript kopiert das Bundle zunächst neben das Ziel und wiederholt dort die
 Signatur-, Ticket-, Gatekeeper- und Laufzeitprogramm-Prüfungen. Beim Austausch
 behält es die vorige App bis zur erfolgreichen Prüfung des Installationsziels
 als Backup; schlägt ein nachgelagerter Test fehl, setzt der EXIT-Trap dieses
-Bundle atomar zurück. Eine laufende Ziel-App erhält zuerst SIGTERM und nach fünf
+Bundle atomar zurück, sofern Ziel und Backup noch die erwarteten Identitäten
+haben. Zielbundle und Elternordner werden bereits vor dem Build über Gerät und
+Inode erfasst und vor Beenden/Austausch erneut geprüft. Hat ein anderer Lauf
+inzwischen das Ziel ersetzt, wird dieser Konflikt gemeldet; ein Rückzug lässt
+das fremde Ziel und das nötige alte Backup erhalten. Eine laufende Ziel-App
+erhält zuerst SIGTERM und nach fünf
 Sekunden ohne Beendigung SIGKILL. Registrierung, Startzeit und vollständiges
 Kommando jedes Kandidaten stammen dabei aus einem einzigen `ps`-Snapshot; vor
 jedem Signal muss derselbe Snapshot noch zum exakten Zielprogramm passen.

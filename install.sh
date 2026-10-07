@@ -97,6 +97,13 @@ if [ "$INSTALL" -eq 1 ] && [ "$NOTARIZE" -eq 1 ]; then
     echo "✗ Installationsziel existiert, ist aber kein App-Bundle-Ordner: $DEST" >&2
     exit 1
   fi
+  # Build und Notarisierung können Minuten dauern. Eine inzwischen erneuerte
+  # Installation darf später weder beendet noch durch diesen Lauf ersetzt werden.
+  DEST_PARENT_IDENTITY="$(hoerbuchkloeppler_directory_identity "$DEST_PARENT")"
+  DEST_IDENTITY="missing"
+  if [ -d "$DEST" ]; then
+    DEST_IDENTITY="$(hoerbuchkloeppler_directory_identity "$DEST")"
+  fi
 fi
 
 # ── Notar-Profil VOR dem teuren Build prüfen (schneller Fehlschlag) ──────────
@@ -195,6 +202,21 @@ if [ "$INSTALL" -eq 0 ]; then
 fi
 
 # ── 4. Nach /Applications installieren (laufende Ziel-Instanz vorher beenden) ─
+verify_install_target() {
+  local current_parent current_destination="missing"
+  current_parent="$(hoerbuchkloeppler_directory_identity "$DEST_PARENT")" \
+    || { echo "✗ Elternordner des Installationsziels ist nicht mehr sicher erreichbar: $DEST_PARENT" >&2; return 1; }
+  if [ -e "$DEST" ] || [ -L "$DEST" ]; then
+    current_destination="$(hoerbuchkloeppler_directory_identity "$DEST")" \
+      || { echo "✗ Installationsziel ist kein unverlinkter App-Ordner mehr: $DEST" >&2; return 1; }
+  fi
+  if [ "$current_parent" != "$DEST_PARENT_IDENTITY" ] || [ "$current_destination" != "$DEST_IDENTITY" ]; then
+    echo "✗ Installationsziel oder Elternordner wurde während des Builds verändert: $DEST" >&2
+    return 1
+  fi
+}
+verify_install_target
+
 # Nur Prozesse des tatsächlich zu ersetzenden Bundles beenden. Ein pauschales
 # `pkill -x` träfe auch einen Test-Build aus diesem oder einem anderen Worktree.
 DEST_EXECUTABLE_NAME="$APP_EXECUTABLE_NAME"
@@ -262,6 +284,7 @@ if [ "${#destination_pids[@]}" -gt 0 ]; then
   [ "$still_running" -eq 0 ] \
     || { echo "✗ Laufende Ziel-App konnte nicht beendet werden: $DEST" >&2; exit 1; }
 fi
+verify_install_target
 # Atomar austauschen: erst neben das Ziel legen, dann in einem Schritt
 # eintauschen. Ein Abbruch mittendrin darf keine halb ersetzte App unter
 # /Applications hinterlassen — genau das konnte `rm -rf` + `cp -R` erzeugen.
@@ -274,20 +297,38 @@ BACKUP="$DEST_PARENT/$BACKUP_BASENAME"
 [ ! -e "$BACKUP" ] && [ ! -L "$BACKUP" ] \
   || { echo "✗ Installations-Backup-Pfad ist bereits belegt: $BACKUP" >&2; exit 1; }
 DEST_EXISTED=0
-[ -e "$DEST" ] && DEST_EXISTED=1
+[ "$DEST_IDENTITY" = "missing" ] || DEST_EXISTED=1
 INSTALL_STATE="staged"
+STAGED_IDENTITY=""
 
+# Der Rückzug darf nur die eigene neue Kopie entfernen. Hat ein anderer Lauf
+# das Ziel erneut ersetzt, bleiben dieses Bundle und das vorige Backup erhalten.
 rollback_install() {
   local status="$?" rollback_ok=1
   trap - EXIT
   if [ "$status" -ne 0 ]; then
     if [ "$DEST_EXISTED" -eq 1 ] && [ -e "$BACKUP" ]; then
-      if /usr/bin/swift - "$BACKUP" "$DEST" <<'SWIFT'
+      if /usr/bin/swift - "$BACKUP" "$DEST" "$DEST_IDENTITY" "$STAGED_IDENTITY" "$DEST_PARENT_IDENTITY" <<'SWIFT'
 import Foundation
+import Darwin
+
+func directoryIdentity(_ url: URL) -> String? {
+    var information = stat()
+    guard lstat(url.path, &information) == 0 else { return errno == ENOENT ? "missing" : nil }
+    guard information.st_mode & S_IFMT == S_IFDIR else { return nil }
+    return "\(information.st_dev):\(information.st_ino)"
+}
 
 let fileManager = FileManager.default
 let backup = URL(fileURLWithPath: CommandLine.arguments[1])
 let destination = URL(fileURLWithPath: CommandLine.arguments[2])
+let destinationIdentity = directoryIdentity(destination)
+guard directoryIdentity(backup) == CommandLine.arguments[3],
+      directoryIdentity(destination.deletingLastPathComponent()) == CommandLine.arguments[5],
+      destinationIdentity == CommandLine.arguments[4] || destinationIdentity == "missing" else {
+    fputs("Rollback verweigert: Ziel, Elternordner oder Backup wurde inzwischen verändert.\n", stderr)
+    exit(1)
+}
 if fileManager.fileExists(atPath: destination.path) {
     _ = try fileManager.replaceItemAt(
         destination,
@@ -306,7 +347,9 @@ SWIFT
         echo "✗ KRITISCH: Rollback fehlgeschlagen; vorige App liegt unter $BACKUP" >&2
       fi
     elif [ "$DEST_EXISTED" -eq 0 ] && [ "$INSTALL_STATE" = "replacing" ] && [ -e "$DEST" ]; then
-      if mv "$DEST" "$STAGED"; then
+      if [ "$(hoerbuchkloeppler_directory_identity "$DEST_PARENT" || true)" = "$DEST_PARENT_IDENTITY" ] \
+        && [ "$(hoerbuchkloeppler_directory_identity "$DEST" || true)" = "$STAGED_IDENTITY" ] \
+        && mv "$DEST" "$STAGED"; then
         echo "⚠ Fehlgeschlagene Erstinstallation wurde entfernt." >&2
       else
         rollback_ok=0
@@ -321,6 +364,7 @@ SWIFT
 }
 trap rollback_install EXIT
 ditto "$APP" "$STAGED"
+STAGED_IDENTITY="$(hoerbuchkloeppler_directory_identity "$STAGED")"
 
 # Die tatsächlich kopierte Staging-App vollständig prüfen. Nur so kann ein
 # Kopierfehler nicht erst auffallen, nachdem die vorige Installation ersetzt ist.
@@ -334,12 +378,26 @@ STAGED_RESOURCE_BIN="$STAGED/Contents/Resources/HoerbuchkloepplerCore_Hoerbuchkl
   || { echo "✗ Gebündeltes mediainfo startet im Staging-Bundle nicht." >&2; exit 1; }
 
 INSTALL_STATE="replacing"
-/usr/bin/swift - "$STAGED" "$DEST" "$BACKUP_BASENAME" <<'SWIFT'
+/usr/bin/swift - "$STAGED" "$DEST" "$BACKUP_BASENAME" "$DEST_IDENTITY" "$DEST_PARENT_IDENTITY" "$STAGED_IDENTITY" <<'SWIFT'
 import Foundation
+import Darwin
+
+func directoryIdentity(_ url: URL) -> String? {
+    var information = stat()
+    guard lstat(url.path, &information) == 0 else { return errno == ENOENT ? "missing" : nil }
+    guard information.st_mode & S_IFMT == S_IFDIR else { return nil }
+    return "\(information.st_dev):\(information.st_ino)"
+}
 
 let fileManager = FileManager.default
 let source = URL(fileURLWithPath: CommandLine.arguments[1])
 let destination = URL(fileURLWithPath: CommandLine.arguments[2])
+guard directoryIdentity(destination) == CommandLine.arguments[4],
+      directoryIdentity(destination.deletingLastPathComponent()) == CommandLine.arguments[5],
+      directoryIdentity(source) == CommandLine.arguments[6] else {
+    fputs("Installation verweigert: Ziel, Elternordner oder Staging wurde inzwischen verändert.\n", stderr)
+    exit(1)
+}
 if fileManager.fileExists(atPath: destination.path) {
     _ = try fileManager.replaceItemAt(
         destination,

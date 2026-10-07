@@ -111,5 +111,6 @@ assert_equal "$(wc -l < "$ps_calls" | tr -d ' ')" "2" "Zweiter Abgleich muss ps 
 unset -f ps
 
 PYTHONDONTWRITEBYTECODE=1 python3 tests/verify_sign_bundle.py
+PYTHONDONTWRITEBYTECODE=1 python3 tests/verify_install_lifecycle.py
 
 echo "Shell-Sicherheitstests bestanden."

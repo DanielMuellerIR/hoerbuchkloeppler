@@ -134,8 +134,17 @@ Vorbedingungen sowie kontrollierte Fehler von `codesign`, `find` und `file`.
 Die Developer-ID-Flags werden geprüft, der kontrollierte Aufruf endet vor
 einer echten Signierung. Dafür werden macOS, Python, Clang und die Apple-
 Signierwerkzeuge benötigt; alle Test-Bundles bleiben außerhalb `/Applications`.
-Die Beenden-und-Ersetzen-Sequenz von `install.sh` und die DMG-/Notarisierungskette
-von `release.sh` bleiben weiterhin ohne vollständige Lifecycle-Fixtures.
+`tests/verify_install_lifecycle.py` führt eine unveränderte Kopie von `install.sh`
+mit kontrollierten Build-/Signier-/Notary-Diensten aus. Das vorhandene
+`HOERBUCHKLOEPPLER_INSTALL_DEST` zeigt auf einen eigenen Temp-Ordner; `ditto`,
+der Swift-Dateiaustausch und Rollback laufen wirklich. Erstinstallation,
+Austausch, Quell-/Staging-/Laufzeitfehler, `--no-install`/`--no-notarize`,
+Prozessbesitz, simulierte PID-Änderung sowie ausgetauschte Ziele/Elternordner
+werden geprüft. Alle eigenen Helferprozesse werden beendet; im Konfliktfall
+muss das alte Backup erhalten bleiben. Auch diese Prüfung gehört zu
+`test_scripts.sh`. Sie ersetzt keine echte Apple-Notarisierung.
+Die DMG-/Notarisierungskette von `release.sh` bleibt ohne vollständige
+Lifecycle-Fixtures.
 
 Die geprüften Funktionen sind `internal` statt `private`, damit `@testable
 import` drankommt. Das ist Absicht, kein vergessenes `private`.

@@ -17,6 +17,11 @@ hoerbuchkloeppler_read_version() {
   printf '%s\n' "$version"
 }
 
+hoerbuchkloeppler_directory_identity() {
+  [ -d "$1" ] && [ ! -L "$1" ] || return 1
+  stat -f '%d:%i' "$1"
+}
+
 # Startzeit und vollständiges Kommando stammen bewusst aus EINEM ps-Snapshot.
 # Zwei getrennte Abfragen könnten bei einer wiederverwendeten PID verschiedene
 # Prozesse beobachten und damit die spätere TERM/KILL-Prüfung falsch binden.
