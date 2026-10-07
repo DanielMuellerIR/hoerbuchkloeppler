@@ -189,68 +189,6 @@ private struct CLIOptions: Sendable {
     let language: String?
 }
 
-/// Hält den Pacman-Statusblock am unteren Rand des Terminals und trennt ihn
-/// sauber von den Logzeilen.
-///
-/// Das Problem ohne diese Klasse: Der Statusblock wird per ANSI-Cursor-Sprüngen
-/// überschrieben, dafür muss die Zeilenzahl des zuletzt gezeichneten Blocks
-/// stimmen. Schreibt zwischendurch jemand anders eine Logzeile, verschiebt sich
-/// alles und der Cursor löscht die falschen Zeilen — das Terminalbild zerfällt.
-///
-/// Lösung: Alle Ausgaben laufen durch diesen Renderer. Vor jeder Logzeile wird
-/// der Block entfernt, die Zeile bleibt dauerhaft stehen, und die Schleife
-/// zeichnet den Block danach darunter neu.
-///
-/// Nicht thread-sicher — sämtliche Aufrufe kommen vom Main-Thread (die Log-Senke
-/// der Session stellt das sicher).
-@MainActor
-final class TerminalRenderer {
-    /// Zeilenzahl des aktuell sichtbaren Statusblocks; 0 = kein Block auf dem Schirm.
-    private var blockLines = 0
-    private var lastPlainStatus = ""
-    private let usesANSI: Bool
-
-    init(outputFileDescriptor: Int32 = FileHandle.standardOutput.fileDescriptor) {
-        usesANSI = isatty(outputFileDescriptor) != 0
-    }
-
-    /// Entfernt den Statusblock vom Bildschirm. Danach steht der Cursor wieder
-    /// dort, wo der Block begann.
-    func clearBlock() {
-        guard usesANSI else { return }
-        guard blockLines > 0 else { return }
-        // Je Blockzeile: eine Zeile hoch (1A) und diese löschen (2K); zum Schluss
-        // an den Zeilenanfang (G).
-        print(String(repeating: "\u{001B}[1A\u{001B}[2K", count: blockLines), terminator: "\u{001B}[G")
-        blockLines = 0
-    }
-
-    /// Schreibt eine dauerhafte Logzeile oberhalb des Statusblocks.
-    func emitLog(_ line: String) {
-        if usesANSI { clearBlock() }
-        print(line)
-    }
-
-    /// Zeichnet den Statusblock neu. `text` muss jede Zeile mit "\n" abschließen.
-    func drawBlock(_ text: String) {
-        guard usesANSI else {
-            // In Pipes/CI weder Escape-Sequenzen noch 10 Statusblöcke pro
-            // Sekunde ausgeben. Nur echte Statuswechsel bleiben als Klartext.
-            let status = text.split(separator: "\n", maxSplits: 1)
-                .first
-                .map(String.init) ?? ""
-            if !status.isEmpty, status != lastPlainStatus {
-                print(status)
-                lastPlainStatus = status
-            }
-            return
-        }
-        clearBlock()
-        print(text, terminator: "")
-        blockLines = text.filter { $0 == "\n" }.count
-    }
-}
-
 @main
 struct KloepplerCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(

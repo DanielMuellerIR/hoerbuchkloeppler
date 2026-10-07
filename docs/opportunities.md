@@ -1,6 +1,6 @@
 # Ausbau- und Performance-Möglichkeiten
 
-Stand: 2026-09-10. Die Funktionen der früheren Ideenliste wurden umgesetzt und
+Stand: 2026-10-07. Die Funktionen der früheren Ideenliste wurden umgesetzt und
 in die Fachdokumentation übernommen:
 
 - Importauswahl, Fortschritt und Abbruch: [build-and-test.md](build-and-test.md).
@@ -42,14 +42,12 @@ Textneubau bei bloßen Fortschrittsupdates. Beides ist keine offene Optimierung.
 Jeder Punkt ist am Code belegt, aber keiner ließ sich ohne eigenen Auftrag oder
 ohne unverhältnismäßiges Risiko im Rahmen der Kampagne erledigen.
 
-- **`TerminalRenderer` zählt Blockzeilen logisch statt physisch** und liest die
-  Terminalbreite nie (kein `TIOCGWINSZ`, kein `SIGWINCH`). In einem sehr schmalen
-  Fenster belegt eine Pacman-Zeile zwei physische Zeilen, wird aber als eine
-  gezählt; der nächste Redraw kann dann eine Logzeile überschreiben. Eine saubere
-  Lösung braucht die Anzeigebreite inklusive Emoji — dabei das Rendering zu
-  verschlechtern ist wahrscheinlicher als es zu verbessern.
-  `tests/verify_cli_terminal.py` prüft das Endbild inzwischen maschinell und
-  könnte um eine Schmalfenster-Variante erweitert werden.
+- **Terminal-Neuzeichnung korrigiert (2026-10-07):** `TerminalRenderer` bricht
+  Statuszeilen anhand der Terminalbreite und Unicode-Anzeigebreite um; Höhe und
+  Größenwechsel werden berücksichtigt. Echte PTY-Gegenproben belegen den
+  früheren Statusrest bei zwölf Spalten und dessen Korrektur. Logzeilen bleiben
+  bei 12/24/40/80 Spalten erhalten. Nach Resize bleibt der alte Status bewusst
+  einmal stehen. Details und Reproduktion: [build-and-test.md](build-and-test.md).
 - **`RunReport.phase` mischt zwei Vokabulare**: `session.conversionPhase` liefert
   deutsche UI-Beschriftungen („Bereit“, „Buchlautheit messen“), während die CLI
   daneben englische Maschinen-Token („input“, „preparing“) fest verdrahtet. Ein

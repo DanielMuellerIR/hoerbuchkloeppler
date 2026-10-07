@@ -86,6 +86,7 @@ Symbolnamen als Anker (bewusst **ohne** Zeilennummern — die driften bei jeder
 | `SettingsManager.swift` | Laden/Speichern `~/.Hoerbuchkloeppler/settings.json` | `shared` · `loadSettings` · `saveSettings` |
 | `AudioFile+Extensions.swift` | Asynchrone AVFoundation-Artwork-Analyse, Kapitel-Extraktion via **gebündeltem ffmpeg** (`-f ffmetadata`) | `extractEmbeddedArtwork` · `extractChapters` · `parseFFMetadataChapters` |
 | `KloepplerCLI.swift` | AsyncParsableCommand-CLI: erwarteter Import, TTY-abhängige ANSI-Animation, Klartextstatus in Pipes, SIGINT-Phasen, ASCII-Cover — Optionen siehe [build-and-test.md](build-and-test.md) | `KloepplerCLI` (`@main`) · `execute(_:)` · `validate()` · `resolveOutputFile` · `sanitizeFilename` · `buildPacmanBar` · `generateAsciiArt` |
+| `TerminalRenderer.swift` | Physische Statuszeilen, Unicode-Anzeigebreite und sichere Neuzeichnung bei Terminal-Größenwechseln | `TerminalRenderer` · `TerminalGeometry` |
 
 App-Views (`Hörbuchklöppler/`): `ContentView`, `ConversionOverlayView`
 (mit `LogTranscriptView`), `MetadataSelectionView`, `SettingsView`,

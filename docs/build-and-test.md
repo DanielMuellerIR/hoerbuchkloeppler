@@ -148,7 +148,8 @@ Deshalb laufen alle Terminal-Ausgaben der CLI über `TerminalRenderer` in
   `ProcessTermination.swift` — Prozessstart und -abbruch;
   `OutputStaging.swift` — Staging, Sperren, atomare Übernahme, Bereinigung.
 - `ConversionSession.swift` — Lebenszyklus, Thread-sicheres Logging.
-- `KloepplerCLI.swift` — Terminal-Output, ANSI, `--verbose`.
+- `KloepplerCLI.swift` — CLI-Ablauf und `--verbose`;
+  `TerminalRenderer.swift` — Terminal-Output und ANSI.
 - `AudioFile+Extensions.swift` — Metadaten/Kapitel/Cover.
 
 ## Bekannte Test-Lücken / offen
@@ -252,5 +253,11 @@ prüft acht Dateien, Fortschritt und verspätete Provider nach Abbruch.
 ohne sichtbare Fenster, einschließlich leerem Textverlauf, anderem aktivem
 Fenster und Sperren während Import/Konvertierung. Menüeinbindung und
 Tastenkürzel im laufenden App-Bundle benötigen zusätzlich eine GUI-Prüfung.
+`python3 tests/verify_terminal_renderer.py` prüft physische Statuszeilen an
+PTYs mit 12/24/40/80 Spalten, Unicode, kleinem Fenster und Größenwechseln.
+Die Anzeige reserviert die letzte Spalte gegen automatischen Umbruch und
+begrenzt den Statusblock auf die sichtbare Höhe. Nach einem Größenwechsel
+bleibt der vorige Status einmal stehen; der nächste Block beginnt darunter,
+damit kein Cursor-Sprung mit veralteter Geometrie Logzeilen trifft.
 Die CLI-Matrix erzeugt lange stille Testquellen für echte Stunden-Splits.
 AAC-Toleranzen und gemessene Performance-Kapitelversätze stehen in encoding.md.
