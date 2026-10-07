@@ -7,5 +7,6 @@ struct Hörbuchklöppler: App {
         WindowGroup {
             ContentView()
         }
+        .commands { ChapterUndoCommands() }
     }
 }

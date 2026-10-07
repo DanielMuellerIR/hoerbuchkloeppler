@@ -26,6 +26,12 @@ anschließende Zeitabschnitte voraus; der erste Titel bleibt erhalten.
 Nachimporte hängen neue, sortierte Kapitel an die vorhandene Reihenfolge an.
 Das Schließen des Konvertierungsprotokolls erhält das bearbeitete Buch.
 
+Menü, Tastenkürzel und Toolbar verwenden dieselbe Undo-Zuständigkeit: In einem
+bearbeitbaren Textfeld wird dessen Text zurückgenommen oder wiederholt. Ein
+leerer Textverlauf greift nicht auf Kapiteländerungen zurück. Außerhalb eines
+Textfelds gilt der Kapitelverlauf des aktiven Projektfensters; während Import,
+Konvertierung oder eines offenen Sheets bleibt dieser gesperrt.
+
 Die Kapitelhistorie umfasst höchstens 100 Schritte und wird beim Projektöffnen
 geleert; sie ist nicht Bestandteil der Projektdatei. Die GUI liest Quellen
 beim Öffnen und Speichern außerhalb des Main Actors. Vor dem Start prüft sie

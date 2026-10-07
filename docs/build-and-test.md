@@ -248,5 +248,9 @@ swiftc -parse-as-library -I HoerbuchkloepplerCore/.build/debug/Modules \
 
 Die GUI-Importprüfung verwendet echte NSItemProvider ohne Fenster/Fokus und
 prüft acht Dateien, Fortschritt und verspätete Provider nach Abbruch.
+`bash tests/verify_gui_undo.sh` prüft echtes AppKit-Text-Undo und Kapitel-Undo
+ohne sichtbare Fenster, einschließlich leerem Textverlauf, anderem aktivem
+Fenster und Sperren während Import/Konvertierung. Menüeinbindung und
+Tastenkürzel im laufenden App-Bundle benötigen zusätzlich eine GUI-Prüfung.
 Die CLI-Matrix erzeugt lange stille Testquellen für echte Stunden-Splits.
 AAC-Toleranzen und gemessene Performance-Kapitelversätze stehen in encoding.md.

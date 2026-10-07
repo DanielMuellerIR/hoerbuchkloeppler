@@ -10,6 +10,7 @@ struct ContentView: View {
     @StateObject private var flow = OutputCoordinator()
     @StateObject var session = ConversionSession()
     @StateObject private var preview = ChapterPreviewPlayer()
+    @StateObject private var undoRouter = ChapterUndoRouter()
     @State private var selectedChapters: Set<UUID> = []
     @State private var renamePrefix = "Kapitel"
     @State private var projectError: String?
@@ -301,11 +302,8 @@ struct ContentView: View {
         .toolbar {
             Button("Projekt öffnen …") { projectPanel(save: false) }.keyboardShortcut("o", modifiers: [.command, .shift]).disabled(session.isConverting)
             Button("Projekt speichern …") { projectPanel(save: true) }.keyboardShortcut("s", modifiers: .command).disabled(session.isConverting || session.isImporting)
-            // Auch während eines Imports gesperrt: Ein Undo, das die Liste leert,
-            // löst über `audioFiles.didSet` ein `invalidateImportWork()` aus und
-            // bricht den laufenden Import lautlos ab.
-            Button("Rückgängig") { preview.stop(); session.undoChapterEdit() }.keyboardShortcut("z", modifiers: .command).disabled(!session.canUndoChapters || session.isConverting || session.isImporting)
-            Button("Wiederholen") { preview.stop(); session.redoChapterEdit() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!session.canRedoChapters || session.isConverting || session.isImporting)
+            Button("Rückgängig") { undoRouter.undo() }.disabled(!undoRouter.canUndo)
+            Button("Wiederholen") { undoRouter.redo() }.disabled(!undoRouter.canRedo)
             Button("Dateien oder Ordner hinzufügen …", action: chooseImportSources)
                 .keyboardShortcut("o", modifiers: .command)
                 .disabled(session.isConverting)
@@ -336,6 +334,9 @@ struct ContentView: View {
             ImportCoordinator.importProviders(providers, session: session)
             return true
         }
+        .background(ChapterUndoWindowReader(router: undoRouter))
+        .focusedSceneObject(undoRouter)
+        .onAppear { undoRouter.configure(session: session, beforeChapterEdit: { preview.stop() }) }
     }
 
     private func moveSelection(by offset: Int) {
