@@ -72,6 +72,14 @@ Developer-ID-signierten Test-Build im Projekt-Root und installiert ihn nie.
 zwei- oder dreiteilige numerische Versionen sind erlaubt; `release.sh` prüft sie,
 bevor es DMG-, Staging- oder Cleanup-Pfade daraus ableitet.
 
+`release.sh` ersetzt ein vorhandenes fertiges DMG erst nach erfolgreicher
+Signatur-, Notary- und Gatekeeper-Prüfung. Fehler entfernen ausschließlich die
+Zwischenstände des Laufs. Ist der private Mount noch aktiv oder kann
+`hdiutil info` seinen Zustand nicht feststellen, bleiben Mount-Verzeichnis
+und RW-Image zur späteren Prüfung erhalten. Auch nach einem erfolgreichen
+Detach-Aufruf muss der Status sicher inaktiv sein, bevor das Image konvertiert
+wird. Das DMG bleibt ausschließlich für eigene Macs bestimmt.
+
 ## Ausführungsrecht der Binaries
 
 Falls `Process()` die Binaries nicht starten kann (`Permission denied`), fehlt

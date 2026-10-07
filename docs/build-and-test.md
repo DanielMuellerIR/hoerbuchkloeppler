@@ -143,8 +143,18 @@ Prozessbesitz, simulierte PID-Änderung sowie ausgetauschte Ziele/Elternordner
 werden geprüft. Alle eigenen Helferprozesse werden beendet; im Konfliktfall
 muss das alte Backup erhalten bleiben. Auch diese Prüfung gehört zu
 `test_scripts.sh`. Sie ersetzt keine echte Apple-Notarisierung.
-Die DMG-/Notarisierungskette von `release.sh` bleibt ohne vollständige
-Lifecycle-Fixtures.
+`tests/verify_release_lifecycle.py` führt eine unveränderte Kopie von
+`release.sh --no-finder-layout` mit kontrollierten Installations-, Image- und
+Apple-Diensten aus. Kopien, Links und die abschließende Umbenennung geschehen
+wirklich in eigenen Testordnern. Geprüft werden Reihenfolge, App/Lizenzhinweise/
+Applications-Link im Image-Inhalt, Fehler bis zur Gatekeeper-Prüfung und der
+Erhalt eines früheren guten Images. Aktive oder unbekannte Mounts müssen samt
+RW-Image erhalten bleiben; ein fehlgeschlagener Statusabruf darf keine
+Bereinigung erlauben. Der Test verwendet keine echten Mounts, keine
+Apple-Dienste und keinen Finder. Er gehört ebenfalls zu `test_scripts.sh`.
+Ein ergänzender echter, unsichtbarer HFS+-DMG-Probelauf am 2026-10-07 belegte
+das vollständige App-Bundle im Wurzelverzeichnis und sauberes Aushängen.
+Die Fehlerpfade von `build.sh` benötigen noch eigene Lifecycle-Fixtures.
 
 Die geprüften Funktionen sind `internal` statt `private`, damit `@testable
 import` drankommt. Das ist Absicht, kein vergessenes `private`.

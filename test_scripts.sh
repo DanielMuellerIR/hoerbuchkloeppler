@@ -112,5 +112,6 @@ unset -f ps
 
 PYTHONDONTWRITEBYTECODE=1 python3 tests/verify_sign_bundle.py
 PYTHONDONTWRITEBYTECODE=1 python3 tests/verify_install_lifecycle.py
+PYTHONDONTWRITEBYTECODE=1 python3 tests/verify_release_lifecycle.py
 
 echo "Shell-Sicherheitstests bestanden."

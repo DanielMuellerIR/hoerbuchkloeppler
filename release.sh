@@ -70,20 +70,28 @@ MOUNT_ROOT="$(cd "$MOUNT_ROOT" && pwd -P)"
 MOUNT_DIR="$MOUNT_ROOT/volume"
 
 mount_is_active() {
-  # Ohne `grep -q`: Dessen frühes Ende kann `hdiutil` unter pipefail mit SIGPIPE
-  # beenden und einen vorhandenen Mount fälschlich als inaktiv melden.
-  hdiutil info | grep -F "$MOUNT_DIR" >/dev/null
+  local mount_info
+  # Ein fehlgeschlagener Statusabruf belegt keinen ausgehängten Datenträger.
+  # Rückgabe: 0 aktiv, 1 sicher inaktiv, 2 Status unbekannt.
+  mount_info="$(hdiutil info)" || return 2
+  # Ohne `grep -q`: Die gesamte Ausgabe muss verbraucht werden, damit unter
+  # pipefail kein SIGPIPE des schreibenden Prozesses den Treffer überschreibt.
+  printf '%s\n' "$mount_info" | grep -F "$MOUNT_DIR" >/dev/null
 }
 
 cleanup() {
+  local mount_state=0
   # Der private Mountpoint gehört eindeutig diesem Lauf. Solange er noch aktiv
   # ist, dürfen weder sein Verzeichnis noch das zugrunde liegende RW-DMG
   # gelöscht werden.
-  if mount_is_active; then
+  mount_is_active || mount_state=$?
+  if [ "$mount_state" -eq 0 ]; then
     hdiutil detach "$MOUNT_DIR" -force >/dev/null 2>&1 || true
   fi
-  if mount_is_active; then
-    echo "Warnung: DMG blieb eingehängt; temporäre Daten bleiben erhalten: $MOUNT_ROOT" >&2
+  mount_state=0
+  mount_is_active || mount_state=$?
+  if [ "$mount_state" -ne 1 ]; then
+    echo "Warnung: DMG ist eingehängt oder sein Status unbekannt; temporäre Daten bleiben erhalten: $MOUNT_ROOT" >&2
     return
   fi
   rm -f "$RW_DMG" "$STAGING_DMG"
@@ -158,7 +166,12 @@ sync; sleep 2                       # Race: DS_Store-Schreibpuffer vs. detach
 if ! hdiutil detach "$MOUNT_DIR"; then
   hdiutil detach "$MOUNT_DIR" -force
 fi
-mount_is_active && { echo "Fehler: privates DMG konnte nicht ausgehängt werden." >&2; exit 1; }
+mount_state=0
+mount_is_active || mount_state=$?
+if [ "$mount_state" -ne 1 ]; then
+  echo "Fehler: privates DMG ist eingehängt oder sein Status unbekannt." >&2
+  exit 1
+fi
 
 hdiutil convert "$RW_DMG" -format UDZO -imagekey zlib-level=9 -o "$STAGING_DMG"
 rm -f "$RW_DMG"
