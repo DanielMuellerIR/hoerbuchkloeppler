@@ -11,6 +11,8 @@ struct ContentView: View {
     @StateObject var session = ConversionSession()
     @StateObject private var preview = ChapterPreviewPlayer()
     @StateObject private var undoRouter = ChapterUndoRouter()
+    @StateObject private var documentOpen = DocumentOpenCoordinator()
+    @Environment(\.controlActiveState) private var controlActiveState
     @State private var selectedChapters: Set<UUID> = []
     @State private var renamePrefix = "Kapitel"
     @State private var projectError: String?
@@ -263,6 +265,18 @@ struct ContentView: View {
             message: $preview.unplayableFile,
             fallback: "Die Quelldatei ließ sich nicht abspielen."
         )
+        .errorAlert("Datei nicht geöffnet", message: $documentOpen.errorMessage, fallback: "Die Datei ließ sich nicht öffnen.")
+        .alert("Projekt öffnen?", isPresented: Binding(
+            get: { documentOpen.projectToConfirm != nil },
+            set: { if !$0 { documentOpen.cancelProject() } }
+        ), presenting: documentOpen.projectToConfirm) { url in
+            Button("Abbrechen", role: .cancel) { documentOpen.cancelProject() }
+            Button("Projekt öffnen", role: .destructive) {
+                Task { await documentOpen.confirmProject(url, session: session, beforeOpening: { preview.stop() }) }
+            }
+        } message: { url in
+            Text("Das aktuelle Hörbuch wird durch \(url.lastPathComponent) ersetzt. Nicht gespeicherte Änderungen gehen dabei verloren.")
+        }
         .onAppear { checkTools() }
         .frame(minWidth: 850, minHeight: 650) // Fenster etwas höher gemacht (650 statt 550)
         .sheet(isPresented: $showingSettings) { SettingsView(session: session, isPresented: $showingSettings) }
@@ -336,6 +350,10 @@ struct ContentView: View {
         }
         .background(ChapterUndoWindowReader(router: undoRouter))
         .focusedSceneObject(undoRouter)
+        .handlesExternalEvents(preferring: controlActiveState == .key ? ["*"] : [], allowing: ["*"])
+        .onOpenURL { url in
+            documentOpen.receive(url, session: session, beforeOpening: { preview.stop() })
+        }
         .onAppear { undoRouter.configure(session: session, beforeChapterEdit: { preview.stop() }) }
     }
 
@@ -360,15 +378,17 @@ struct ContentView: View {
     private func projectPanel(save: Bool) {
         if save {
             let panel = NSSavePanel(); panel.nameFieldStringValue = "Hörbuch.hkproject"
+            panel.allowedContentTypes = [DocumentOpenCoordinator.projectType]
             Self.present(panel) { response in
                 guard response == .OK, let url = panel.url else { return }
                 Task { do { try await session.saveProjectAsync(to: url) } catch { projectError = error.localizedDescription } }
             }
         } else {
             let panel = NSOpenPanel(); panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+            panel.allowedContentTypes = [DocumentOpenCoordinator.projectType]
             Self.present(panel) { response in
                 guard response == .OK, let url = panel.url else { return }
-                Task { do { preview.stop(); try await session.openProjectAsync(from: url) } catch { projectError = error.localizedDescription } }
+                documentOpen.receive(url, session: session, beforeOpening: { preview.stop() })
             }
         }
     }

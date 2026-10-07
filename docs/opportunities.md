@@ -31,12 +31,10 @@ Textneubau bei bloßen Fortschrittsupdates. Beides ist keine offene Optimierung.
   sie rechtfertigt noch keine Änderung der Kodierpipeline.
 - Lautheitsangleichung verwendet einen gemeinsamen linearen Pegel. Die
   Spitzenbegrenzung kann das Ziel −18 LUFS verhindern; Dynamik wird erhalten.
-- ⌘Z/⇧⌘Z liegen als `keyboardShortcut` auf den Toolbar-Buttons „Rückgängig“/
-  „Wiederholen“, während das SwiftUI-Standardmenü „Bearbeiten“ dieselben Tasten
-  für den Text-Undo belegt. Mit Fokus in einem Textfeld gewinnt das Feld; das
-  Verhalten ohne Fokus ist nicht dokumentiert. Sauber wäre
-  `CommandGroup(replacing: .undoRedo)` in `.commands` der `WindowGroup`, was den
-  Session-Zugriff aus der App-Struktur erfordert (Review 2026-09-06, offen).
+- Undo/Redo laufen seit 1.4.19 über einen fensterbezogenen Router und eine
+  gemeinsame Menügruppe. Editierbare Textfelder verwenden ihren Text-Undo,
+  sonst greift die Kapitelhistorie. Die AppKit-Prüfung ist grün; die echte
+  GUI-Abnahme von Menü, Tastatur und Toolbar steht noch aus.
 - Visuelle GUI-Abnahme und subjektive Hörprüfung sind von automatischer
   Kompilierung, Koordinationstests und vollständigem Dekodieren zu unterscheiden.
 
@@ -55,13 +53,12 @@ ohne unverhältnismäßiges Risiko im Rahmen der Kampagne erledigen.
   und Ereignisse; `success` ist auch während des Laufs vorhanden (`null`). Bei
   Fehlern bleibt der letzte Arbeitsschritt erhalten. Projekt- und Inspect-
   Formate bleiben unabhängig bei Version 1. Vertrag: [projects.md](projects.md).
-- **`info.plist` deklariert keine Dokumententypen.** Weder `.hkproject` noch die
-  unterstützten Audioendungen sind eingetragen, und die App hat kein `onOpenURL`.
-  Ein Doppelklick auf eine Projektdatei im Finder öffnet die App deshalb nicht,
-  und sie taucht in keinem „Öffnen mit“-Menü auf. Ebenso fehlen
-  `NSDesktopFolderUsageDescription` und `NSRemovableVolumesUsageDescription` — der
-  häufigste Fall (Audioordner vom Schreibtisch) bekommt die TCC-Abfrage ohne
-  Begründungstext.
+- **Dokumentöffnung seit 1.4.27 umgesetzt; System-/GUI-Prüfung steht aus.**
+  Projekt- und Audio-Dokumenttypen, `onOpenURL` sowie Desktop-/Wechselmedien-
+  Beschreibungen sind ergänzt. Audio-URL-Ereignisse werden zu einem gemeinsamen
+  Import gebündelt; ein Projekt ersetzt einen vorhandenen Stand erst nach
+  Bestätigung. Automatische Koordinationsprüfungen sind grün; der tatsächliche
+  Systemweg wird noch im GUI-Test geprüft.
 - **Ein NSItemProvider, der nie antwortet, lässt den Import unbefristet stehen.**
   `ImportCoordinator.importProviders` hat weder Frist noch Rückfall; „Hörbuch
   erzeugen“ und „Projekt speichern“ bleiben gesperrt. Erholung nur über „Import

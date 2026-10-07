@@ -310,6 +310,13 @@ prüft acht Dateien, Fortschritt und verspätete Provider nach Abbruch.
 ohne sichtbare Fenster, einschließlich leerem Textverlauf, anderem aktivem
 Fenster und Sperren während Import/Konvertierung. Menüeinbindung und
 Tastenkürzel im laufenden App-Bundle benötigen zusätzlich eine GUI-Prüfung.
+
+`bash tests/verify_document_open.sh` prüft den System-URL-Koordinator ohne
+Fenster: mehrere Audioereignisse als ein vollständiger Import, Projektöffnung
+im leeren Fenster, Bestätigung/Abbrechen vor Ersetzen, eine bereits aufgelöste
+Alert-Bindung, defekte Projekte, gemischte Auswahl und laufenden Import.
+Finder-/Launch-Services-Zuordnung und tatsächliche Alert-Bedienung benötigen
+zusätzlich die Prüfung im App-Bundle.
 `python3 tests/verify_terminal_renderer.py` prüft physische Statuszeilen an
 PTYs mit 12/24/40/80 Spalten, Unicode, kleinem Fenster und Größenwechseln.
 Die Anzeige reserviert die letzte Spalte gegen automatischen Umbruch und

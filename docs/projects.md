@@ -18,6 +18,15 @@ wird. Projektdateien sind auf 48 MiB und Coverdaten auf 32 MiB begrenzt.
 
 „Projekt speichern …“ (Cmd+S) speichert den bearbeiteten Zustand.
 „Projekt öffnen …“ (Cmd+Shift+O) öffnet ihn. Cmd+O bleibt der Audioimport.
+Auch Finder beziehungsweise „Öffnen mit“ können Projekte und unterstützte
+Audiodateien an die App übergeben. Audiodateien werden gemeinsam importiert.
+Ein Projekt öffnet sich im leeren Fenster direkt; ein vorhandenes Hörbuch wird
+erst nach Bestätigung ersetzt. Während Import oder Konvertierung wird eine neue
+Systemöffnung mit einer sichtbaren Meldung abgewiesen. Die App registriert sich
+für Audio als alternative Anwendung und übernimmt keinen Standardplayer.
+
+Der eigene Projekttyp folgt Apples
+[UTI-Deklaration für Dateitypen](https://developer.apple.com/documentation/uniformtypeidentifiers/defining-file-and-data-types-for-your-app).
 Die Kapitelliste unterstützt Mehrfachauswahl und Nummerierung mit Präfix,
 Umordnen per Listendrag oder Pfeilbuttons, Undo/Redo für Kapiteländerungen
 (Cmd+Z/Cmd+Shift+Z), Teilen an der aktuellen Abspielposition und Zusammenführen

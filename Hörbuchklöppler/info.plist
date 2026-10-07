@@ -4,6 +4,52 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Hörbuchklöppler-Projekt</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array><string>danielmueller.Hoerbuchkloeppler.project</string></array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Audiodatei</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.mp3</string>
+				<string>com.apple.m4a-audio</string>
+				<string>com.microsoft.waveform-audio</string>
+				<string>org.xiph.flac</string>
+				<string>com.apple.protected-mpeg-4-audio-b</string>
+				<string>public.mpeg-4</string>
+			</array>
+		</dict>
+	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>danielmueller.Hoerbuchkloeppler.project</string>
+			<key>UTTypeDescription</key>
+			<string>Hörbuchklöppler-Projekt</string>
+			<key>UTTypeConformsTo</key>
+			<array><string>public.json</string></array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array><string>hkproject</string></array>
+			</dict>
+		</dict>
+	</array>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -27,7 +73,11 @@
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSDocumentsFolderUsageDescription</key>
-	<string>Benötigt den Zugriff auf abgelegte Dateien und Ordner</string>
+	<string>Hörbuchklöppler liest Audiodateien und Projekte aus Dokumente und speichert dort Hörbücher und Projekte.</string>
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Hörbuchklöppler liest Audiodateien und Projekte vom Schreibtisch und speichert dort Hörbücher und Projekte.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Hörbuchklöppler liest Audiodateien und Projekte von externen Laufwerken und speichert dort Hörbücher und Projekte.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
 	<string>Benötigt für das Speichern von Hörbüchern im Download-Ordner</string>
 </dict>

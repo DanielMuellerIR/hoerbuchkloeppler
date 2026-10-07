@@ -110,6 +110,8 @@ in [opportunities.md](opportunities.md).
 - `RunReport.swift`: versionierte Inspect- und JSON-Laufberichte für die CLI.
 - `ChapterPreviewPlayer.swift`: Besitz und Abspielposition des Vorschauplayers.
 - `ImportCoordinator.swift`: GUI-Providerkoordination über Core-Importtokens.
+- `DocumentOpenCoordinator.swift`: System-URL-Ereignisse bündeln, Audioimport
+  und Projektöffnung mit Bestätigung koordinieren; das aktive Fenster hat Vorrang.
 - `OutputPreviewView.swift`: konkrete Zielpfade und geschätzter Volume-Bedarf.
 
 Details zum Speicherformat und zu Bearbeitungsgrenzen: [Projekte](projects.md).
