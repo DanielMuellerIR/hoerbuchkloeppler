@@ -64,11 +64,12 @@ ohne unverhältnismäßiges Risiko im Rahmen der Kampagne erledigen.
   erzeugen“ und „Projekt speichern“ bleiben gesperrt. Erholung nur über „Import
   abbrechen“. Eine Frist ist eine Produktentscheidung: zu kurz verwirft echte
   Drops von langsamen Volumes.
-- **Kapitelanalyse blockiert einen Thread des Cooperative Pools.**
-  `readFFMetadata` und `waitForProcessExit` laufen synchron im Rumpf einer
-  `async`-Funktion, bis zu 30 s je Datei und bis zu `importWorkerLimit`
-  gleichzeitig. `ProcessPipeReader` macht dieselbe Schleife bewusst auf einer
-  eigenen Queue; die Kapitelextraktion sollte ihm folgen.
+- **Erledigt in 1.4.22: Kapitelanalyse auf eigener Queue.** Prozessstart,
+  Pipe-Lesen, Warten, Parsing und Kapitelaufbau laufen auf einer eigenen
+  parallelen Utility-Queue. Der Import begrenzt weiterhin die Workerzahl;
+  Task-Abbruch bleibt über einen gesperrten Abbruchzustand erreichbar.
+  Die Probe mit 12.000 Kapiteln bestätigt unveränderte Werte und die Ausführung
+  außerhalb des aufrufenden Tasks. Sie belegt keine allgemeine Beschleunigung.
 - **Die 32-MiB-Grenze für eingebettetes Artwork greift erst nach dem vollständigen
   Laden** (`item.load(.dataValue)`), und ein sehr großes PNG muss zum Erzeugen der
   32-px-Vorschau ganz dekodiert werden.

@@ -29,7 +29,10 @@ Core.
 - **Asynchrone Audioanalyse:** Dauer, Metadaten, Tag-Werte und Artwork werden über
   `AVAsset.load(...)` beziehungsweise `AVMetadataItem.load(...)` geladen. GUI
   und CLI erwarten denselben asynchronen Import-Lebenszyklus; die frühere
-  `metadataGroup: DispatchGroup`-Sonderbehandlung der CLI entfällt. Ein
+  `metadataGroup: DispatchGroup`-Sonderbehandlung der CLI entfällt. Kapitel-
+  Prozesse, Pipe-Lesen, Parsing und Kapitelaufbau laufen auf einer eigenen
+  parallelen Utility-Queue. Die Import-Workergrenze bleibt erhalten; ein
+  gesperrter Abbruchzustand übergibt Task-Cancellation an diese Queue. Ein
   Import-Batch bleibt bis zum Ende aller Provider-Ladevorgänge und Analysen im
   Staging. Liefert ein GUI-Provider keine Datei-URL, fehlt bei einer Quelle Dauer
   oder Audio-Stream oder läuft ihre Kapitelanalyse ins Zeitlimit, verwerfen GUI
@@ -84,7 +87,7 @@ Symbolnamen als Anker (bewusst **ohne** Zeilennummern — die driften bei jeder
 | `ConversionSession.swift` | Main-Actor-isolierter Lebenszyklus und `@Published`-State, gemeinsame Pfad-/Symlink-Auflösung, atomarer und abbrechbarer asynchroner Import, Worker→UI-Nachrichten | `FoundFile` · `AudioLoadResult` · `beginImport` · `finishImport` · `foundFile(at:)` · `deduplicateFoundFiles` · `loadAudioFiles` · `processIncomingFiles` · `scanFolder` · `prepareFolder` · `addFolder` · `addLog` |
 | `AudioSettings.swift` | Einstellungs-Struct (`Codable`) | Felder → [settings.md](settings.md) |
 | `SettingsManager.swift` | Laden/Speichern `~/.Hoerbuchkloeppler/settings.json` | `shared` · `loadSettings` · `saveSettings` |
-| `AudioFile+Extensions.swift` | Asynchrone AVFoundation-Artwork-Analyse, Kapitel-Extraktion via **gebündeltem ffmpeg** (`-f ffmetadata`) | `extractEmbeddedArtwork` · `extractChapters` · `parseFFMetadataChapters` |
+| `AudioFile+Extensions.swift` | Asynchrone AVFoundation-Artwork-Analyse; Kapitel-Extraktion via **gebündeltem ffmpeg** (`-f ffmetadata`) auf eigener Utility-Queue mit Task-/Importabbruch | `extractEmbeddedArtwork` · `extractChapters` · `parseFFMetadataChapters` |
 | `KloepplerCLI.swift` | AsyncParsableCommand-CLI: erwarteter Import, TTY-abhängige ANSI-Animation, Klartextstatus in Pipes, SIGINT-Phasen, ASCII-Cover — Optionen siehe [build-and-test.md](build-and-test.md) | `KloepplerCLI` (`@main`) · `execute(_:)` · `validate()` · `resolveOutputFile` · `sanitizeFilename` · `buildPacmanBar` · `generateAsciiArt` |
 | `TerminalRenderer.swift` | Physische Statuszeilen, Unicode-Anzeigebreite und sichere Neuzeichnung bei Terminal-Größenwechseln | `TerminalRenderer` · `TerminalGeometry` |
 

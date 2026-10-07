@@ -102,6 +102,14 @@ es wieder und prüft integrierte Lautheit, Cover, Sprecher, Reihe, Band und
 Sprache — das setzt aber `Resources/bin/ffmpeg` voraus (`./build.sh --deps-only`);
 ohne die Binaries meldet der Test das ausdrücklich als Fehlschlag.
 
+`ChapterAnalysisWorkerTests` prüft eine synthetische Liste mit 12.000 Kapiteln
+(1.826.684 Bytes): Prozesskonfiguration außerhalb eines Swift-Tasks und des
+Main Threads, unveränderte Titel/Zeiten sowie genau eine Prozessabmeldung.
+Zusätzlich prüft die Suite Abbruch vor dem Start und im Rennen zwischen
+Startprüfung und Prozessstart. Die Prozessgruppen-Suite prüft weiterhin den
+Abbruch eines laufenden Kapitelwerkzeugs einschließlich seiner Nachkommen.
+Die gemessene Laufzeit dieser Probe ist kein Leistungsvergleich für Hörbücher.
+
 `test_scripts.sh` prüft die Syntax (`bash -n`) aller Root-Shell-Skripte — es
 führt keines davon aus. Abgesichert sind außerdem die Versions-Syntaxtabelle,
 der Abgleich von `VERSION` mit `MARKETING_VERSION` im Xcode-Projekt und die

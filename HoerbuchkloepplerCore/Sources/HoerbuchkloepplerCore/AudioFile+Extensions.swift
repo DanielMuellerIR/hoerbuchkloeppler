@@ -9,6 +9,47 @@ enum ChapterExtractionResult: Sendable {
     case cancelled
 }
 
+private enum ChapterMetadataResult: Sendable {
+    case chapters([AudioFile.FFChapter])
+    case fallback(String)
+    case failed(AudioImportFailure.Reason)
+    case cancelled
+}
+
+private final class ChapterAnalysisCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    private let process: Process
+
+    init(process: Process) { self.process = process }
+
+    var isCancelled: Bool { lock.withLock { cancelled } }
+
+    func cancel() {
+        lock.withLock { cancelled = true }
+        ProcessTerminator.requestTermination(process)
+    }
+}
+
+private enum ChapterAnalysisExecutor {
+    // Die Import-Pipeline begrenzt die Zahl gleichzeitig laufender Analysen.
+    // Eine serielle Queue würde auch unabhängige Quellen hinter einem hängenden
+    // Werkzeug aufstauen. Keine dieser blockierenden Arbeiten gehört in einen Task.
+    private static let queue = DispatchQueue(
+        label: "com.hoerbuchkloeppler.chapter-analysis",
+        qos: .utility,
+        attributes: .concurrent
+    )
+
+    static func perform<Result: Sendable>(
+        _ operation: @escaping @Sendable () -> Result
+    ) async -> Result {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume(returning: operation()) }
+        }
+    }
+}
+
 extension AudioFile {
     /// Selbst eine beschädigte Datei darf die Kapitelanalyse nicht mit einer
     /// beliebig großen ffmetadata-Ausgabe im Speicher wachsen lassen. Acht MiB
@@ -80,17 +121,17 @@ extension AudioFile {
     static func extractChaptersControlled(
         from file: FoundFile,
         knownFile: AudioFile? = nil,
-        shouldCancel: @Sendable () -> Bool = { false },
-        configureProcess: @Sendable (Process) -> Void = { _ in },
-        runProcess: @Sendable (Process) throws -> Bool = { process in
+        shouldCancel: @escaping @Sendable () -> Bool = { false },
+        configureProcess: @escaping @Sendable (Process) -> Void = { _ in },
+        runProcess: @escaping @Sendable (Process) throws -> Bool = { process in
             try process.run()
             ProcessTerminator.recordOwnedProcessGroup(process)
             return true
         },
-        unregisterProcess: @Sendable (Process) -> Void = {
+        unregisterProcess: @escaping @Sendable (Process) -> Void = {
             ProcessTerminator.forgetOwnedProcessGroup($0)
         },
-        log: @Sendable (String) -> Void = { _ in }
+        log: @escaping @Sendable (String) -> Void = { _ in }
     ) async -> ChapterExtractionResult {
         func fallbackFile() async -> AudioFile {
             if let knownFile { return knownFile }
@@ -109,101 +150,124 @@ extension AudioFile {
         let process = Process()
         process.executableURL = ffmpegURL
         process.arguments = ["-nostdin", "-v", "quiet", "-i", url.path, "-f", "ffmetadata", "-"]
-        // Der Test kann hier einen kontrollierten Ersatzprozess einsetzen. Die
-        // Produktionsaufrufer lassen die vorbereitete ffmpeg-Konfiguration
-        // unverändert.
-        configureProcess(process)
-
         let pipe = Pipe()
-        process.standardOutput = pipe
-        // stderr getrennt verwerfen, damit es weder die Metadaten-Ausgabe stört
-        // noch in einer ungelesenen Pipe den Kindprozess blockieren kann.
-        process.standardError = FileHandle.nullDevice
-        // `-nostdin` deckt nur echtes ffmpeg ab. Ein über `$PATH` aufgelöstes
-        // Wrapper-Skript erbte sonst den stdin der App beziehungsweise das
-        // Terminal der CLI und könnte dort auf Eingabe warten.
-        process.standardInput = FileHandle.nullDevice
 
+        let cancellation = ChapterAnalysisCancellation(process: process)
         return await withTaskCancellationHandler {
-            do {
-                guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
-                guard try runProcess(process) else { return .cancelled }
-                defer { unregisterProcess(process) }
-                try? pipe.fileHandleForWriting.close()
-                // Cancel kann genau zwischen dem letzten Check und `run()` liegen.
-                // Der Context hat den damals noch nicht laufenden Process dann nicht
-                // beendet; nach dem Start deshalb nochmals prüfen.
-                if shouldCancel() || taskCancellationRequested() {
-                    ProcessTerminator.requestTermination(process)
+            let metadata: ChapterMetadataResult = await ChapterAnalysisExecutor.perform {
+                defer {
+                    try? pipe.fileHandleForWriting.close()
+                    try? pipe.fileHandleForReading.close()
                 }
-                // Erst die Pipe leeren, DANN auf Exit warten — sonst Deadlock, wenn
-                // die Kapitelliste den Pipe-Puffer (~64 KB) füllt. Die Datenmenge
-                // bleibt begrenzt; bei Überschreitung beendet der Leser ffmpeg und
-                // kehrt ohne weitere Datenübernahme zurück.
-                let extractionStart = DispatchTime.now().uptimeNanoseconds
-                let output = readFFMetadata(
-                    from: pipe.fileHandleForReading,
-                    timeout: chapterExtractionTimeout
-                ) {
-                    // Synchron beenden: Danach darf `waitUntilExit()` nicht an
-                    // einem hängenden direkten Kindprozess festbleiben.
-                    ProcessTerminator.terminateAndWait([process])
-                }
-                let extractionElapsed = TimeInterval(
-                    DispatchTime.now().uptimeNanoseconds - extractionStart
-                ) / 1_000_000_000
-                let processExited = waitForProcessExit(
-                    process,
-                    timeout: max(0, chapterExtractionTimeout - extractionElapsed)
-                )
-                if !processExited {
-                    ProcessTerminator.terminateAndWait([process])
-                }
-                // Ein Prozess im nicht unterbrechbaren Kernel-Wait — etwa auf
-                // einem abgerissenen Netz-Mount — überlebt auch SIGKILL. Ein
-                // unbedingtes `waitUntilExit()` machte die Frist hier wertlos.
-                if !process.isRunning { process.waitUntilExit() }
-                // Nach dem Exit des direkten Prozesses darf in seiner besessenen
-                // Gruppe kein Nachkomme weiterlaufen; danach vergisst das `defer`
-                // die Gruppe und der spätere Abbruchpfad fände ihn nicht mehr.
-                ProcessTerminator.terminateRemainingOwnedGroup(process)
-                try? pipe.fileHandleForReading.close()
-                guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
-                guard !output.timedOut, processExited else {
-                    log("⚠️ Kapitelanalyse für \(visibleURL.lastPathComponent) nach \(Int(chapterExtractionTimeout)) Sekunden abgebrochen. Datei wird übersprungen.")
-                    return .failed(.chapterAnalysisTimedOut)
-                }
-                guard !output.readFailed else {
-                    log("⚠️ Kapitelmetadaten aus \(visibleURL.lastPathComponent) konnten nicht vollständig gelesen werden. Nutze die Datei als ein Kapitel.")
-                    return .files([await fallbackFile()])
-                }
-                guard !output.exceededLimit else {
-                    log("⚠️ Kapitelmetadaten in \(visibleURL.lastPathComponent) überschreiten 8 MiB. Nutze die Datei als ein Kapitel.")
-                    return .files([await fallbackFile()])
-                }
-                guard process.terminationStatus == 0 else {
-                    log("⚠️ ffmpeg konnte Kapitel aus \(visibleURL.lastPathComponent) nicht vollständig lesen. Nutze die Datei als ein Kapitel.")
-                    return .files([await fallbackFile()])
-                }
+                do {
+                    guard !shouldCancel(), !cancellation.isCancelled else { return .cancelled }
+                    // Der Test kann hier einen kontrollierten Ersatzprozess einsetzen. Die
+                    // Produktionsaufrufer lassen die vorbereitete ffmpeg-Konfiguration
+                    // unverändert.
+                    configureProcess(process)
+                    process.standardOutput = pipe
+                    // stderr getrennt verwerfen, damit es weder die Metadaten-Ausgabe stört
+                    // noch in einer ungelesenen Pipe den Kindprozess blockieren kann.
+                    process.standardError = FileHandle.nullDevice
+                    // `-nostdin` deckt nur echtes ffmpeg ab. Ein über `$PATH` aufgelöstes
+                    // Wrapper-Skript erbte sonst den stdin der App beziehungsweise das
+                    // Terminal der CLI und könnte dort auf Eingabe warten.
+                    process.standardInput = FileHandle.nullDevice
+                    guard !shouldCancel(), !cancellation.isCancelled else { return .cancelled }
+                    guard try runProcess(process) else { return .cancelled }
+                    defer { unregisterProcess(process) }
+                    try? pipe.fileHandleForWriting.close()
+                    // Cancel kann genau zwischen dem letzten Check und `run()` liegen.
+                    // Der Context hat den damals noch nicht laufenden Process dann nicht
+                    // beendet; nach dem Start deshalb nochmals prüfen.
+                    if shouldCancel() || cancellation.isCancelled {
+                        ProcessTerminator.requestTermination(process)
+                    }
+                    // Erst die Pipe leeren, DANN auf Exit warten — sonst Deadlock, wenn
+                    // die Kapitelliste den Pipe-Puffer (~64 KB) füllt. Die Datenmenge
+                    // bleibt begrenzt; bei Überschreitung beendet der Leser ffmpeg und
+                    // kehrt ohne weitere Datenübernahme zurück.
+                    let extractionStart = DispatchTime.now().uptimeNanoseconds
+                    let output = readFFMetadata(
+                        from: pipe.fileHandleForReading,
+                        timeout: chapterExtractionTimeout,
+                        shouldCancel: { shouldCancel() || cancellation.isCancelled }
+                    ) {
+                        // Synchron beenden: Danach darf `waitUntilExit()` nicht an
+                        // einem hängenden direkten Kindprozess festbleiben.
+                        ProcessTerminator.terminateAndWait([process])
+                    }
+                    let extractionElapsed = TimeInterval(
+                        DispatchTime.now().uptimeNanoseconds - extractionStart
+                    ) / 1_000_000_000
+                    let processExited = waitForProcessExit(
+                        process,
+                        timeout: shouldCancel() || cancellation.isCancelled
+                            ? 0 : max(0, chapterExtractionTimeout - extractionElapsed)
+                    )
+                    if !processExited {
+                        ProcessTerminator.terminateAndWait([process])
+                    }
+                    // Ein Prozess im nicht unterbrechbaren Kernel-Wait — etwa auf
+                    // einem abgerissenen Netz-Mount — überlebt auch SIGKILL. Ein
+                    // unbedingtes `waitUntilExit()` machte die Frist hier wertlos.
+                    if !process.isRunning { process.waitUntilExit() }
+                    // Nach dem Exit des direkten Prozesses darf in seiner besessenen
+                    // Gruppe kein Nachkomme weiterlaufen; danach vergisst das `defer`
+                    // die Gruppe und der spätere Abbruchpfad fände ihn nicht mehr.
+                    ProcessTerminator.terminateRemainingOwnedGroup(process)
+                    guard !shouldCancel(), !cancellation.isCancelled else { return .cancelled }
+                    guard !output.timedOut, processExited else {
+                        log("⚠️ Kapitelanalyse für \(visibleURL.lastPathComponent) nach \(Int(chapterExtractionTimeout)) Sekunden abgebrochen. Datei wird übersprungen.")
+                        return .failed(.chapterAnalysisTimedOut)
+                    }
+                    guard !output.readFailed else {
+                        return .fallback("⚠️ Kapitelmetadaten aus \(visibleURL.lastPathComponent) konnten nicht vollständig gelesen werden. Nutze die Datei als ein Kapitel.")
+                    }
+                    guard !output.exceededLimit else {
+                        return .fallback("⚠️ Kapitelmetadaten in \(visibleURL.lastPathComponent) überschreiten 8 MiB. Nutze die Datei als ein Kapitel.")
+                    }
+                    guard process.terminationStatus == 0 else {
+                        return .fallback("⚠️ ffmpeg konnte Kapitel aus \(visibleURL.lastPathComponent) nicht vollständig lesen. Nutze die Datei als ein Kapitel.")
+                    }
 
-                guard let text = String(data: output.data, encoding: .utf8) else {
-                    log("⚠️ FFMETADATA von \(visibleURL.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
-                    return .files([await fallbackFile()])
-                }
-                var chapters = parseFFMetadataChapters(text)
-                guard !chapters.isEmpty else {
-                    log("⚠️ Keine Kapitel in \(visibleURL.lastPathComponent) gefunden. Nutze die Datei als ein Kapitel.")
-                    return .files([await fallbackFile()])
-                }
+                    guard let text = String(data: output.data, encoding: .utf8) else {
+                        return .fallback("⚠️ FFMETADATA von \(visibleURL.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
+                    }
+                    let chapters = parseFFMetadataChapters(text)
+                    guard !chapters.isEmpty else {
+                        return .fallback("⚠️ Keine Kapitel in \(visibleURL.lastPathComponent) gefunden. Nutze die Datei als ein Kapitel.")
+                    }
 
-                let totalDuration: Double
-                if let knownFile {
-                    totalDuration = knownFile.duration
-                } else {
-                    let loadedDuration = try? await AVURLAsset(url: url).load(.duration)
-                    totalDuration = sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
+                    return .chapters(chapters)
+                } catch {
+                    if shouldCancel() || cancellation.isCancelled { return .cancelled }
+                    return .fallback("⚠️ Kapitel aus \(visibleURL.lastPathComponent) konnten nicht gelesen werden: \(error.localizedDescription)")
                 }
+            }
+            guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
+            let parsedChapters: [FFChapter]
+            switch metadata {
+            case .chapters(let chapters): parsedChapters = chapters
+            case .fallback(let message):
+                log(message)
+                let fallback = await fallbackFile()
                 guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
+                return .files([fallback])
+            case .failed(let reason): return .failed(reason)
+            case .cancelled: return .cancelled
+            }
+            let totalDuration: Double
+            if let knownFile {
+                totalDuration = knownFile.duration
+            } else {
+                let loadedDuration = try? await AVURLAsset(url: url).load(.duration)
+                totalDuration = sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
+            }
+            guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
+            let resolvedChapters: [AudioFile]? = await ChapterAnalysisExecutor.perform {
+                guard !shouldCancel(), !cancellation.isCancelled else { return nil }
+                var chapters = parsedChapters
                 // Das LETZTE Kapitel hat in FFMETADATA oft keine END-Zeit — es gibt kein
                 // Folgekapitel, aus dem sie (wie in parseFFMetadataChapters) abgeleitet
                 // werden könnte. Ohne Korrektur bliebe es ein Null-Dauer-Kapitel, das ein
@@ -218,10 +282,7 @@ extension AudioFile {
                 // Eine teilweise kaputte Kapitelliste nicht in garantiert leere
                 // `ffmpeg -t 0`-Segmente übersetzen. Der sichere Fallback ist die
                 // komplette Datei als ein Kapitel; so scheitert nicht das ganze Buch.
-                guard chaptersAreValid(chapters, totalDuration: totalDuration) else {
-                    log("⚠️ Unvollständige Kapitelzeiten in \(visibleURL.lastPathComponent). Nutze die Datei als ein Kapitel.")
-                    return .files([await fallbackFile()])
-                }
+                guard chaptersAreValid(chapters, totalDuration: totalDuration) else { return nil }
                 // Rundungsdifferenzen im FFMETADATA-Container lückenlos an die
                 // tatsächliche Dateidauer anlegen.
                 chapters[0].start = 0
@@ -241,15 +302,20 @@ extension AudioFile {
                         chapterTitle: title
                     ))
                 }
-                log("✅ \(audioFiles.count) Kapitel aus \(visibleURL.lastPathComponent) extrahiert.")
-                return .files(audioFiles)
-            } catch {
-                if shouldCancel() || taskCancellationRequested() { return .cancelled }
-                log("⚠️ Kapitel aus \(visibleURL.lastPathComponent) konnten nicht gelesen werden: \(error.localizedDescription)")
-                return .files([await fallbackFile()])
+                guard !shouldCancel(), !cancellation.isCancelled else { return nil }
+                return audioFiles
             }
+            guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
+            guard let resolvedChapters else {
+                log("⚠️ Unvollständige Kapitelzeiten in \(visibleURL.lastPathComponent). Nutze die Datei als ein Kapitel.")
+                let fallback = await fallbackFile()
+                guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
+                return .files([fallback])
+            }
+            log("✅ \(resolvedChapters.count) Kapitel aus \(visibleURL.lastPathComponent) extrahiert.")
+            return .files(resolvedChapters)
         } onCancel: {
-            ProcessTerminator.requestTermination(process)
+            cancellation.cancel()
         }
     }
 
@@ -270,6 +336,7 @@ extension AudioFile {
         from handle: FileHandle,
         maximumByteCount: Int = maximumFFMetadataByteCount,
         timeout: TimeInterval = chapterExtractionTimeout,
+        shouldCancel: () -> Bool = { false },
         onAbort: () -> Void = {}
     ) -> (data: Data, exceededLimit: Bool, timedOut: Bool, readFailed: Bool) {
         let limit = max(0, maximumByteCount)
@@ -282,6 +349,10 @@ extension AudioFile {
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         while true {
+            if shouldCancel() {
+                onAbort()
+                return (data, false, false, true)
+            }
             let now = DispatchTime.now().uptimeNanoseconds
             guard now < deadline else {
                 onAbort()
@@ -325,7 +396,7 @@ extension AudioFile {
     }
 
     /// Ein aus FFMETADATA gelesenes Kapitel (Zeiten bereits in Sekunden).
-    struct FFChapter { var start: TimeInterval = 0; var end: TimeInterval = 0; var title: String = "" }
+    struct FFChapter: Sendable { var start: TimeInterval = 0; var end: TimeInterval = 0; var title: String = "" }
 
     /// Parst die `[CHAPTER]`-Blöcke aus einer FFMETADATA-Ausgabe.
     /// ffmpeg schreibt TIMEBASE in jeden Block (Default 1/1000); zur Robustheit
