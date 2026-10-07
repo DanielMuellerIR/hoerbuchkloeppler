@@ -253,6 +253,11 @@ und Metadatenanalyse können danach noch Zeit benötigen.
 erhält vorhandene Kapitel und Metadaten und beendet dessen Analyseprozesse.
 Verspätete Provider-Antworten verlieren ihre Importberechtigung. Während der
 abschließenden Metadatenübernahme ist Abbrechen deaktiviert.
+Datei-Adressen eines Drag-and-drop-Anbieters müssen innerhalb von 60 Sekunden
+vorliegen. Danach wird der gesamte neue Batch verworfen; das vorhandene Hörbuch
+bleibt erhalten. Der Dialog bietet „Wiederholen“ und „Abbrechen“, ohne automatisch
+erneut zu laden. Die Frist endet, sobald alle Adressen vorliegen; die eigentliche
+Audioanalyse unterliegt diesem Provider-Zeitlimit nicht.
 
 Regression: `userCancellationPreservesExistingBook` prüft Teilfortschritt,
 Task-Abbruch, erhaltene Bearbeitung und verspätete Beiträge vor/nach Neustart.
@@ -297,15 +302,16 @@ Skripte brechen mit klarer Meldung ab, wenn etwas fehlt. Danach, nach
 python3 test_project_cli.py
 python3 tests/verify_audio_transitions.py
 python3 tests/verify_cli_matrix.py
-swiftc -parse-as-library -I HoerbuchkloepplerCore/.build/debug/Modules \
-  Hörbuchklöppler/ImportCoordinator.swift tests/verify_gui_import.swift \
-  HoerbuchkloepplerCore/.build/debug/HoerbuchkloepplerCore.build/*.swift.o \
-  -o /tmp/verify-gui-import
-/tmp/verify-gui-import
+bash tests/verify_gui_import.sh
+bash tests/verify_gui_import.sh --default-timeout  # zusätzlich echte 60 Sekunden
 ```
 
 Die GUI-Importprüfung verwendet echte NSItemProvider ohne Fenster/Fokus und
-prüft acht Dateien, Fortschritt und verspätete Provider nach Abbruch.
+prüft acht Dateien, Fortschritt, hängende/verspätete Provider, Timeout mit
+Erhalt des Bestands, Wiederholen desselben Batches, Benutzerabbruch sowie
+einen neuen Import vor Ablauf des alten Timers. Die schnellen Fälle verwenden
+eine verkürzte Frist; `--default-timeout` misst zusätzlich die echte
+Standardfrist. Der sichtbare Timeoutdialog wird gesondert im App-Bundle geprüft.
 `bash tests/verify_gui_undo.sh` prüft echtes AppKit-Text-Undo und Kapitel-Undo
 ohne sichtbare Fenster, einschließlich leerem Textverlauf, anderem aktivem
 Fenster und Sperren während Import/Konvertierung. Menüeinbindung und

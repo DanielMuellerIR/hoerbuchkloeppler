@@ -59,11 +59,12 @@ ohne unverhältnismäßiges Risiko im Rahmen der Kampagne erledigen.
   Import gebündelt; ein Projekt ersetzt einen vorhandenen Stand erst nach
   Bestätigung. Automatische Koordinationsprüfungen sind grün; der tatsächliche
   Systemweg wird noch im GUI-Test geprüft.
-- **Ein NSItemProvider, der nie antwortet, lässt den Import unbefristet stehen.**
-  `ImportCoordinator.importProviders` hat weder Frist noch Rückfall; „Hörbuch
-  erzeugen“ und „Projekt speichern“ bleiben gesperrt. Erholung nur über „Import
-  abbrechen“. Eine Frist ist eine Produktentscheidung: zu kurz verwirft echte
-  Drops von langsamen Volumes.
+- **Provider-Zeitlimit seit 1.4.28 umgesetzt; GUI-Prüfung steht aus.**
+  Die Sammlung von Datei-Adressen endet nach 60 Sekunden. Ein unvollständiger
+  Batch wird vollständig verworfen; vorhandene Daten bleiben erhalten. Der
+  Dialog bietet Wiederholen/Abbrechen. Die Frist gilt vor der Audioanalyse;
+  verspätete Antworten und Timer abgebrochener/ersetzter Imports sind entwertet.
+  Automatische Provider-Prüfungen sind grün, der sichtbare Dialog wird noch geprüft.
 - **Erledigt in 1.4.22: Kapitelanalyse auf eigener Queue.** Prozessstart,
   Pipe-Lesen, Warten, Parsing und Kapitelaufbau laufen auf einer eigenen
   parallelen Utility-Queue. Der Import begrenzt weiterhin die Workerzahl;

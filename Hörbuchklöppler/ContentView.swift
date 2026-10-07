@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var showingToolErrorAlert = false
     @State private var cliHandoffError: String?
     @State private var coverError: String?
+    @State private var providersToRetry: [NSItemProvider]?
     /// Einmal aufgelöster CLI-Pfad. Die Auflösung durchsucht den gesamten PATH
     /// mit je einem Dateisystemzugriff pro Eintrag; im View-Body ausgewertet
     /// liefe das bei jedem Fortschritts-Update zweimal auf dem Main Actor und
@@ -266,6 +267,21 @@ struct ContentView: View {
             fallback: "Die Quelldatei ließ sich nicht abspielen."
         )
         .errorAlert("Datei nicht geöffnet", message: $documentOpen.errorMessage, fallback: "Die Datei ließ sich nicht öffnen.")
+        .alert("Import hat zu lange gewartet", isPresented: Binding(
+            get: { providersToRetry != nil },
+            set: { if !$0 { providersToRetry = nil } }
+        ), presenting: providersToRetry) { providers in
+            Button("Abbrechen", role: .cancel) { providersToRetry = nil }
+            Button("Wiederholen") {
+                guard !session.isConverting, !session.isImporting else {
+                    projectError = "Es läuft bereits ein Import oder eine Konvertierung. Bitte danach erneut importieren."
+                    return
+                }
+                importProviders(providers)
+            }
+        } message: { _ in
+            Text("Der Drag-and-drop-Import hat nach 60 Sekunden noch nicht alle Dateien bereitgestellt. Der neue Import wurde verworfen. Das bisherige Hörbuch bleibt erhalten.")
+        }
         .alert("Projekt öffnen?", isPresented: Binding(
             get: { documentOpen.projectToConfirm != nil },
             set: { if !$0 { documentOpen.cancelProject() } }
@@ -345,7 +361,7 @@ struct ContentView: View {
         }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             guard !session.isConverting else { return false }
-            ImportCoordinator.importProviders(providers, session: session)
+            importProviders(providers)
             return true
         }
         .background(ChapterUndoWindowReader(router: undoRouter))
@@ -409,6 +425,13 @@ struct ContentView: View {
                 await ImportCoordinator.importURLs(urls, session: session)
             }
         }
+    }
+
+    private func importProviders(_ providers: [NSItemProvider]) {
+        providersToRetry = nil
+        ImportCoordinator.importProviders(providers, session: session, onTimeout: { providers in
+            providersToRetry = providers
+        })
     }
 
     /// Kapitel-Dauer als `m:ss` bzw. `h:mm:ss` (ab einer Stunde).

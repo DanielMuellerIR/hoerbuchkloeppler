@@ -109,7 +109,9 @@ in [opportunities.md](opportunities.md).
   gespeicherten Projekt; vorhandene Session-Eigenschaften bleiben Adapter.
 - `RunReport.swift`: versionierte Inspect- und JSON-Laufberichte für die CLI.
 - `ChapterPreviewPlayer.swift`: Besitz und Abspielposition des Vorschauplayers.
-- `ImportCoordinator.swift`: GUI-Providerkoordination über Core-Importtokens.
+- `ImportCoordinator.swift`: GUI-Providerkoordination über Core-Importtokens;
+  abbrechbare Adressensammlung mit 60-Sekunden-Frist, einmaligem Abschluss
+  und entwerteten späten Callbacks vor der eigentlichen Audioanalyse.
 - `DocumentOpenCoordinator.swift`: System-URL-Ereignisse bündeln, Audioimport
   und Projektöffnung mit Bestätigung koordinieren; das aktive Fenster hat Vorrang.
 - `OutputPreviewView.swift`: konkrete Zielpfade und geschätzter Volume-Bedarf.
