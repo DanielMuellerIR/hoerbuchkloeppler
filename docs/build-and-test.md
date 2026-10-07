@@ -23,6 +23,14 @@ App alternativ direkt über `Hörbuchklöppler.xcodeproj` in Xcode (oder
 `xcodebuild`) — dann müssen `ffmpeg`/`mediainfo` vorab via `./build.sh --deps-only`
 in `Resources/bin/` liegen (sonst greift zur Laufzeit der Homebrew-Fallback).
 
+## Begrenzter Linux-Probeweg
+
+Die vollständige CLI bleibt macOS-gebunden. Der ausgeführte Linux-Core-Build,
+die separat portablen Modelldateien und eine kleine AAC-/Kapitel-Gegenprobe sind
+in [linux-portability.md](linux-portability.md) dokumentiert.
+`bash tests/experiments/linux_core_probe.sh` ist ein Linux-Experiment mit
+vorhandenem Swift/ffmpeg/ffprobe, kein erfolgreicher Build der vollständigen CLI.
+
 ## CLI `kloeppler`
 
 ```
