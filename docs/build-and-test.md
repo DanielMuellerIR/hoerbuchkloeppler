@@ -102,6 +102,13 @@ es wieder und prüft integrierte Lautheit, Cover, Sprecher, Reihe, Band und
 Sprache — das setzt aber `Resources/bin/ffmpeg` voraus (`./build.sh --deps-only`);
 ohne die Binaries meldet der Test das ausdrücklich als Fehlschlag.
 
+Die CLI-Matrix prüft temporäre Audiodaten im tatsächlichen macOS-Systemordner
+(`getconf DARWIN_USER_TEMP_DIR`) und ordnet sie über `.owner-pid` dem eigenen
+CLI-Lauf zu. Sie muss einen solchen Ordner vor dem Signal wirklich beobachten
+und danach sein Verschwinden prüfen. Nur ein gesetztes `TMPDIR` zu prüfen reicht
+nicht: Foundation ignoriert diese Umgebungsvariable auf manchen macOS-Ständen.
+Leere persistente Ausgabesperrdateien sind kein verbliebenes Audio-Staging.
+
 `ChapterAnalysisWorkerTests` prüft eine synthetische Liste mit 12.000 Kapiteln
 (1.826.684 Bytes): Prozesskonfiguration außerhalb eines Swift-Tasks und des
 Main Threads, unveränderte Titel/Zeiten sowie genau eine Prozessabmeldung.

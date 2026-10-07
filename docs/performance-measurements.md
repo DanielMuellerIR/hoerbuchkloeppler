@@ -1,5 +1,9 @@
 # Importmessung und Encodingexperiment 2026-09-05
 
+Eine gesonderte [Langbuchmessung vom 2026-10-07](long-book-measurement.md)
+erfasst zwölf Stunden mit beiden vorhandenen Kodiermodi, Prozessbaum-RSS und
+temporärem Plattenplatz. Ihre Ergebnisse ersetzen diese kurzen Fixtures nicht.
+
 Messung lokal unter macOS auf Apple M5. ffmpeg 9.0.1 (Homebrew), `aac_at` mit `cvbr`. Keine GUI geöffnet. Drei Wiederholungen, wenn nicht anders angegeben; Zeit als Median, RSS als höchster gemessener Wert. Keine geleerten Dateisystem-Caches, keine kalten Laufwerke oder Netzlaufwerke. Messergebnisse gelten für kurze, lokal gespeicherte Testdateien.
 
 ## Import-Baseline

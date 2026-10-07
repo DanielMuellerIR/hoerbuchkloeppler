@@ -1,5 +1,6 @@
 # CLI-Abnahme: echte Split-Ausgaben, Rückimport, Fehler und Signalabbruch.
 import pathlib,tempfile,subprocess,json,time,os,signal,selectors
+from cli_temp import owned_temp_directories, system_temporary_directory
 REPO=pathlib.Path(__file__).resolve().parents[1]
 CLI=REPO/'HoerbuchkloepplerCore/.build/debug/kloeppler'
 FF=REPO/'HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/Resources/bin/ffmpeg'
@@ -7,11 +8,11 @@ FF=REPO/'HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/Resources/bin/ffmpe
 assert FF.exists(),f'ffmpeg fehlt: {FF} — vorher ./build.sh --deps-only ausführen'
 assert CLI.exists(),f'kloeppler fehlt: {CLI} — vorher swift build --package-path HoerbuchkloepplerCore ausführen'
 ROOT=pathlib.Path(tempfile.mkdtemp(prefix='hk-final-matrix-'))
-# Eigenes TMPDIR für alle CLI-Aufrufe: `leftovers()` globt sonst den geteilten
-# Systemordner und sieht dort auch HB_Temp_*-Ordner eines parallel laufenden
-# `swift test` — dann wird dieser Lauf ohne eigenes Verschulden rot.
+# Foundation kann TMPDIR auf macOS ignorieren. Deshalb den wirklichen
+# Systemordner beobachten und über .owner-pid ausschließlich eigene Läufe prüfen.
 CLI_TMP=ROOT/'tmp';CLI_TMP.mkdir()
 ENV=dict(os.environ,TMPDIR=str(CLI_TMP))
+SYSTEM_TMP=system_temporary_directory()
 REPORT=[]
 def tool(*args):
     return subprocess.run([str(FF),'-v','error',*map(str,args)],capture_output=True,check=True)
@@ -85,29 +86,27 @@ for mode in ['standard','parallel']:
         REPORT.append(dict(mode=mode,output=path.name,decodedSeconds=seconds,chapter=r['chapters'][0],metadata=r['metadata'],cover=r['hasCover']))
         print(mode,path.name,'decodedSeconds',seconds,'metadata+cover reimport OK',flush=True)
 
-def leftovers():
-    # Nur der eigene Temp-Bereich; siehe CLI_TMP.
-    temp=CLI_TMP
-    return set(map(str,temp.glob('HB_Temp_*')))|set(map(str,temp.glob('HB_Loudness_*')))
-leftover_probe=CLI_TMP/'HB_Temp_probe'
-leftover_probe.mkdir()
-assert str(leftover_probe) in leftovers()
-leftover_probe.rmdir()
+with tempfile.TemporaryDirectory(prefix='HB_Temp_probe-',dir=SYSTEM_TMP) as probe:
+    leftover_probe=pathlib.Path(probe)
+    (leftover_probe/'.owner-pid').write_text(str(os.getpid()))
+    assert leftover_probe in owned_temp_directories(SYSTEM_TMP,os.getpid())
+    assert leftover_probe not in owned_temp_directories(SYSTEM_TMP,-1)
 def abort(sig,analyze=False):
-    before=leftovers();target=ROOT/('cancel-analysis.m4b' if analyze else 'cancel-encoding.m4b')
+    observed=set();target=ROOT/('cancel-analysis.m4b' if analyze else 'cancel-encoding.m4b')
     args=[str(CLI),*map(str,files),'--no-cover','--mode','standard','--samplerate','48000','--format','json','--output',str(target)]
     if analyze:args+=['--analyze-loudness']
     p=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,env=ENV)
     selector=selectors.DefaultSelector();selector.register(p.stderr,selectors.EVENT_READ,'err');selector.register(p.stdout,selectors.EVENT_READ,'out')
     buffers={'err':b'','out':b''};sent=None;deadline=time.monotonic()+60
     while p.poll() is None and time.monotonic()<deadline:
+        observed.update(owned_temp_directories(SYSTEM_TMP,p.pid))
         for key,_ in selector.select(.1):
             chunk=os.read(key.fileobj.fileno(),65536)
             if not chunk:selector.unregister(key.fileobj);continue
             buffers[key.data]+=chunk
         marker=b'Lautheitsanalyse:' if analyze else b'"event":"started"'
         combined=buffers['err'] if analyze else buffers['out']
-        if sent is None and marker in combined:
+        if sent is None and marker in combined and observed:
             if not analyze:time.sleep(.15)
             p.send_signal(sig);sent=time.monotonic()
     if p.poll() is None:
@@ -121,7 +120,10 @@ def abort(sig,analyze=False):
     assert p.returncode==128+sig,(p.returncode,buffers['err'].decode()[-3000:])
     events=[json.loads(line) for line in buffers['out'].splitlines()]
     assert events[-1]['event']=='cancelled',events
-    assert not target.exists();assert not (leftovers()-before),leftovers()-before
+    assert observed,'Kein echter Core-Arbeitsordner beobachtet'
+    assert not target.exists()
+    assert not owned_temp_directories(SYSTEM_TMP,p.pid)
+    assert not any(path.exists() for path in observed),observed
     assert not list(ROOT.rglob('*.partial*'))
     REPORT.append(dict(signal=sig,analysis=analyze,exit=p.returncode,cancelSeconds=round(time.monotonic()-sent,3),cleanup=True))
     print('cancel',sig,'analysis',analyze,REPORT[-1],flush=True)

@@ -26,6 +26,9 @@ Textneubau bei bloßen Fortschrittsupdates. Beides ist keine offene Optimierung.
 - Die bisherigen Messungen verwenden lokale, warme Testdateien. Langbücher,
   langsame externe Datenträger und thermische Drosselung bleiben gesonderte
   Messreihen; die Ergebnisse erlauben keine entsprechende Leistungszusage.
+  Die [begrenzte Langbuchmessung](long-book-measurement.md) ergänzt nun zwölf
+  synthetische Stunden lokal und einen abgegrenzten Streaming-Versuch als Plan;
+  sie rechtfertigt noch keine Änderung der Kodierpipeline.
 - Lautheitsangleichung verwendet einen gemeinsamen linearen Pegel. Die
   Spitzenbegrenzung kann das Ziel −18 LUFS verhindern; Dynamik wird erhalten.
 - ⌘Z/⇧⌘Z liegen als `keyboardShortcut` auf den Toolbar-Buttons „Rückgängig“/
