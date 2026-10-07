@@ -301,6 +301,88 @@ DEST_EXISTED=0
 INSTALL_STATE="staged"
 STAGED_IDENTITY=""
 
+cleanup_install_entry() {
+  local path="$1" expected_identity="$2"
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  [ -n "$expected_identity" ] && [ "$expected_identity" != "missing" ] || return 1
+  /usr/bin/swift - "$DEST_PARENT" "$DEST_PARENT_IDENTITY" "$(basename "$path")" "$expected_identity" <<'SWIFT'
+import Foundation
+import Darwin
+
+func identity(_ information: stat) -> String {
+    "\(information.st_dev):\(information.st_ino)"
+}
+
+func contents(_ descriptor: Int32) -> [String]? {
+    let duplicate = dup(descriptor)
+    guard duplicate >= 0, let stream = fdopendir(duplicate) else {
+        if duplicate >= 0 { close(duplicate) }
+        return nil
+    }
+    defer { closedir(stream) }
+    var names: [String] = []
+    while true {
+        errno = 0
+        guard let entry = readdir(stream) else { return errno == 0 ? names : nil }
+        let name = withUnsafePointer(to: entry.pointee.d_name) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) { String(cString: $0) }
+        }
+        if name != "." && name != ".." { names.append(name) }
+    }
+}
+
+func removeContents(_ descriptor: Int32, depth: Int = 0) -> Bool {
+    guard depth < 128, let names = contents(descriptor) else { return false }
+    for name in names {
+        var before = stat()
+        guard fstatat(descriptor, name, &before, AT_SYMLINK_NOFOLLOW) == 0 else { return false }
+        if before.st_mode & S_IFMT == S_IFDIR {
+            let child = openat(descriptor, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard child >= 0 else { return false }
+            var bound = stat()
+            let removed = fstat(child, &bound) == 0 && identity(before) == identity(bound)
+                && removeContents(child, depth: depth + 1)
+            close(child)
+            var after = stat()
+            guard removed, fstatat(descriptor, name, &after, AT_SYMLINK_NOFOLLOW) == 0,
+                  identity(after) == identity(before), unlinkat(descriptor, name, AT_REMOVEDIR) == 0 else { return false }
+        } else {
+            guard unlinkat(descriptor, name, 0) == 0 else { return false }
+        }
+    }
+    return true
+}
+
+let parent = open(CommandLine.arguments[1], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+guard parent >= 0 else { exit(1) }
+defer { close(parent) }
+var parentInformation = stat()
+guard fstat(parent, &parentInformation) == 0,
+      identity(parentInformation) == CommandLine.arguments[2] else { exit(1) }
+let name = CommandLine.arguments[3]
+guard !name.contains("/"), name != ".", name != ".." else { exit(1) }
+var before = stat()
+if fstatat(parent, name, &before, AT_SYMLINK_NOFOLLOW) != 0 { exit(errno == ENOENT ? 0 : 1) }
+guard before.st_mode & S_IFMT == S_IFDIR, identity(before) == CommandLine.arguments[4] else { exit(1) }
+let quarantine = ".hoerbuchkloeppler-cleanup-\(UUID().uuidString)"
+guard renameatx_np(parent, name, parent, quarantine, UInt32(RENAME_EXCL)) == 0 else { exit(1) }
+var moved = stat()
+guard fstatat(parent, quarantine, &moved, AT_SYMLINK_NOFOLLOW) == 0,
+      identity(moved) == identity(before) else {
+    _ = renameatx_np(parent, quarantine, parent, name, UInt32(RENAME_EXCL))
+    exit(1)
+}
+let directory = openat(parent, quarantine, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+guard directory >= 0 else { exit(1) }
+var bound = stat()
+let removed = fstat(directory, &bound) == 0 && identity(bound) == identity(before) && removeContents(directory)
+close(directory)
+var final = stat()
+guard removed, fstatat(parent, quarantine, &final, AT_SYMLINK_NOFOLLOW) == 0,
+      identity(final) == identity(before), unlinkat(parent, quarantine, AT_REMOVEDIR) == 0 else { exit(1) }
+SWIFT
+}
+
 # Der Rückzug darf nur die eigene neue Kopie entfernen. Hat ein anderer Lauf
 # das Ziel erneut ersetzt, bleiben dieses Bundle und das vorige Backup erhalten.
 rollback_install() {
@@ -357,14 +439,19 @@ SWIFT
       fi
     fi
   fi
-  rm -rf "$STAGED"
-  if [ "$status" -eq 0 ]; then rm -rf "$BACKUP"; fi
+  cleanup_install_entry "$STAGED" "$STAGED_IDENTITY" \
+    || echo "⚠ Staging konnte nicht eindeutig zugeordnet werden und bleibt erhalten: $STAGED" >&2
+  if [ "$status" -eq 0 ]; then
+    cleanup_install_entry "$BACKUP" "$DEST_IDENTITY" \
+      || echo "⚠ Backup konnte nicht eindeutig zugeordnet werden und bleibt erhalten: $BACKUP" >&2
+  fi
   [ "$rollback_ok" -eq 1 ] || exit 1
   exit "$status"
 }
 trap rollback_install EXIT
-ditto "$APP" "$STAGED"
+mkdir "$STAGED"
 STAGED_IDENTITY="$(hoerbuchkloeppler_directory_identity "$STAGED")"
+ditto "$APP" "$STAGED"
 
 # Die tatsächlich kopierte Staging-App vollständig prüfen. Nur so kann ein
 # Kopierfehler nicht erst auffallen, nachdem die vorige Installation ersetzt ist.
@@ -421,11 +508,16 @@ DEST_RESOURCE_BIN="$DEST/Contents/Resources/HoerbuchkloepplerCore_Hoerbuchkloepp
   || { echo "✗ Gebündeltes mediainfo startet nach der Installation nicht." >&2; exit 1; }
 log "Gebündelte Laufzeitprogramme im installierten Bundle sind ausführbar."
 
+[ "$(hoerbuchkloeppler_directory_identity "$DEST_PARENT" || true)" = "$DEST_PARENT_IDENTITY" ] \
+  && [ "$(hoerbuchkloeppler_directory_identity "$DEST" || true)" = "$STAGED_IDENTITY" ] \
+  || { echo "✗ Installiertes Ziel oder Elternordner wurde während der Abschlussprüfung verändert." >&2; exit 1; }
+
 # Erst nach allen Zielprüfungen ist das alte Bundle entbehrlich. Der EXIT-Trap
 # hält es bis hierhin als atomar einwechselbares Rollback bereit.
 INSTALL_STATE="verified"
 trap - EXIT
-if ! rm -rf "$BACKUP" "$STAGED"; then
+if ! cleanup_install_entry "$BACKUP" "$DEST_IDENTITY" \
+  || ! cleanup_install_entry "$STAGED" "$STAGED_IDENTITY"; then
   echo "⚠ Die geprüfte neue App bleibt installiert; ein Backup-/Staging-Rest konnte nicht entfernt werden:" >&2
   echo "  $BACKUP" >&2
   echo "  $STAGED" >&2

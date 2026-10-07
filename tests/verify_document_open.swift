@@ -2,6 +2,12 @@ import Foundation
 import AVFoundation
 import HoerbuchkloepplerCore
 
+@MainActor
+private final class DelayedImportProbe {
+    var releaseFirst = false
+    var batches: [[URL]] = []
+}
+
 @main
 struct DocumentOpenCheck {
     @MainActor
@@ -36,6 +42,28 @@ struct DocumentOpenCheck {
         try await waitFor { session.audioFiles.count == 2 && !session.isImporting }
         precondition(stops == 1 && Set(session.audioFiles.map(\.url)) == Set(urls.prefix(2)))
         print("PASS: zwei System-URL-Ereignisse als vollständiger gemeinsamer Audioimport")
+
+        let delayedSession = ConversionSession(settings: AudioSettings())
+        delayedSession.logSink = { _ in }
+        let delayedProbe = DelayedImportProbe()
+        let delayedOpener = DocumentOpenCoordinator { urls, session in
+            delayedProbe.batches.append(urls)
+            if delayedProbe.batches.count == 1 {
+                _ = session.beginImport(expectedItemCount: 1)
+                while !delayedProbe.releaseFirst { try? await Task.sleep(for: .milliseconds(10)) }
+                session.cancelImport()
+            }
+            await ImportCoordinator.importURLs(urls, session: session)
+        }
+        delayedOpener.receive(urls[0], session: delayedSession, beforeOpening: {})
+        try await waitFor { delayedSession.isImporting }
+        delayedOpener.receive(urls[1], session: delayedSession, beforeOpening: {})
+        try await Task.sleep(for: .milliseconds(150))
+        precondition(delayedOpener.errorMessage == nil && delayedProbe.batches.count == 1)
+        delayedProbe.releaseFirst = true
+        try await waitFor { delayedSession.audioFiles.count == 2 && !delayedSession.isImporting }
+        precondition(delayedProbe.batches == [[urls[0]], [urls[1]]])
+        print("PASS: verspätete System-URL bleibt während eigenem Import erhalten und wird danach importiert")
 
         let projectURL = base.appendingPathComponent("Projekt.hkproject")
         session.title = "Gespeichertes Projekt"

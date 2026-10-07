@@ -1458,7 +1458,7 @@ struct MetadataAndCLITests {
         #expect(invocation.arguments.contains("--cover=/tmp/Cover Bild.jpg"))
         #expect(invocation.arguments.contains("--stereo"))
         #expect(invocation.arguments.contains("--verbose"))
-        // Ein Wert aus lauter Leerzeichen entfällt überall gleich.
+        // Auch leere Overrides müssen den Reimport alter Tags überstimmen.
         let blank = CLIInvocation(
             executable: "kloeppler",
             folderURL: URL(fileURLWithPath: "/tmp"),
@@ -1468,8 +1468,12 @@ struct MetadataAndCLITests {
             narrator: "  ",
             series: "  "
         )
-        #expect(!blank.arguments.contains { $0.hasPrefix("--narrator") })
-        #expect(!blank.arguments.contains { $0.hasPrefix("--series") })
+        for option in ["--title", "--author", "--volume-number", "--language"] {
+            let index = try #require(blank.arguments.firstIndex(of: option))
+            #expect(blank.arguments[index + 1] == "")
+        }
+        #expect(blank.arguments.contains("--narrator=  "))
+        #expect(blank.arguments.contains("--series=  "))
 
         // Der echte Shell-Durchlauf prüft das beobachtbare Verhalten: Weder
         // Dollarzeichen noch Backticks, Apostrophe oder Leerzeichen dürfen die
@@ -1482,7 +1486,7 @@ struct MetadataAndCLITests {
         try process.run()
         let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        let receivedArguments = output.split(separator: 0).map {
+        let receivedArguments = output.split(separator: 0, omittingEmptySubsequences: false).dropLast().map {
             String(decoding: $0, as: UTF8.self)
         }
 

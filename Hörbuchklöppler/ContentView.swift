@@ -184,6 +184,7 @@ struct ContentView: View {
                                 }
                                 .onMove { offsets, destination in session.moveChapters(from: offsets, to: destination) }
                             }
+                            .disabled(session.isImporting)
                         }
                     }
 

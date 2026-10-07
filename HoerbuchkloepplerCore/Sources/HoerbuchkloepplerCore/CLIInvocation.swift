@@ -34,19 +34,21 @@ public struct CLIInvocation: Sendable {
             arguments += ["--max-duration", String(maxDurationHours)]
         }
         // Freitext einheitlich in der `--option=wert`-Form und einheitlich
-        // getrimmt geprüft: In der getrennten Form liest der Argumentparser
+        // übergeben: In der getrennten Form liest der Argumentparser
         // einen Wert mit führendem Bindestrich als Option, ein Buchtitel wie
         // „-Aufzeichnungen" ließ den kopierten Befehl mit „Missing value for
-        // '--title'" abbrechen. Und ein Wert aus lauter Leerzeichen entfiel
-        // bisher beim Titel, wurde bei Sprecher und Reihe aber übergeben.
+        // '--title'" abbrechen. Auch leere Werte sind ausdrückliche Overrides:
+        // Sonst kämen beim CLI-Reimport bewusst entfernte Tags zurück.
         let freeText = [
             ("--title", title), ("--author", author), ("--genre", genre),
             ("--narrator", narrator), ("--series", series),
             ("--volume-number", volumeNumber), ("--language", language)
         ]
-        for (key, value) in freeText
-        where !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            arguments.append("\(key)=\(value)")
+        for (key, value) in freeText {
+            // ArgumentParser lehnt `--option=` ab, akzeptiert aber ein eigenes
+            // leeres Argument. Nur dieser Leerwert braucht die getrennte Form.
+            if value.isEmpty { arguments += [key, ""] }
+            else { arguments.append("\(key)=\(value)") }
         }
         if settings.analyzeLoudness { arguments.append("--analyze-loudness") }
         if settings.normalizeLoudness { arguments.append("--normalize-loudness") }

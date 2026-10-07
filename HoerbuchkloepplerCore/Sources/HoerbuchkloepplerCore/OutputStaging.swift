@@ -1111,11 +1111,26 @@ extension FFmpegWrapper {
         let marker = cleanupDirectory.appendingPathComponent(
             cleanupEntryIdentityFilename
         )
-        guard let data = try? Data(contentsOf: marker),
+        let descriptor = marker.withUnsafeFileSystemRepresentation { path in
+            path.map { Darwin.open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK) } ?? -1
+        }
+        guard descriptor >= 0 else { return nil }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var information = stat()
+        guard Darwin.fstat(descriptor, &information) == 0,
+              information.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              information.st_size > 0, information.st_size <= 64 * 1024,
+              let data = try? handle.read(upToCount: 64 * 1024 + 1),
+              data.count == information.st_size,
               let record = try? JSONDecoder().decode(
                 CleanupEntryRecord.self,
                 from: data
-              ) else { return nil }
+              ),
+              !record.filename.isEmpty,
+              !record.filename.contains("/"), !record.filename.contains("\0"),
+              ![".", "..", tempOwnerFilename, cleanupEntryIdentityFilename, ".HB_EntryCleanup"].contains(record.filename)
+        else { return nil }
         return record
     }
 
@@ -1852,8 +1867,10 @@ extension FFmpegWrapper {
         
         for url in contents {
             let name = url.lastPathComponent
-            let isTempName = name.hasPrefix("HB_Temp_")
-                && UUID(uuidString: String(name.dropFirst("HB_Temp_".count))) != nil
+            let isTempName = ["HB_Temp_", "HB_Loudness_"].contains { prefix in
+                name.hasPrefix(prefix)
+                    && UUID(uuidString: String(name.dropFirst(prefix.count))) != nil
+            }
             let cleanupSuffix = name.hasPrefix(".HB_Cleanup_")
                 ? String(name.dropFirst(".HB_Cleanup_".count)) : ""
             let cleanupParts = cleanupSuffix.split(separator: "-", maxSplits: 1)
@@ -1871,10 +1888,22 @@ extension FFmpegWrapper {
                   !isCleanupName || cleanupOwner == owner else { continue }
             // Nur ESRCH beweist, dass der markierte Besitzer nicht mehr lebt.
             guard Darwin.kill(owner, 0) != 0, errno == ESRCH else { continue }
+            var recordedEntry: CleanupEntryRecord?
+            if fileSystemIdentity(
+                at: url.appendingPathComponent(cleanupEntryIdentityFilename),
+                followSymlink: false
+            ) != nil {
+                // Ausgabe-Quarantänen dürfen auch nach einem Absturz nur ihren
+                // aufgezeichneten Eintrag verlieren. Fremde Recovery-Daten
+                // und unlesbare Besitznachweise bleiben erhalten.
+                guard let record = cleanupEntryRecord(in: url) else { continue }
+                recordedEntry = record
+            }
             removeOwnedTempDirectory(
                 url,
                 expectedIdentity: identity,
-                expectedOwnerPID: owner
+                expectedOwnerPID: owner,
+                expectedCleanupEntry: recordedEntry
             )
         }
     }

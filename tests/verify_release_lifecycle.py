@@ -132,17 +132,20 @@ def run_case(root, name, failure=None, arguments=("--no-finder-layout",), versio
     assert (result.returncode == 0) == success, (name, result.stdout, result.stderr)
     assert ("RELEASE OK:" in result.stdout) == success, name
     assert final.read_bytes() == (b"verified-new-image" if success else b"previous-good-image"), name
-    assert not list(dist.glob("*.unverified.dmg")), name
     preserved = failure in ("detach", "detach_lies", "info", "info_detached")
-    assert bool(list(temporary.iterdir())) == preserved, (name, result.stderr)
-    assert bool(list(dist.glob("*-rw.dmg"))) == preserved, (name, result.stderr)
+    assert not list(temporary.iterdir()), name
+    preserved_work = list(dist.glob(".release-work.*"))
+    assert bool(preserved_work) == preserved, (name, result.stderr)
+    if preserved:
+        assert len(preserved_work) == 1 and (preserved_work[0] / "working.dmg").exists(), name
     assert all(call["tool"] != "osascript" for call in calls), name
     if success:
         assert state["manifest"] == {"app": True, "notices": True, "applications": True}, state
         sequence = [(call["tool"], call["args"][:2]) for call in calls]
+        working_image = next(call["args"][-1] for call in calls if call["tool"] == "hdiutil" and call["args"][0] == "create")
         ordered = [("install.sh", ["--no-install"]), ("xcrun", ["stapler", "validate"]),
-                   ("hdiutil", ["create", "-srcfolder"]), ("hdiutil", ["attach", "dist/Hörbuchklöppler-1.2.3-rw.dmg"]),
-                   ("hdiutil", ["convert", "dist/Hörbuchklöppler-1.2.3-rw.dmg"]),
+                   ("hdiutil", ["create", "-srcfolder"]), ("hdiutil", ["attach", working_image]),
+                   ("hdiutil", ["convert", working_image]),
                    ("codesign", ["--force", "--timestamp"]), ("xcrun", ["notarytool", "submit"]),
                    ("xcrun", ["stapler", "staple"]), ("xcrun", ["stapler", "validate"]),
                    ("spctl", ["--assess", "--type"])]
@@ -152,6 +155,19 @@ def run_case(root, name, failure=None, arguments=("--no-finder-layout",), versio
     if preserved:
         assert "temporäre Daten bleiben erhalten" in result.stderr, (name, result.stderr)
         assert not any(call["tool"] == "hdiutil" and call["args"][0] == "convert" for call in calls), name
+    if failure == "detach":
+        prior_image = preserved_work[0] / "working.dmg"
+        before = prior_image.stat()
+        prior_mount = dict(state)
+        env["HK_RELEASE_FAIL"] = "install"
+        again = subprocess.run(["bash", str(workspace / "release.sh"), *arguments],
+                               env=env, capture_output=True, text=True, timeout=30)
+        assert again.returncode != 0
+        assert prior_image.read_bytes() == b"working-image"
+        assert (prior_image.stat().st_dev, prior_image.stat().st_ino) == (before.st_dev, before.st_ino)
+        assert state_file.exists() and json.loads(state_file.read_text())["mount"] == prior_mount["mount"]
+        assert final.read_bytes() == b"previous-good-image"
+        print("PASS: Wiederholung nach erhaltenem Mount bewahrt dessen Image und Inhalt")
     if version != "1.2.3" or "--publish" in arguments:
         assert not calls, (name, calls)
     print("PASS:", name)

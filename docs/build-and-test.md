@@ -143,6 +143,8 @@ Prozessbesitz, simulierte PID-Änderung sowie ausgetauschte Ziele/Elternordner
 werden geprüft. Alle eigenen Helferprozesse werden beendet; im Konfliktfall
 muss das alte Backup erhalten bleiben. Auch diese Prüfung gehört zu
 `test_scripts.sh`. Sie ersetzt keine echte Apple-Notarisierung.
+Zusätzliche Gegenproben ersetzen Elternordner, Staging oder Backup während
+der späteren Prüfungen; die Bereinigung muss diese fremden Einträge erhalten.
 `tests/verify_release_lifecycle.py` führt eine unveränderte Kopie von
 `release.sh --no-finder-layout` mit kontrollierten Installations-, Image- und
 Apple-Diensten aus. Kopien, Links und die abschließende Umbenennung geschehen
@@ -152,6 +154,8 @@ Erhalt eines früheren guten Images. Aktive oder unbekannte Mounts müssen samt
 RW-Image erhalten bleiben; ein fehlgeschlagener Statusabruf darf keine
 Bereinigung erlauben. Der Test verwendet keine echten Mounts, keine
 Apple-Dienste und keinen Finder. Er gehört ebenfalls zu `test_scripts.sh`.
+Ein Wiederholungslauf nach gescheitertem Aushängen prüft ausdrücklich den
+Erhalt des vorherigen RW-Images und seiner Identität.
 Ein ergänzender echter, unsichtbarer HFS+-DMG-Probelauf am 2026-10-07 belegte
 das vollständige App-Bundle im Wurzelverzeichnis und sauberes Aushängen.
 `tests/verify_build_lifecycle.py` prüft außerdem eine unveränderte Kopie von
@@ -321,6 +325,8 @@ Tastenkürzel im laufenden App-Bundle benötigen zusätzlich eine GUI-Prüfung.
 Fenster: mehrere Audioereignisse als ein vollständiger Import, Projektöffnung
 im leeren Fenster, Bestätigung/Abbrechen vor Ersetzen, eine bereits aufgelöste
 Alert-Bindung, defekte Projekte, gemischte Auswahl und laufenden Import.
+Ein kontrolliert verzögerter Import prüft zusätzlich später eintreffende
+System-URLs außerhalb der anfänglichen Sammelfrist.
 Finder-/Launch-Services-Zuordnung und tatsächliche Alert-Bedienung benötigen
 zusätzlich die Prüfung im App-Bundle.
 `python3 tests/verify_terminal_renderer.py` prüft physische Statuszeilen an
@@ -337,7 +343,9 @@ AAC-Toleranzen und gemessene Performance-Kapitelversätze stehen in encoding.md.
 `tests/verify_artwork.sh` erzeugt eigene MP3-/M4A- und PNG-Fixtures: 96 Millionen
 Pixel, ein gültiges PNG mit 33 MiB Zusatzdaten, ungültige Bilder und ein späteres
 gültiges Cover. Es prüft begrenzte Vorschau, unveränderte Exportbytes und den
-Erhalt einer bestehenden Auswahl bei Fehlern. Getrennte Prozesse vergleichen
+Erhalt einer bestehenden Auswahl bei Fehlern.
+Auch ein übergroßes erstes APIC-Bild mit anschließendem gültigem Cover wird
+mit der echten ffmpeg-Extraktion geprüft. Getrennte Prozesse vergleichen
 maximales RSS des alten NSImage-Skalierablaufs und der Thumbnail-Übernahme;
 die Baseline lädt absichtlich das große Original. Der Vergleich misst weder
 allgemeine Importleistung noch eine feste RSS-Obergrenze. Temporäre Fixtures

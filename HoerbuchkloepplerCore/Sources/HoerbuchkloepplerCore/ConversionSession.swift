@@ -443,9 +443,10 @@ public final class ConversionSession: ObservableObject, Identifiable {
     public var embeddedCoverData: Data?
     private var importGeneration = UUID()
     private var artworkRequest = UUID()
+    private var artworkTask: Task<Void, Never>?
     private var coverRevision: UInt = 0
     /// Austauschpunkt für deterministische Race-Tests; produktiv liest immer
-    /// die AVFoundation-Implementierung aus `AudioFile`.
+    /// die begrenzte Extraktion aus `AudioFile`.
     var embeddedArtworkLoader: @Sendable (URL) async -> Data? = { url in
         await AudioFile.extractEmbeddedArtwork(from: url)
     }
@@ -1299,6 +1300,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
     }
 
     private func invalidateArtworkWork() {
+        artworkTask?.cancel()
+        artworkTask = nil
         artworkRequest = UUID()
         isPreparingArtwork = false
     }
@@ -1392,21 +1395,25 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// Startet genau eine Suche über den aktuellen, bereits übernommenen
     /// Dateistand. Fehlerhafte oder abgebrochene Zusatz-Drops rufen denselben
     /// Pfad erneut auf, nachdem sie die frühere Suche entwertet hatten.
-    private func startArtworkSearch(importToken: ImportToken? = nil) {
+    func startArtworkSearch(importToken: ImportToken? = nil) {
         guard !audioFiles.isEmpty,
               !isCoverSuppressed,
               coverImage == nil,
               coverPath == nil else { return }
+        artworkTask?.cancel()
         let request = UUID()
         artworkRequest = request
         let expectedCoverRevision = coverRevision
         let filesToSearch = audioFiles
         let artworkLoader = embeddedArtworkLoader
         isPreparingArtwork = true
-        Task { [weak self] in
+        artworkTask = Task { [weak self] in
             var foundArtwork: (image: NSImage, data: Data)?
             for file in Self.uniqueArtworkCandidates(filesToSearch) {
-                if let artworkData = await artworkLoader(file.url) {
+                guard !Task.isCancelled, self?.artworkRequest == request else { return }
+                let artworkData = await artworkLoader(file.url)
+                guard !Task.isCancelled, self?.artworkRequest == request else { return }
+                if let artworkData {
                     // Manche Container deklarieren beliebige Binärdaten als
                     // Artwork. Nur tatsächlich dekodierbare Bilder dürfen in
                     // den späteren ffmpeg-Auftrag gelangen.
@@ -1428,6 +1435,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
                 }
             }
             guard let self, self.artworkRequest == request else { return }
+            self.artworkTask = nil
             // Der aktuelle Request ist in jedem Fall beendet. Weitere Guards
             // entscheiden nur noch, ob sein Ergebnis anwendbar ist.
             self.isPreparingArtwork = false

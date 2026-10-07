@@ -116,7 +116,8 @@ in [opportunities.md](opportunities.md).
   abbrechbare Adressensammlung mit 60-Sekunden-Frist, einmaligem Abschluss
   und entwerteten späten Callbacks vor der eigentlichen Audioanalyse.
 - `DocumentOpenCoordinator.swift`: System-URL-Ereignisse bündeln, Audioimport
-  und Projektöffnung mit Bestätigung koordinieren; das aktive Fenster hat Vorrang.
+  und Projektöffnung mit Bestätigung koordinieren; spätere Ereignisse während
+  eines eigenen Imports serialisieren. Das aktive Fenster hat Vorrang.
 - `OutputPreviewView.swift`: konkrete Zielpfade und geschätzter Volume-Bedarf.
 
 Details zum Speicherformat und zu Bearbeitungsgrenzen: [Projekte](projects.md).

@@ -47,8 +47,6 @@ DMG="$DIST/${APP_NAME}-${VERSION}.dmg"
 # entsteht erst nach bestandener Signatur-/Notary-/Gatekeeper-Prüfung durch
 # atomares Umbenennen. So bleibt ein früheres gutes DMG bei einem Fehlversuch
 # erhalten, und unter dem Erfolgsnamen liegt nie ein ungeprüftes Image.
-STAGING_DMG="$DIST/${APP_NAME}-${VERSION}.unverified.dmg"
-RW_DMG="$DIST/${APP_NAME}-${VERSION}-rw.dmg"
 
 FINDER_LAYOUT=1
 for arg in "$@"; do
@@ -62,12 +60,17 @@ done
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
 
-MOUNT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/hoerbuchkloeppler-release.XXXXXX")"
+mkdir -p "$DIST"
+# Jeder Versuch besitzt eigene Images. Ein wegen unbekanntem Mount-Status
+# erhaltener früherer Lauf darf beim Wiederholen nicht überschrieben werden.
+MOUNT_ROOT="$(mktemp -d "$DIST/.release-work.XXXXXX")"
 # `hdiutil info` meldet macOS-Symlinks kanonisch (`/private/var/...` statt
 # `/var/...`). Derselbe kanonische Pfad ist deshalb Voraussetzung dafür, einen
 # aktiven Mount im Cleanup zuverlässig zu erkennen.
 MOUNT_ROOT="$(cd "$MOUNT_ROOT" && pwd -P)"
 MOUNT_DIR="$MOUNT_ROOT/volume"
+STAGING_DMG="$MOUNT_ROOT/unverified.dmg"
+RW_DMG="$MOUNT_ROOT/working.dmg"
 
 mount_is_active() {
   hoerbuchkloeppler_mount_is_active "$MOUNT_DIR"
@@ -103,10 +106,7 @@ xcrun stapler validate "$APP"
 
 # ── 2. DMG packen ───────────────────────────────────────────────────────────
 log "Packe DMG…"
-mkdir -p "$DIST"
-# Nur die Zwischenstände wegräumen. Ein vorhandenes fertiges "$DMG" bleibt
-# liegen, bis der neue Stand alle Prüfungen bestanden hat (atomares mv unten).
-rm -f "$RW_DMG" "$STAGING_DMG"
+# Ein vorhandenes fertiges "$DMG" bleibt bis zum atomaren Austausch erhalten.
 
 SIZE=$(( $(du -sm "$APP" | cut -f1) + 60 ))
 hdiutil create -srcfolder "$APP" -volname "$VOLNAME" -fs HFS+ \

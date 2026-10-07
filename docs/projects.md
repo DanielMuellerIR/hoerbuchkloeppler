@@ -21,8 +21,10 @@ wird. Projektdateien sind auf 48 MiB und Coverdaten auf 32 MiB begrenzt.
 Auch Finder beziehungsweise „Öffnen mit“ können Projekte und unterstützte
 Audiodateien an die App übergeben. Audiodateien werden gemeinsam importiert.
 Ein Projekt öffnet sich im leeren Fenster direkt; ein vorhandenes Hörbuch wird
-erst nach Bestätigung ersetzt. Während Import oder Konvertierung wird eine neue
-Systemöffnung mit einer sichtbaren Meldung abgewiesen. Die App registriert sich
+erst nach Bestätigung ersetzt. Weitere Systemöffnungen während eines durch
+diesen Weg gestarteten Imports warten auf dessen Abschluss. Bei einem anderen
+laufenden Import oder einer Konvertierung erscheint eine sichtbare Meldung.
+Die App registriert sich
 für Audio als alternative Anwendung und übernimmt keinen Standardplayer.
 
 Der eigene Projekttyp folgt Apples
@@ -40,6 +42,7 @@ bearbeitbaren Textfeld wird dessen Text zurückgenommen oder wiederholt. Ein
 leerer Textverlauf greift nicht auf Kapiteländerungen zurück. Außerhalb eines
 Textfelds gilt der Kapitelverlauf des aktiven Projektfensters; während Import,
 Konvertierung oder eines offenen Sheets bleibt dieser gesperrt.
+Während eines Imports sind auch Kapitelbearbeitung und Listendrag gesperrt.
 
 Die Kapitelhistorie umfasst höchstens 100 Schritte und wird beim Projektöffnen
 geleert; sie ist nicht Bestandteil der Projektdatei. Die GUI liest Quellen
@@ -57,6 +60,8 @@ kloeppler --project Buch.hkproject --format json --output Buch.m4b
 
 Genau eine Eingabeform ist erlaubt: ein Ordner, `--project` oder wiederholtes
 `--file`. Explizite Optionen überschreiben Projekteinstellungen und Metadaten.
+Der GUI-Handoff übergibt auch bewusst geleerte Metadaten, damit ein neuer
+CLI-Import keine zuvor entfernten Audiotags wieder einsetzt.
 `--file` erhält die angegebene Folge; gemeinsame Importregeln deduplizieren
 mehrfach referenzierte Quellen und erhalten deren interne Kapitelreihenfolge.
 

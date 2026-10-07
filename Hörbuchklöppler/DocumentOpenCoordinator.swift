@@ -11,6 +11,14 @@ final class DocumentOpenCoordinator: ObservableObject {
     @Published var errorMessage: String?
     private var pendingURLs: [URL] = []
     private var collectionTask: Task<Void, Never>?
+    private var isOpening = false
+    private let importAudio: @MainActor ([URL], ConversionSession) async -> Void
+
+    init(importAudio: @escaping @MainActor ([URL], ConversionSession) async -> Void = { urls, session in
+        await ImportCoordinator.importURLs(urls, session: session)
+    }) {
+        self.importAudio = importAudio
+    }
 
     func receive(_ url: URL, session: ConversionSession, beforeOpening: @escaping @MainActor () -> Void) {
         guard url.isFileURL else {
@@ -22,6 +30,7 @@ final class DocumentOpenCoordinator: ObservableObject {
             return
         }
         pendingURLs.append(url)
+        guard !isOpening else { return }
         collectionTask?.cancel()
         // Launch Services liefert mehrere ausgewählte Dateien als einzelne
         // URL-Ereignisse. Ein gemeinsamer Batch verhindert gegenseitigen Abbruch.
@@ -30,18 +39,33 @@ final class DocumentOpenCoordinator: ObservableObject {
             catch { return }
             guard let self else { return }
             self.collectionTask = nil
-            let urls = self.pendingURLs
-            self.pendingURLs = []
-            await self.open(urls, session: session, beforeOpening: beforeOpening)
+            await self.drainPending(session: session, beforeOpening: beforeOpening)
         }
     }
 
-    func confirmProject(_ url: URL, session: ConversionSession, beforeOpening: @MainActor () -> Void) async {
+    func confirmProject(_ url: URL, session: ConversionSession, beforeOpening: @escaping @MainActor () -> Void) async {
         projectToConfirm = nil
+        guard !isOpening else { return }
+        isOpening = true
         await openProject(url, session: session, beforeOpening: beforeOpening)
+        isOpening = false
+        await drainPending(session: session, beforeOpening: beforeOpening)
     }
 
     func cancelProject() { projectToConfirm = nil }
+
+    private func drainPending(session: ConversionSession, beforeOpening: @escaping @MainActor () -> Void) async {
+        guard !isOpening else { return }
+        isOpening = true
+        defer { isOpening = false }
+        // Die Sammelfrist ist nur eine Bündelung. Später zugestellte URLs
+        // bleiben während unseres eigenen Imports bis zu dessen Ende erhalten.
+        while !pendingURLs.isEmpty, projectToConfirm == nil {
+            let urls = pendingURLs
+            pendingURLs = []
+            await open(urls, session: session, beforeOpening: beforeOpening)
+        }
+    }
 
     private func open(_ urls: [URL], session: ConversionSession, beforeOpening: @MainActor () -> Void) async {
         guard canOpen(session) else { return }
@@ -64,7 +88,7 @@ final class DocumentOpenCoordinator: ObservableObject {
             return
         }
         beforeOpening()
-        await ImportCoordinator.importURLs(urls, session: session)
+        await importAudio(urls, session)
     }
 
     private func openProject(_ url: URL, session: ConversionSession, beforeOpening: @MainActor () -> Void) async {

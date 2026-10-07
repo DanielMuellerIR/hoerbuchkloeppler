@@ -47,6 +47,11 @@ ihn unter einem Namen mit dem Präfix `.HB_RecoveryCleanup_` auf und schreibt
 eine Warnung ins Log. Der automatische Sweep entfernt einen solchen Rest erst,
 wenn Name, Besitzer-Marker und aufgezeichnete Identität wieder eindeutig
 zusammenpassen.
+Ein separater Eintragsmarker eines solchen Recovery-Ordners wird auch bei
+späteren Temp-Sweeps geprüft; ein fremder Rest bleibt dadurch erhalten.
+Lautheitsanalysen verwenden dieselben `HB_Temp_`-Ordner wie Konvertierungen.
+Verwaiste `HB_Loudness_`-Ordner älterer Versionen bleiben in der Bereinigung
+unterstützt, sofern ihr Besitznachweis passt.
 
 ## Installation
 
@@ -60,7 +65,12 @@ Bundle atomar zurück, sofern Ziel und Backup noch die erwarteten Identitäten
 haben. Zielbundle und Elternordner werden bereits vor dem Build über Gerät und
 Inode erfasst und vor Beenden/Austausch erneut geprüft. Hat ein anderer Lauf
 inzwischen das Ziel ersetzt, wird dieser Konflikt gemeldet; ein Rückzug lässt
-das fremde Ziel und das nötige alte Backup erhalten. Eine laufende Ziel-App
+das fremde Ziel und das nötige alte Backup erhalten.
+Auch die Bereinigung von Staging und Backup bindet den Elternordner und den
+Eintrag an ihre erfasste Identität. Sie verschiebt eigene Einträge zuerst
+atomar in Quarantäne und löscht relativ zu offenen Verzeichnis-Deskriptoren.
+Ausgetauschte Einträge bleiben mit Warnung erhalten.
+Eine laufende Ziel-App
 erhält zuerst SIGTERM und nach fünf
 Sekunden ohne Beendigung SIGKILL. Registrierung, Startzeit und vollständiges
 Kommando jedes Kandidaten stammen dabei aus einem einzigen `ps`-Snapshot; vor
@@ -79,6 +89,9 @@ Zwischenstände des Laufs. Ist der private Mount noch aktiv oder kann
 und RW-Image zur späteren Prüfung erhalten. Auch nach einem erfolgreichen
 Detach-Aufruf muss der Status sicher inaktiv sein, bevor das Image konvertiert
 wird. Das DMG bleibt ausschließlich für eigene Macs bestimmt.
+RW- und ungeprüftes DMG liegen in einem exklusiven Arbeitsordner je Lauf.
+Ein Wiederholungslauf kann deshalb auch bei frühem Fehler kein noch
+eingehängtes Image des vorherigen Laufs löschen.
 
 Dieselbe Mount-Statusprüfung schützt den MediaInfo-Download in `build.sh`.
 Auch ein nach dem Einhängen fehlgeschlagener Attach-Aufruf wird berücksichtigt.

@@ -58,6 +58,7 @@ def mp3(name, images):
 for name in ("small", "large", "oversized", "invalid"):
     mp3(name + ".mp3", [(root / (name + ".png")).read_bytes()])
 mp3("later-valid.mp3", [b"defekt", small])
+mp3("oversized-first.mp3", [(root / "oversized.png").read_bytes(), small])
 subprocess.run([
     ffmpeg, "-nostdin", "-v", "error", "-i", str(root / "audio.mp3"),
     "-i", str(root / "small.png"), "-map", "0:a", "-map", "1:v", "-c:a", "aac",

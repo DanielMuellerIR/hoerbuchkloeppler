@@ -30,6 +30,13 @@ path=root/'test.hkproject';path.write_text(json.dumps(project))
 r=json.loads(run(['--project',path,'--inspect','--format','json','--output',root/'another'/'out.m4b']).stdout)
 assert abs(r['duration']-1.3)<1e-9,r['duration']
 assert r['metadata']['narrator']=='Sprecher';assert not (root/'another').exists()
+# Explizit geleerte GUI-Metadaten dürfen beim CLI-Reimport nicht zurückkehren.
+empty_overrides=[value for option in ['--title','--author','--genre','--narrator','--series',
+                                     '--volume-number','--language'] for value in [option,'']]
+cleared=json.loads(run(['--project',path,'--inspect','--format','json',*empty_overrides]).stdout)
+assert all(cleared['metadata'][key]=='' for key in
+           ['title','author','genre','narrator','series','volumeNumber','language']),cleared['metadata']
+print('explicit empty metadata overrides preserved')
 # Nur der Standard-Modus: Den Parallel-Modus deckt tests/verify_cli_matrix.py ab.
 for mode in ['standard']:
     output=root/f'{mode}.m4b'

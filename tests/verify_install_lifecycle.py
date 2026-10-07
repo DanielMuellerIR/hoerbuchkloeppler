@@ -48,6 +48,27 @@ elif name == "xcrun":
 elif name in ("codesign", "spctl", "ffmpeg", "mediainfo"):
     if name == "mediainfo" and step == "staging" and os.environ.get("HK_INSTALL_REPLACE_STEP") == "staging":
         replace_destination()
+    race = os.environ.get("HK_INSTALL_REPLACE_STEP")
+    if name == "mediainfo" and step == "staging" and race in ("staging_parent", "staging_entry"):
+        staged = next(p for p in target.parents if ".install-" in p.name and p.suffix == ".app")
+        if race == "staging_parent":
+            saved = destination.parent.with_name("InterferenceParentAfterStaging")
+            destination.parent.rename(saved)
+            destination.parent.mkdir()
+            shutil.copytree(saved / destination.name, destination)
+            shutil.copytree(saved / staged.name, destination.parent / staged.name)
+            staged = destination.parent / staged.name
+        else:
+            saved = staged.with_name("InterferenceStaged.app")
+            staged.rename(saved)
+            shutil.copytree(saved, staged)
+        (staged / "version.txt").write_text("foreign-staging")
+    if name == "mediainfo" and step == "destination" and race == "backup_cleanup":
+        backup = next(destination.parent.glob(".*.backup-*.app"))
+        saved = backup.with_name("InterferenceBackup.app")
+        backup.rename(saved)
+        shutil.copytree(saved, backup)
+        (backup / "version.txt").write_text("foreign-backup")
     if name == "codesign" and step == "destination" and os.environ.get("HK_INSTALL_REPLACE_STEP") == "destination":
         replace_destination()
         sys.exit(27)
@@ -57,7 +78,7 @@ elif name == "ditto":
     if "-c" in args:
         Path(args[-1]).write_bytes(b"Controlled fixture archive")
     elif os.environ.get("HK_INSTALL_FAIL") == "copy":
-        Path(args[-1]).mkdir()
+        Path(args[-1]).mkdir(exist_ok=True)
         (Path(args[-1]) / "partial.txt").write_text("Unvollständige Kopie")
         sys.exit(28)
     else:
@@ -98,7 +119,7 @@ def write_app(path, executable, version):
 
 def run_case(root, executable, name, *, existing=True, arguments=(), failure=None,
              processes=False, changed_identity=False, race=None, expected_backup=False,
-             initial_target="directory"):
+             initial_target="directory", preserved_staging=False, expected_backup_version="1.0"):
     case = root / name
     workspace = case / "workspace"
     workspace.mkdir(parents=True)
@@ -158,10 +179,14 @@ def run_case(root, executable, name, *, existing=True, arguments=(), failure=Non
                 process.terminate()
             process.wait(timeout=5)
     calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
-    assert not list(parent.glob(".*.install-*.app")), name
+    staging_entries = list(parent.glob(".*.install-*.app"))
+    if preserved_staging:
+        assert len(staging_entries) == 1 and (staging_entries[0] / "version.txt").read_text() == "foreign-staging", name
+    else:
+        assert not staging_entries, name
     backups = list(parent.glob(".*.backup-*.app"))
     if expected_backup:
-        assert len(backups) == 1 and (backups[0] / "version.txt").read_text() == "1.0", (name, backups)
+        assert len(backups) == 1 and (backups[0] / "version.txt").read_text() == expected_backup_version, (name, backups)
     else:
         assert not backups, (name, backups)
     version = ((destination / "version.txt").read_text() if destination.is_dir() else
@@ -230,6 +255,17 @@ def main():
             if step in ("build", "parent"):
                 assert not any(call["tool"] == "pgrep" for call in calls)
             print("PASS:", name, "zwischenzeitlich fremdes Ziel erhalten; nötiges altes Backup behalten")
+
+        for race in ["staging_parent", "staging_entry"]:
+            result, _, version, _ = run_case(root, executable, race, race=race, preserved_staging=True)
+            assert result.returncode != 0 and version == "1.0", (race, version, result.stderr)
+            assert "bleibt erhalten" in result.stderr
+            print("PASS:", race, "fremdes Staging bei Bereinigung erhalten")
+        result, _, version, _ = run_case(root, executable, "backup_cleanup", race="backup_cleanup",
+                                         expected_backup=True, expected_backup_version="foreign-backup")
+        assert result.returncode == 0 and version == "2.0", (version, result.stderr)
+        assert "Backup-/Staging-Rest" in result.stderr
+        print("PASS: fremdes Backup nach erfolgreicher Installation erhalten")
 
 
 if __name__ == "__main__":

@@ -36,7 +36,7 @@ import HoerbuchkloepplerCore
                 precondition(!session.selectCover(url: root.appendingPathComponent(name)))
                 precondition(session.coverImage!.size == size)
             }
-            for name in ["small.mp3", "small.m4a", "large.mp3", "later-valid.mp3"] {
+            for name in ["small.mp3", "small.m4a", "large.mp3", "later-valid.mp3", "oversized-first.mp3"] {
                 let data = await AudioFile.extractEmbeddedArtwork(from: root.appendingPathComponent(name))
                 let expected = try Data(contentsOf: root.appendingPathComponent(name == "large.mp3" ? "large.png" : "small.png"))
                 precondition(data == expected, "Cover fehlt oder Originalbytes verändert: \(name)")

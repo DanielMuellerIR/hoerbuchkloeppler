@@ -116,6 +116,54 @@ private actor ArtworkLoaderProbe {
 @Suite("ConversionSession – Cover-Auswahl")
 @MainActor
 struct CoverSelectionTests {
+    @Test("Entwertete Cover-Suche beginnt keine weitere alte Quelle")
+    func invalidatedArtworkStopsBeforeNextSource() async throws {
+        let urls = ["alt-a.m4a", "alt-b.m4a"].map { URL(fileURLWithPath: "/tmp/" + $0) }
+        let probe = ArtworkLoaderProbe(dataByURL: [:])
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        session.title = "Titel"; session.author = "Autor"
+        session.embeddedArtworkLoader = { url in await probe.load(url) }
+        await session.processIncomingFiles(urls.map { AudioFile(url: $0, startTime: 0, duration: 1, chapterTitle: $0.lastPathComponent) })
+        for _ in 0..<200 {
+            if await probe.snapshot().started { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await probe.snapshot().started)
+        session.removeCover()
+        await probe.releaseFirstCall()
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(await probe.snapshot().calls == [urls[0]])
+        #expect(!session.isPreparingArtwork)
+    }
+
+    @Test("Undo nach Leeren setzt eine unterbrochene Cover-Suche fort")
+    func undoRestartsUnfinishedArtwork() async throws {
+        let source = URL(fileURLWithPath: "/tmp/undo-cover.m4a")
+        let data = try onePixelPNGData()
+        let probe = ArtworkLoaderProbe(dataByURL: [source: data])
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        session.title = "Titel"; session.author = "Autor"
+        session.embeddedArtworkLoader = { url in await probe.load(url) }
+        await session.processIncomingFiles([AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Kapitel")])
+        for _ in 0..<200 {
+            if await probe.snapshot().started { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await probe.snapshot().started)
+        session.audioFiles.removeAll()
+        session.undoChapterEdit()
+        for _ in 0..<200 {
+            if session.embeddedCoverData != nil { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(session.audioFiles.count == 1)
+        #expect(session.embeddedCoverData == data)
+        #expect(await probe.snapshot().calls == [source, source])
+        await probe.releaseFirstCall()
+    }
+
     @Test("Manuell gewähltes Cover bleibt als unveränderlicher Inhalt erhalten")
     func selectedCoverKeepsContentSnapshot() throws {
         let directory = try conversionTestDirectory()
@@ -3054,6 +3102,46 @@ struct ConversionFileOwnershipTests {
         #expect(FileManager.default.fileExists(atPath: unowned.path))
         #expect(FileManager.default.fileExists(atPath: misleading.path))
         #expect(!FileManager.default.fileExists(atPath: orphan.path))
+    }
+
+    @Test("Temp-Sweep erhält fremde Recovery-Daten auch nach Ausgabe-Cleanup")
+    func tempSweepPreservesRecordedRecovery() throws {
+        let root = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cleanup = root.appendingPathComponent(".HB_Cleanup_987654-\(UUID().uuidString)")
+        try FFmpegWrapper.createOwnedTempDirectory(cleanup, ownerPID: 987654)
+        let entry = cleanup.appendingPathComponent("entry")
+        try Data("eigener Rest".utf8).write(to: entry)
+        let identity = try #require(FFmpegWrapper.fileSystemIdentity(at: entry, followSymlink: false))
+        try FFmpegWrapper.writeCleanupEntryIdentity(identity, in: cleanup)
+        try Data("Recovery".utf8).write(to: cleanup.appendingPathComponent("fremd.txt"))
+        try FileManager.default.setAttributes([.creationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: cleanup.path)
+        FFmpegWrapper.cleanupOutputQuarantines(in: root)
+        for _ in 0..<2 {
+            FFmpegWrapper.cleanupOldTempDirectories(in: root, now: Date(timeIntervalSince1970: 200_000))
+        }
+        let remains = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        #expect(remains.count == 1)
+        let remaining = try #require(remains.first)
+        #expect(try Data(contentsOf: remaining.appendingPathComponent("fremd.txt")) == Data("Recovery".utf8))
+        #expect(FileManager.default.fileExists(atPath: remaining.appendingPathComponent(".entry-identity.json").path))
+    }
+
+    @Test("Temp-Sweep erhält ungültige Cleanup-Nachweise und entfernt alte Lautheits-WAVs")
+    func tempSweepHonorsInvalidRecordsAndLegacyLoudness() throws {
+        let root = try conversionTestDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let invalid = root.appendingPathComponent(".HB_Cleanup_987654-\(UUID().uuidString)")
+        let loudness = root.appendingPathComponent("HB_Loudness_\(UUID().uuidString)")
+        for directory in [invalid, loudness] {
+            try FFmpegWrapper.createOwnedTempDirectory(directory, ownerPID: 987654)
+            try FileManager.default.setAttributes([.creationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: directory.path)
+        }
+        try Data("defekt".utf8).write(to: invalid.appendingPathComponent(".entry-identity.json"))
+        try Data("WAV-Rest".utf8).write(to: loudness.appendingPathComponent("audio.wav"))
+        FFmpegWrapper.cleanupOldTempDirectories(in: root, now: Date(timeIntervalSince1970: 200_000))
+        #expect(FileManager.default.fileExists(atPath: invalid.path))
+        #expect(!FileManager.default.fileExists(atPath: loudness.path))
     }
 
     @Test("Altlastenbereinigung erfasst markierte Cleanup-Quarantänen")

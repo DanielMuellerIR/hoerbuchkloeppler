@@ -215,6 +215,7 @@ extension ConversionSession {
         }
         restoringChapters = false
         updateHistoryAvailability()
+        if wasCleared, embeddedCoverData == nil { startArtworkSearch() }
     }
 
     public func undoChapterEdit() {

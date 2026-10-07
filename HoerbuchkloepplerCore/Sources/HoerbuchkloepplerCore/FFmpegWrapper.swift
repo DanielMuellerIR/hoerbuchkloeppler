@@ -1750,7 +1750,7 @@ public struct FFmpegWrapper {
 
 extension FFmpegWrapper {
     private static func analyzeBookLoudness(job: ConversionJob, session: ConversionSession, context: ConversionContext) throws -> LoudnessMeasurement {
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("HB_Loudness_\(UUID().uuidString)")
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("HB_Temp_\(UUID().uuidString)")
         try createOwnedTempDirectory(folder)
         context.registerTempDirectory(folder)
         defer { context.removeTempDirectory(folder) }
