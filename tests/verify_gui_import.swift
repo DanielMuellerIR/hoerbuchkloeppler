@@ -7,19 +7,19 @@ import HoerbuchkloepplerCore
 // Felder und der einmalige Übergang zur späten Antwort sind über den Lock gebunden.
 private final class ProviderGate: @unchecked Sendable {
     private let lock = NSLock()
-    private var completion: (@Sendable (Data?, Error?) -> Void)?
+    private var completion: (@Sendable (NSURL?, Error?) -> Void)?
     private var releasedURL: URL?
     private var cancellations = 0
 
     var cancellationCount: Int { lock.withLock { cancellations } }
 
-    func load(_ completion: @escaping @Sendable (Data?, Error?) -> Void) -> Progress {
+    func load(_ completion: @escaping @Sendable (NSURL?, Error?) -> Void) -> Progress {
         let url: URL? = lock.withLock {
             if let releasedURL { return releasedURL }
             self.completion = completion
             return nil as URL?
         }
-        if let url { completion(Data(url.absoluteString.utf8), nil) }
+        if let url { completion(url as NSURL, nil) }
         let progress = Progress(totalUnitCount: 1)
         progress.cancellationHandler = { [weak self] in
             guard let self else { return }
@@ -35,14 +35,15 @@ private final class ProviderGate: @unchecked Sendable {
             completion = nil
             return callback
         }
-        callback?(Data(url.absoluteString.utf8), nil)
+        callback?(url as NSURL, nil)
     }
 
     func provider() -> NSItemProvider {
         let provider = NSItemProvider()
-        provider.registerDataRepresentation(forTypeIdentifier: "public.file-url", visibility: .all) { [self] callback in
+        provider.registerObject(ofClass: NSURL.self, visibility: .all) { [self] callback in
             load(callback)
         }
+        precondition(provider.canLoadObject(ofClass: URL.self), "Provider muss als URL ladbar sein")
         return provider
     }
 }
