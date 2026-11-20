@@ -23,12 +23,23 @@ hoerbuchkloeppler_directory_identity() {
 }
 
 hoerbuchkloeppler_mount_is_active() {
-  local mount_dir="$1" mount_info
+  local mount_dir="$1" mount_info entry
   # Rückgabe: 0 aktiv, 1 sicher inaktiv, 2 Status unbekannt. Ein fehlgeschlagener
   # Statusabruf darf keine Löschung eines möglicherweise aktiven Mounts erlauben.
+  [[ "$mount_dir" == /* && "$mount_dir" != *$'\n'* ]] || return 2
   mount_info="$(hdiutil info)" || return 2
-  # grep muss alles lesen, damit unter pipefail kein SIGPIPE den Treffer ersetzt.
-  printf '%s\n' "$mount_info" | grep -F "$mount_dir" >/dev/null
+  # Gerätezeilen enthalten zwei tabgetrennte Felder vor dem vollständigen Pfad.
+  while IFS= read -r entry; do
+    case "$entry" in
+      /dev/disk*$'\t'*$'\t'*)
+        entry="${entry#*$'\t'}"
+        if [[ "${entry#*$'\t'}" == "$mount_dir" ]]; then
+          return 0
+        fi
+        ;;
+    esac
+  done <<< "$mount_info"
+  return 1
 }
 
 # Startzeit und vollständiges Kommando stammen bewusst aus EINEM ps-Snapshot.

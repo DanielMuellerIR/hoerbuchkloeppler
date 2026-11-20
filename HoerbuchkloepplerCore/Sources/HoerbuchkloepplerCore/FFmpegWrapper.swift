@@ -1728,9 +1728,12 @@ public struct FFmpegWrapper {
         extractTimesFromFFmpeg(output).last
     }
 
+    private static let progressTimePattern = try? NSRegularExpression(
+        pattern: #"time=([0-9]{2,}:[0-9]{2}:[0-9]{2}\.[0-9]{2})"#
+    )
+
     static func extractTimesFromFFmpeg(_ output: String) -> [String] {
-        let pattern = "time=(\\d{2}:\\d{2}:\\d{2}\\.\\d{2})"
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        guard let regex = progressTimePattern else { return [] }
         return regex.matches(
             in: output,
             range: NSRange(output.startIndex..., in: output)

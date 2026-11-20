@@ -51,7 +51,7 @@ elif name == "hdiutil":
         if failure in ("info", "info_detached") and "mount" in state:
             sys.exit(28)
         if state["active"]:
-            print(state["mount"])
+            print(f"/dev/disk99s1\tApple_HFS\t{state['mount']}")
     elif command == "detach":
         state["detaches"] += 1
         save()

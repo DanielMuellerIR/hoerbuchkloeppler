@@ -44,7 +44,6 @@
 # mit klarer Anleitung ab, statt zu blockieren.)
 
 set -euo pipefail
-cd "$(dirname "$0")"
 
 APP_NAME="Hörbuchklöppler"
 DEST="${HOERBUCHKLOEPPLER_INSTALL_DEST:-/Applications/${APP_NAME}.app}"
@@ -58,11 +57,12 @@ for arg in "$@"; do
     # signiertes und notarisiertes Bundle im Projekt-Root, ohne /Applications
     # anzufassen.
     --no-install) INSTALL=0 ;;
-    -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '/^# install\.sh/,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;;
     *) echo "Unbekannte Option: $arg" >&2
        echo "Aufruf: ./install.sh [--no-notarize] [--no-install] [--help]" >&2; exit 64 ;;
   esac
 done
+cd "$(dirname "$0")"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
 

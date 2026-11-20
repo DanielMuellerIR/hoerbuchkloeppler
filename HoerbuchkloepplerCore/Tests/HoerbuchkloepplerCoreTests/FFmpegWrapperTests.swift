@@ -1077,6 +1077,13 @@ struct ExtractTimeTests {
         #expect(FFmpegWrapper.extractTimeFromFFmpeg(line) == "00:01:23.45")
     }
 
+    @Test("Die Fortschrittszeit überschreitet die 100-Stunden-Grenze")
+    func progressBeyondTwoDigitHours() {
+        let parser = FFmpegProgressParser()
+        #expect(parser.consume(Data("size=N/A time=99:59:59.99\rtime=100:00".utf8)) == 359_999.99)
+        #expect(parser.consume(Data(":00.05 bitrate=N/A\r".utf8)) == 360_000.05)
+    }
+
     @Test("Zeile ohne time= → nil")
     func noTime() {
         #expect(FFmpegWrapper.extractTimeFromFFmpeg("frame= 100 fps=25") == nil)

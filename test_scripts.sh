@@ -45,6 +45,35 @@ assert_equal() {
   fi
 }
 
+repo_name="${PWD##*/}"
+install_help="$(cd .. && bash "./$repo_name/install.sh" --help)"
+[[ "$install_help" == "install.sh — Hörbuchklöppler"* && "$install_help" == *"./install.sh --no-install"* ]] \
+  || { echo "Fehler: Installationshilfe fehlt oder ist unvollständig." >&2; exit 1; }
+[[ "$install_help" != *"shellcheck source="* ]] \
+  || { echo "Fehler: Installationshilfe enthält interne Skriptkommentare." >&2; exit 1; }
+
+mount_path='/private/tmp/Test mit Leerzeichen\und Backslash'
+other_mount="${mount_path}-2"
+hdiutil() {
+  assert_equal "$*" "info" "Mount-Prüfung muss das Inventar abrufen"
+  printf 'image-path      : %s\n/dev/disk99\tGUID_partition_scheme\t\n/dev/disk99s1\tApple_HFS\t%s\n' \
+    "$mount_path" "$other_mount"
+  return "$inventory_status"
+}
+
+assert_mount_state() {
+  local status=0
+  hoerbuchkloeppler_mount_is_active "$1" || status=$?
+  assert_equal "$status" "$2" "$3"
+}
+
+inventory_status=0
+assert_mount_state "$other_mount" 0 "Exakter Mount-Pfad wurde nicht gefunden"
+assert_mount_state "$mount_path" 1 "Image-Pfad oder längerer Mount-Pfad wurde als Treffer gewertet"
+inventory_status=27
+assert_mount_state "$other_mount" 2 "Fehlgeschlagenes Inventar wurde trotz Teilausgabe akzeptiert"
+unset -f hdiutil
+
 printf '1.4\n' > "$valid_two"
 printf '1.4.2\n' > "$valid_three"
 : > "$invalid_empty"
