@@ -47,3 +47,9 @@ public struct ConversionRunState: Sendable {
         succeeded = false
     }
 }
+
+public struct SegmentStatus: Equatable, Sendable {
+    public let filename: String
+    public var progress: Double
+    public init(filename: String, progress: Double) { self.filename = filename; self.progress = progress }
+}

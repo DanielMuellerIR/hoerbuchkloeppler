@@ -1,37 +1,59 @@
 import Foundation
 
-/// Ein Hash gilt nur für denselben Datei-Snapshot. GUI-Vorbereitung liest große
-/// Quellen außerhalb des Main Actors; der Start prüft danach nur den Snapshot.
+/// Ein Hash gilt nur für denselben Datei-Snapshot.
 final class ProjectFingerprintStore: @unchecked Sendable {
-    private let lock = NSLock()
-    private var entries: [URL: (FileSystemIdentity, String)] = [:]
-
-    func fingerprint(_ url: URL) throws -> String {
-        guard let identity = FFmpegWrapper.fileSystemIdentity(at: url, followSymlink: true) else {
-            throw ProjectError.invalid("Quelle fehlt: \(url.lastPathComponent)")
-        }
-        // Nur eine Inhaltsänderung entwertet den Hash. Ein Finder-Tag oder ein
-        // `chmod` hebt allein die Statuszeit an und darf keinen erneuten
-        // Lesevorgang über die ganze Datei auslösen.
-        if let cached = lock.withLock({ entries[url] }), cached.0.matchesContentSnapshot(identity) { return cached.1 }
-        let hash = try ProjectSource.fingerprint(url)
-        // Wie überall: Nur eine Inhaltsänderung entwertet den Hash. Mit dem
-        // strengen `==` warf schon ein Finder-Tag während des Lesens.
-        guard FFmpegWrapper.fileSystemIdentity(at: url, followSymlink: true)?
-            .matchesContentSnapshot(identity) == true else {
-            throw ProjectError.invalid("Quelle wurde während der Prüfung verändert.")
-        }
-        lock.withLock { entries[url] = (identity, hash) }
-        return hash
+    enum Verification {
+        case unchanged(FileSystemIdentity)
+        case changed, unreadable
     }
 
-    /// Meldet, ob sich der Datei-INHALT seit dem gespeicherten Hash geändert
-    /// haben kann. Reine Metadaten-Operationen zählen nicht: Sonst bliebe ein
-    /// Finder-Tag als „Quelle wurde verändert" stehen, ohne dass je neu
-    /// gehasht und der Fehlalarm damit aufgelöst würde.
-    func changedSinceLastRead(_ url: URL) -> Bool {
-        guard let cached = lock.withLock({ entries[url] }) else { return false }
-        guard let current = FFmpegWrapper.fileSystemIdentity(at: url, followSymlink: true) else { return true }
-        return !cached.0.matchesContentSnapshot(current)
+    enum ReadPolicy {
+        case cachedOnly, synchronous, verifyCurrent
+    }
+
+    private let lock = NSLock()
+    private var entries: [URL: (identity: FileSystemIdentity, sha256: String)] = [:]
+
+    func fingerprint(_ url: URL) throws -> String {
+        guard let identity = readableIdentity(at: url) else {
+            throw ProjectError.invalid("Quelle fehlt: \(url.lastPathComponent)")
+        }
+        let key = url.standardizedFileURL
+        if let cached = lock.withLock({ entries[key] }), cached.identity == identity {
+            return cached.sha256
+        }
+        return try readFingerprint(at: url, identity: identity)
+    }
+
+    func verify(_ url: URL, expectedSHA256: String, policy: ReadPolicy) -> Verification {
+        guard let identity = readableIdentity(at: url) else { return .unreadable }
+        let key = url.standardizedFileURL
+        let cached = lock.withLock { entries[key] }
+        if let cached, cached.identity == identity {
+            return cached.sha256 == expectedSHA256 ? .unchanged(identity) : .changed
+        }
+        // Ungeprüfte Quellen dürfen einen synchronen Start nicht passieren.
+        if policy == .cachedOnly { return cached == nil ? .unreadable : .changed }
+        // Eine wiederhergestellte mtime kann einen gleich großen Inhaltswechsel
+        // verdecken. Nur ein erneuter Hash unterscheidet ihn von einem Finder-Tag.
+        if policy == .synchronous, let cached, !cached.identity.matchesContentSnapshot(identity) { return .changed }
+        guard let sha256 = try? readFingerprint(at: url, identity: identity) else { return .unreadable }
+        return sha256 == expectedSHA256 ? .unchanged(identity) : .changed
+    }
+
+    private func readFingerprint(at url: URL, identity: FileSystemIdentity) throws -> String {
+        let fingerprint = try ProjectSource.fingerprintSnapshot(url)
+        guard fingerprint.identity == identity, readableIdentity(at: url) == identity else {
+            throw ProjectError.invalid("Quelle wurde während der Prüfung verändert.")
+        }
+        let key = url.standardizedFileURL
+        lock.withLock { entries[key] = fingerprint }
+        return fingerprint.sha256
+    }
+
+    private func readableIdentity(at url: URL) -> FileSystemIdentity? {
+        guard let identity = FFmpegWrapper.fileSystemIdentity(at: url, followSymlink: true),
+              FileManager.default.isReadableFile(atPath: url.path) else { return nil }
+        return identity
     }
 }

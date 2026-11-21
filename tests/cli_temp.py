@@ -1,11 +1,34 @@
-"""Eigene Core-Arbeitsordner beobachten, auch wenn Foundation TMPDIR ignoriert."""
+"""Testarbeitsordner anlegen und eigene Core-Arbeitsordner beobachten."""
 
-from pathlib import Path
+import shutil
 import subprocess
+import sys
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
+
+
+@contextmanager
+def test_workspace(prefix, keep=False):
+    directory = Path(tempfile.mkdtemp(prefix=prefix))
+    try:
+        yield directory
+    except BaseException:
+        print(f"Diagnosedaten: {directory}", file=sys.stderr)
+        raise
+    else:
+        if keep:
+            print(f"Testdaten erhalten: {directory}")
+        else:
+            shutil.rmtree(directory)
 
 
 def system_temporary_directory():
-    return Path(subprocess.check_output(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], text=True).strip())
+    return Path(
+        subprocess.check_output(
+            ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], text=True
+        ).strip()
+    )
 
 
 def owned_temp_directories(directory, pid):

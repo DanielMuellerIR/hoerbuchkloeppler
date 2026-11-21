@@ -3,8 +3,6 @@ import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 import AppKit
-import AVFoundation
-import Combine
 
 struct ContentView: View {
     @StateObject private var flow = OutputCoordinator()
@@ -12,6 +10,7 @@ struct ContentView: View {
     @StateObject private var preview = ChapterPreviewPlayer()
     @StateObject private var undoRouter = ChapterUndoRouter()
     @StateObject private var documentOpen = DocumentOpenCoordinator()
+    @StateObject private var coverDrop = CoverDropCoordinator()
     @Environment(\.openWindow) private var openWindow
     private static let sidebarContentWidth: CGFloat = 250
     private static let sidebarPadding: CGFloat = 16
@@ -19,11 +18,9 @@ struct ContentView: View {
     @State private var renamePrefix = "Kapitel"
     @State private var projectError: String?
     @State private var showingSettings = false
-    @State private var ffmpegStatus = "Prüfe..."
-    @State private var miStatus = "Prüfe..."
-    @State private var showingToolErrorAlert = false
+    @State private var toolStatus = ToolStatus()
+    @State private var toolError: String?
     @State private var cliHandoffError: String?
-    @State private var coverError: String?
     @State private var providersToRetry: [NSItemProvider]?
     /// Einmal aufgelöster CLI-Pfad. Die Auflösung durchsucht den gesamten PATH
     /// mit je einem Dateisystemzugriff pro Eintrag; im View-Body ausgewertet
@@ -31,38 +28,45 @@ struct ContentView: View {
     /// würde bei einem Netz-Mount im PATH die Oberfläche blockieren.
     @State private var kloepplerURL: URL?
 
-    func checkTools() {
+    private func checkTools() async {
+        toolStatus = ToolStatus()
         session.logCurrentSettings()
-        Task {
-            let (ffmpeg, mediaInfo, kloeppler) = await Task.detached {
-                FFmpegWrapper.cleanupOldTempDirectories()
-                return (
-                    FFmpegWrapper.toolVersion(name: "ffmpeg"),
-                    FFmpegWrapper.toolVersion(name: "mediainfo"),
-                    Self.resolveKloepplerURL()
-                )
-            }.value
-            kloepplerURL = kloeppler
-            if let (url, version) = ffmpeg {
-                ffmpegStatus = "OK (\(version))"
-                session.addLog("🛠️ FFmpeg gefunden an \(url.path) (Version: \(version))")
-            } else {
-                ffmpegStatus = "Nicht gefunden"
-                session.addLog("❌ FFmpeg NICHT gefunden!")
-            }
-            if let (url, version) = mediaInfo {
-                miStatus = "OK (\(version))"
-                session.addLog("🛠️ MediaInfo gefunden an \(url.path) (Version: \(version))")
-            } else {
-                miStatus = "Nicht gefunden"
-                session.addLog("❌ MediaInfo NICHT gefunden!")
-            }
+        let (ffmpeg, mediaInfo, kloeppler) = await Task.detached {
+            FFmpegWrapper.cleanupOldTempDirectories()
+            return (
+                FFmpegWrapper.toolVersion(name: "ffmpeg"),
+                FFmpegWrapper.toolVersion(name: "mediainfo"),
+                Self.resolveKloepplerURL()
+            )
+        }.value
+        guard !Task.isCancelled else { return }
+        kloepplerURL = kloeppler
+        toolStatus = ToolStatus(
+            ffmpeg: reportTool("FFmpeg", result: ffmpeg),
+            mediaInfo: reportTool("MediaInfo", result: mediaInfo)
+        )
+    }
+
+    private func reportTool(_ name: String, result: (url: URL, version: String)?) -> ToolStatus.Availability {
+        if let (url, version) = result {
+            session.addLog("\(name) gefunden an \(url.path) (Version: \(version))")
+            return .available(version: version)
         }
+        session.addLog("\(name) nicht verfügbar.")
+        return .unavailable
     }
 
     private func saveAndExport() {
-        guard ffmpegStatus.contains("OK"), miStatus.contains("OK") else { showingToolErrorAlert = true; return }
-        flow.selectOutput(session: session)
+        switch toolStatus.exportAvailability {
+        case .checking: return
+        case .available: flow.selectOutput(session: session)
+        case .unavailable(let message): toolError = message
+        }
+    }
+
+    private func toolStatusText(_ name: String, availability: ToolStatus.Availability) -> some View {
+        Text("\(name): \(availability.text)")
+            .foregroundColor(availability == .unavailable ? .red : .secondary)
     }
 
     var body: some View {
@@ -73,16 +77,9 @@ struct ContentView: View {
                     ScrollView {
                         VStack(spacing: 20) {
                             VStack {
-                                CoverView(image: $session.coverImage, onDropped: { url in
-                                    // `selectCover` meldet über den Rückgabewert, dass die
-                                    // Datei kein lesbares Bild ist. Verworfen sah der Drop
-                                    // wie ein Erfolg aus, und das Buch blieb ohne Cover.
-                                    if !session.selectCover(url: url) {
-                                        coverError = "Diese Datei ist kein lesbares Bild: \(url.lastPathComponent)"
-                                    }
-                                }, onDropFailed: { message in
-                                    coverError = message
-                                })
+                                CoverView(image: session.coverImage) { provider in
+                                    coverDrop.load(provider, session: session)
+                                }
                                     .frame(width: 180, height: 180).shadow(radius: 5)
                                 if session.coverImage != nil || session.coverPath != nil {
                                     Button(action: { session.removeCover() }) {
@@ -111,8 +108,8 @@ struct ContentView: View {
                             }.buttonStyle(.bordered).padding(.bottom, 10)
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("System-Check").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
-                                Text("FFmpeg: \(ffmpegStatus)").foregroundColor(ffmpegStatus.contains("OK") ? .secondary : .red)
-                                Text("MediaInfo: \(miStatus)").foregroundColor(miStatus.contains("OK") ? .secondary : .red)
+                                toolStatusText("FFmpeg", availability: toolStatus.ffmpeg)
+                                toolStatusText("MediaInfo", availability: toolStatus.mediaInfo)
                             }
                             .font(.system(size: 10, design: .monospaced))
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -200,16 +197,25 @@ struct ContentView: View {
 
                     VStack {
                         Spacer()
-                        Button(action: saveAndExport) {
-                            Text("Hörbuch erzeugen").frame(width: 200, height: 35)
+                        if flow.isCheckingSources {
+                            HStack(spacing: 12) {
+                                ProgressView("Projektquellen werden geprüft …").controlSize(.small)
+                                Button("Abbrechen") { flow.cancelStart() }
+                            }
+                            .frame(height: 47)
+                        } else {
+                            Button(action: saveAndExport) {
+                                Text("Hörbuch erzeugen").frame(width: 200, height: 35)
+                            }
+                            .keyboardShortcut("r", modifiers: .command).buttonStyle(.borderedProminent).controlSize(.large)
+                            .disabled(
+                                session.isConverting
+                                    || session.isImporting
+                                    || session.audioFiles.isEmpty
+                                    || session.isPreparingArtwork
+                                    || toolStatus.exportAvailability == .checking
+                            )
                         }
-                        .keyboardShortcut("r", modifiers: .command).buttonStyle(.borderedProminent).controlSize(.large)
-                        .disabled(
-                            session.isConverting
-                                || session.isImporting
-                                || session.audioFiles.isEmpty
-                                || session.isPreparingArtwork
-                        )
                         Spacer()
                         
                         HStack {
@@ -249,9 +255,11 @@ struct ContentView: View {
                     }
             }
         }
-        .alert("Tools fehlen", isPresented: $showingToolErrorAlert) { Button("OK", role: .cancel) { } } message: {
-            Text("Für die Konvertierung werden FFmpeg und MediaInfo benötigt.\n\nBitte installieren Sie Homebrew und führen Sie im Terminal aus:\nbrew install ffmpeg mediainfo")
-        }
+        .errorAlert(
+            "Werkzeuge nicht verfügbar",
+            message: $toolError,
+            fallback: "FFmpeg und MediaInfo werden für den Export benötigt."
+        )
         .errorAlert(
             "Import nicht übernommen",
             message: $session.importErrorMessage,
@@ -269,7 +277,7 @@ struct ContentView: View {
         )
         .errorAlert(
             "Cover nicht übernommen",
-            message: $coverError,
+            message: $coverDrop.errorMessage,
             fallback: "Die Cover-Datei ließ sich nicht laden."
         )
         .errorAlert(
@@ -304,7 +312,9 @@ struct ContentView: View {
         } message: { url in
             Text("Das aktuelle Hörbuch wird durch \(url.lastPathComponent) ersetzt. Nicht gespeicherte Änderungen gehen dabei verloren.")
         }
-        .onAppear { checkTools() }
+        .task { await checkTools() }
+        .onDisappear { coverDrop.cancel() }
+        .onDisappear { flow.cancelStart() }
         .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         .frame(minWidth: 850, minHeight: 650)
         .sheet(isPresented: $showingSettings) { SettingsView(session: session, isPresented: $showingSettings) }
@@ -549,14 +559,10 @@ struct ContentView: View {
     }
 }
 
-struct CoverView: View {
-    @Binding var image: NSImage?
-    /// Übernimmt eine gedroppte Bilddatei. Läuft über `session.selectCover(url:)`,
-    /// damit das Bild auf max. 2000 px skaliert und ein zuvor gefundenes
-    /// eingebettetes Cover (`embeddedCoverData`) verworfen wird — sonst gewänne
-    /// beim Kodieren das alte eingebettete Artwork statt des gedroppten Bilds.
-    var onDropped: (URL) -> Void
-    var onDropFailed: (String) -> Void
+private struct CoverView: View {
+    var image: NSImage?
+    var onFileDrop: (NSItemProvider) -> Void
+
     var body: some View {
         ZStack {
             if let img = image { Image(nsImage: img).resizable().aspectRatio(contentMode: .fill) }
@@ -564,19 +570,8 @@ struct CoverView: View {
         }
         .frame(width: 180, height: 180).cornerRadius(12).clipped()
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-            if let provider = providers.first {
-                _ = provider.loadObject(ofClass: URL.self) { url, error in
-                    Task { @MainActor in
-                        if let url {
-                            self.onDropped(url)
-                        } else if let error {
-                            self.onDropFailed("Cover-Datei konnte nicht geladen werden: \(error.localizedDescription)")
-                        } else {
-                            self.onDropFailed("Der Datei-Drop lieferte keine lesbare Cover-Datei.")
-                        }
-                    }
-                }
-            }
+            guard let provider = providers.first else { return false }
+            onFileDrop(provider)
             return true
         }
     }

@@ -643,6 +643,37 @@ public struct FFmpegWrapper {
         convert(session: session, plan: plan, measureBookLoudness: nil)
     }
 
+    @MainActor
+    public static func convertAsync(session: ConversionSession, plan: ConversionPlan) async -> ConversionStartResult {
+        let settings = session.settings
+        guard planMatchesSession(plan, session: session, requireCurrentGrouping: true), !session.isConverting else {
+            return .rejected("Das Hörbuch wurde geändert oder wird bereits bearbeitet. Bitte erneut starten.")
+        }
+        do { try await session.verifyProjectSources() }
+        catch { return .rejected(error.localizedDescription) }
+        guard settings == session.settings else {
+            return .rejected("Das Hörbuch wurde während der Prüfung verändert. Bitte erneut starten.")
+        }
+        return startVerifiedConversion(session: session, plan: plan)
+    }
+
+    /// Startet nach `verifyProjectSources()` oder ohne Projektquellen.
+    /// Eine inzwischen veränderte oder ungeprüfte Quelle wird abgewiesen.
+    @MainActor
+    @discardableResult
+    public static func startVerifiedConversion(session: ConversionSession, plan: ConversionPlan) -> ConversionStartResult {
+        convert(session: session, plan: plan, measureBookLoudness: nil, cachedProjectSourcesOnly: true)
+    }
+
+    @MainActor
+    private static func planMatchesSession(_ plan: ConversionPlan, session: ConversionSession, requireCurrentGrouping: Bool) -> Bool {
+        guard !session.isImporting else { return false }
+        if requireCurrentGrouping {
+            return plan.groups == splitAudioFilesIfNeeded(session.audioFiles, maxDurationHours: session.settings.maxDurationHours)
+        }
+        return plan.groups.flatMap { $0 } == session.audioFiles
+    }
+
     /// `measureBookLoudness` ist eine Testnaht: Der echte Messpass startet
     /// einen vollständigen Dekodierlauf über das ganze Buch und lässt sich
     /// sonst weder zum Fehlschlag noch zum Abbruch bringen.
@@ -651,14 +682,22 @@ public struct FFmpegWrapper {
     static func convert(
         session: ConversionSession,
         plan: ConversionPlan,
-        measureBookLoudness: (@Sendable () throws -> LoudnessMeasurement)?
+        measureBookLoudness: (@Sendable () throws -> LoudnessMeasurement)?,
+        cachedProjectSourcesOnly: Bool = false
     ) -> ConversionStartResult {
+        guard !Task.isCancelled else { return .rejected("Der Start wurde abgebrochen.") }
+        guard !session.isConverting else { return .rejected("Es läuft bereits eine Konvertierung.") }
+        guard planMatchesSession(plan, session: session, requireCurrentGrouping: cachedProjectSourcesOnly) else {
+            return .rejected("Das Hörbuch wurde geändert oder wird bereits bearbeitet. Bitte erneut starten.")
+        }
         let outputLanguage: String
         do {
             outputLanguage = try BookMetadata.outputLanguage(session.language)
             try BookMetadata.validateVolumeNumber(session.volumeNumber)
         } catch { return .rejected(error.localizedDescription) }
-        session.refreshProjectSourceIssues()
+        do {
+            try session.refreshProjectSourceIssues(policy: cachedProjectSourcesOnly ? .cachedOnly : .synchronous, plan: plan)
+        } catch { return .rejected("Der Start wurde abgebrochen.") }
         guard session.projectSourceIssues.isEmpty else {
             return .rejected("Projektquellen fehlen oder wurden verändert.")
         }
@@ -685,6 +724,7 @@ public struct FFmpegWrapper {
             )
         }
         let plannedFiles = plan.groups.flatMap { $0 }
+        guard !Task.isCancelled else { return .rejected("Der Start wurde abgebrochen.") }
         let context = session.beginConversionRun()
         let job = ConversionJob(
             plan: plan,

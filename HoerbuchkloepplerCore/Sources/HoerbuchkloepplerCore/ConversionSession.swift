@@ -1,7 +1,5 @@
-import SwiftUI
 import Foundation
 import Combine
-import AVFoundation
 import AppKit
 
 public struct TagCandidate: Identifiable, Equatable, Sendable {
@@ -12,183 +10,10 @@ public struct TagCandidate: Identifiable, Equatable, Sendable {
     public init(type: String, key: String, value: String) { self.type = type; self.key = key; self.value = value }
 }
 
-public enum LogType: Sendable {
-    case info      // Standardtext (Primary Color)
-    case highlight // Pfade, Tool-Outputs, Befehle (AccentColor)
-    case dim       // Light gray (MediaInfo output)
-}
-
-public struct LogEntry: Identifiable, Sendable {
-    public let id = UUID()
-    public let type: LogType
-    public let message: String
-    public let date: Date
-    public init(type: LogType, message: String, date: Date) { self.type = type; self.message = message; self.date = date }
-}
-
-public struct SegmentStatus: Equatable, Sendable {
-    public let filename: String
-    public var progress: Double
-    public init(filename: String, progress: Double) { self.filename = filename; self.progress = progress }
-}
-
-public struct ImportToken: Equatable, Sendable {
-    fileprivate let generation: UUID
-    fileprivate let coverRevision: UInt
-    fileprivate let allowsSelectionUI: Bool
-}
-
 struct MetadataResolution: Equatable, Sendable {
     let title: String
     let author: String
     let shouldShowSelection: Bool
-}
-
-/// Eine gefundene Datei mit sichtbarem Quellpfad und physischer Lese-URL.
-///
-/// `source` ist der Pfad, unter dem der Nutzer die Datei sieht. `resolved` ist
-/// die reguläre Datei, die AVFoundation und ffmpeg öffnen. Bei gewöhnlichen
-/// Dateien sind beide gleich; bei einem Symlink bleibt so dessen bewusst
-/// gewählter Name erhalten, ohne den Link selbst an Audio-APIs zu übergeben.
-public struct FoundFile: Equatable, Sendable {
-    public enum Kind: Equatable, Sendable {
-        case audio
-        case image
-        case unsupported
-    }
-
-    private static let audioExtensions: Set<String> = [
-        "mp3", "m4a", "wav", "flac", "m4b", "mp4"
-    ]
-    private static let imageExtensions: Set<String> = ["jpg", "jpeg", "png"]
-    private static let chapterContainerExtensions: Set<String> = ["m4b", "mp4"]
-
-    public let source: URL
-    public let resolved: URL
-
-    public init(source: URL, resolved: URL) {
-        self.source = source
-        self.resolved = resolved
-    }
-
-    public var readURL: URL { resolved }
-
-    /// Der Typ darf am sichtbaren Namen oder am Ziel erkennbar sein. Ob eine
-    /// Datei Kapitelcontainer ist, entscheidet dagegen ausschließlich die
-    /// wirklich gelesene Datei.
-    public var kind: Kind {
-        let extensions = [source.pathExtension, resolved.pathExtension]
-            .map { $0.lowercased() }
-        if extensions.contains(where: Self.audioExtensions.contains) { return .audio }
-        if extensions.contains(where: Self.imageExtensions.contains) { return .image }
-        return .unsupported
-    }
-
-    public var isChapterContainer: Bool {
-        Self.chapterContainerExtensions.contains(resolved.pathExtension.lowercased())
-    }
-
-    var isSymbolicLink: Bool {
-        source.standardizedFileURL != resolved.standardizedFileURL
-    }
-}
-
-public struct AudioImportFailure: Equatable, Sendable {
-    public enum Reason: Equatable, Sendable {
-        case unreadableDuration
-        case noAudioTrack
-        case chapterAnalysisTimedOut
-        case analysisFailed
-        case sourceChanged
-        case providerLoadFailed(String?)
-    }
-
-    public let sourceURL: URL
-    public let reason: Reason
-
-    public init(sourceURL: URL, reason: Reason) {
-        self.sourceURL = sourceURL
-        self.reason = reason
-    }
-
-    public var message: String {
-        switch reason {
-        case .unreadableDuration:
-            return "Keine positive Audiodauer lesbar"
-        case .noAudioTrack:
-            return "Kein lesbarer Audio-Stream enthalten"
-        case .chapterAnalysisTimedOut:
-            return "Kapitelanalyse hat das Zeitlimit überschritten"
-        case .analysisFailed:
-            return "Audioanalyse fehlgeschlagen"
-        case .sourceChanged:
-            return "Quelldatei wurde während der Analyse verändert"
-        case .providerLoadFailed(let details):
-            if let details, !details.isEmpty {
-                return "Datei-URL konnte nicht geladen werden (\(details))"
-            }
-            return "Datei-URL konnte nicht geladen werden"
-        }
-    }
-
-    public var logMessage: String {
-        "❌ \(sourceURL.lastPathComponent): \(message)."
-    }
-}
-
-/// Typisiertes Ergebnis genau einer Eingangsdatei. Ein absichtlicher Skip
-/// (beispielsweise ein gedropptes Bild) bleibt von Analysefehler und Abbruch
-/// unterscheidbar, damit ein Mehrdateien-Import atomar entschieden werden kann.
-public enum AudioLoadResult: Sendable {
-    case success(files: [AudioFile], warnings: [String])
-    case skipped
-    case failure(AudioImportFailure)
-    case cancelled
-
-    public var files: [AudioFile] {
-        guard case .success(let files, _) = self else { return [] }
-        return files
-    }
-
-    public var warnings: [String] {
-        guard case .success(_, let warnings) = self else { return [] }
-        return warnings
-    }
-
-    public var failures: [AudioImportFailure] {
-        guard case .failure(let failure) = self else { return [] }
-        return [failure]
-    }
-
-    public var wasCancelled: Bool {
-        if case .cancelled = self { return true }
-        return false
-    }
-}
-
-struct FileDiscoveryResult: Sendable {
-    let files: [FoundFile]
-    let failureDescription: String?
-}
-
-/// `DirectoryEnumerator` darf seinen Fehler-Handler nebenläufig aufrufen. Der
-/// Recorder hält deshalb nur den ersten Fehler hinter einer kleinen Sperre fest.
-private final class DirectoryScanFailureRecorder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var firstFailure: String?
-
-    func record(url: URL, error: Error) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard firstFailure == nil else { return }
-        firstFailure = "\(url.path): \(error.localizedDescription)"
-    }
-
-    func snapshot() -> String? {
-        lock.lock()
-        defer { lock.unlock() }
-        return firstFailure
-    }
 }
 
 /// Besitzt nur die externen Prozesse des Imports (Kapitel- und Metadatenanalyse).
@@ -410,7 +235,7 @@ private final class ConversionEventQueue: @unchecked Sendable {
 @MainActor
 public final class ConversionSession: ObservableObject, Identifiable {
     public let id = UUID()
-    public nonisolated let importService = AudioImportService()
+    nonisolated let importService = AudioImportService()
     @Published public var settings: AudioSettings { didSet { importService.workerLimit = settings.importWorkerLimit } }
     public init(settings: AudioSettings = SettingsManager.shared.loadSettings()) {
         self.settings = settings.normalized()
@@ -436,6 +261,10 @@ public final class ConversionSession: ObservableObject, Identifiable {
     @Published public var coverImage: NSImage?
     @Published public var coverPath: String?
     @Published public var isPreparingArtwork = false
+    /// Meldet bewusste Cover-Änderungen und das Ersetzen des Buchzustands.
+    public var coverSelectionChanges: AnyPublisher<Void, Never> {
+        coverSelectionDidChange.eraseToAnyPublisher()
+    }
     /// Rohdaten eines eingebetteten Covers (aus einer Audiodatei extrahiert), das
     /// NICHT als separate Bilddatei vorliegt. Wird vor der Kodierung in eine
     /// temporäre Datei geschrieben, damit ffmpeg es einbetten kann — sonst ginge
@@ -445,36 +274,23 @@ public final class ConversionSession: ObservableObject, Identifiable {
     private var artworkRequest = UUID()
     private var artworkTask: Task<Void, Never>?
     private var coverRevision: UInt = 0
+    private let coverSelectionDidChange = PassthroughSubject<Void, Never>()
     /// Austauschpunkt für deterministische Race-Tests; produktiv liest immer
     /// die begrenzte Extraktion aus `AudioFile`.
     var embeddedArtworkLoader: @Sendable (URL) async -> Data? = { url in
         await AudioFile.extractEmbeddedArtwork(from: url)
     }
     public internal(set) var isCoverSuppressed = false
-    private var pendingImportOperations = 0
+    private var pendingImport: PendingImportBatch?
     @Published public private(set) var isImporting = false
     @Published public private(set) var importCompletedItems = 0
     @Published public private(set) var importTotalItems = 0
     @Published public private(set) var importDetail = ""
-    public var canCancelImport: Bool { isImporting && pendingImportOperations > 0 }
+    public var canCancelImport: Bool { isImporting && (pendingImport?.remainingItems ?? 0) > 0 }
     @Published public var importErrorMessage: String?
     public private(set) var lastImportFailures: [AudioImportFailure] = []
-    private var pendingImportAudioFiles: [AudioFile] = []
-    private var pendingImportImageURLs: [URL] = []
-    private var pendingImportArtwork: Data?
-    private var pendingImportWarnings: [String] = []
-    private var pendingImportFailures: [AudioImportFailure] = []
-    private var pendingImportWasCancelled = false
-    private var pendingImportRequiresArtworkSearch = false
-    /// Der CLI-`--file`-Pfad sucht das eingebettete Cover synchron im Import
-    /// (siehe `stageImportArtwork`). Dann darf `finishImport` keine zweite,
-    /// asynchrone Suche starten, deren Ergebnis die CLI nicht abwarten würde.
-    private var pendingImportArtworkAnalyzed = false
-    private var pendingImportShouldResumeArtworkSearch = false
-    private var pendingImportFolderURL: URL?
-    private var pendingImportCanRepresentFolder = false
     private var cliSourceFolderURL: URL?
-    private var cliRepresentedFileIDs = Set<UUID>()
+    private var cliRepresentedFileIDs: [UUID] = []
     private var cliRepresentedChapterTitles: [UUID: String] = [:]
     private nonisolated let preparationCoordinator = ToolProcessCoordinator()
     private nonisolated let mediaInfoCoordinator = ToolProcessCoordinator()
@@ -550,10 +366,16 @@ public final class ConversionSession: ObservableObject, Identifiable {
         // darf den Task nicht beim Nachfolger registrieren, der ihn bei einem
         // späteren Abbruch für seine eigene Arbeit hielte.
         let context = currentPreparationContext()
-        await awaitRegisteredTask(
-            Task { @MainActor in await operation() },
-            in: context
-        )
+        let task = Task { @MainActor in
+            guard !Task.isCancelled, context?.isCancelled != true else { return }
+            await operation()
+        }
+        await withTaskCancellationHandler {
+            await awaitRegisteredTask(task, in: context)
+        } onCancel: {
+            task.cancel()
+            context?.cancel()
+        }
     }
 
     /// Gemeinsamer Registrierungsvertrag beider Task-Einstiege: den Task beim
@@ -579,23 +401,28 @@ public final class ConversionSession: ObservableObject, Identifiable {
         context.unregisterTaskCancellation(registration)
     }
 
-    /// GUI-Variante mit Importbindung. Ein verspätet liefernder Provider eines
-    /// alten Drops darf seine Analyse nicht im Prozess-Context des neueren Drops
-    /// starten. Der Token wird deshalb vor der Registrierung und nochmals im
-    /// eigentlichen Main-Actor-Task geprüft.
-    public func runImportTask(
+    /// Der Token wird vor der Registrierung und vor dem Taskstart geprüft.
+    /// Ein verspäteter Provider darf keinen Kontext des Folgeimports nutzen.
+    func runImportTask(
         _ token: ImportToken,
         operation: @escaping @MainActor @Sendable () async -> Void
     ) async {
-        guard isCurrentImport(token) else { return }
+        guard hasPendingImport(token) else { return }
         let context = currentPreparationContext()
-        await awaitRegisteredTask(
-            Task { @MainActor [weak self] in
-                guard let self, self.isCurrentImport(token) else { return }
-                await operation()
-            },
-            in: context
-        )
+        let task = Task { @MainActor [weak self] in
+            guard let self, self.hasPendingImport(token),
+                  !Task.isCancelled, context?.isCancelled != true else { return }
+            await operation()
+        }
+        await withTaskCancellationHandler {
+            await awaitRegisteredTask(task, in: context)
+        } onCancel: {
+            task.cancel()
+            context?.cancel()
+        }
+        if hasPendingImport(token), Task.isCancelled || context?.isCancelled == true {
+            abandonPendingImport()
+        }
     }
 
     /// Vollständiger CLI-Ordnerimport als abbrechbarer Vorbereitungstask.
@@ -654,18 +481,9 @@ public final class ConversionSession: ObservableObject, Identifiable {
         )
     }
 
-    public nonisolated func extractChapters(from file: FoundFile) async -> [AudioFile]? {
-        guard file.isChapterContainer else { return nil }
-        switch await extractChapterResult(from: file) {
-        case .files(let files): return files
-        case .failed: return []
-        case .cancelled: return []
-        }
-    }
-
     /// Analysiert genau eine gefundene Audiodatei. Ordner- und Einzeldatei-
     /// Import benutzen damit dieselbe Typ-, Symlink- und Dauerlogik.
-    public nonisolated func loadAudioFiles(
+    nonisolated func loadAudioFiles(
         from file: FoundFile,
         importToken: ImportToken? = nil
     ) async -> AudioLoadResult {
@@ -708,7 +526,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
     /// Gemeinsamer Batch-Einstieg für Dateienauswahl und Ordnerscan. Abbruch
     /// gibt ausdrücklich kein scheinbar vollständiges Teilergebnis zurück.
-    public nonisolated func loadAudioFiles(
+    nonisolated func loadAudioFiles(
         from files: [FoundFile],
         importToken: ImportToken? = nil
     ) async -> [AudioLoadResult] {
@@ -720,9 +538,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
                 if let importToken { await self.reportImportScan(importToken, filename: file.source.lastPathComponent, completed: true) }
                 return result
             }
-        // Beide Aufrufer bilanzieren ihre `finishImport`-Aufrufe über die Zahl
-        // der Ergebnisse. Ein Abbruch muss deshalb genau ein Ergebnis je
-        // Eingabedatei liefern, nicht ein einzelnes für den ganzen Batch.
+        // Beim Abbruch bleibt die Anzahl der Beiträge gleich, damit der
+        // gemeinsame Import abschließen und den Batch verwerfen kann.
         ) ?? files.map { _ in .cancelled }
     }
 
@@ -954,12 +771,12 @@ public final class ConversionSession: ObservableObject, Identifiable {
         addLog("   - Parallel Mode: \(settings.useParallelEncoding ? "Aktiviert" : "Deaktiviert")", type: .info)
     }
 
-    public func initSegmentProgress(index: Int, filename: String, runID: UUID? = nil) {
+    private func initSegmentProgress(index: Int, filename: String, runID: UUID? = nil) {
         if let runID, !isCurrentConversion(runID) { return }
         segmentProgress[index] = SegmentStatus(filename: filename, progress: 0.0)
     }
 
-    public func updateSegmentProgress(index: Int, progress: Double, runID: UUID? = nil) {
+    private func updateSegmentProgress(index: Int, progress: Double, runID: UUID? = nil) {
         if let runID, !isCurrentConversion(runID) { return }
         if var status = segmentProgress[index] {
             // Fortschrittsmeldungen mehrerer Worker treffen nicht zwingend in
@@ -975,6 +792,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     }
 
     public func resetSession() {
+        projectOperation = UUID()
         invalidateImportWork()
         self.audioFiles.removeAll()
         // Den ganzen Laufzustand ersetzen statt Feld für Feld: Phase und
@@ -1091,49 +909,46 @@ public final class ConversionSession: ObservableObject, Identifiable {
         self.titleCandidates = []; self.authorCandidates = []
         self.showSelectionUI = false
         invalidateArtworkWork()
+        notifyCoverSelectionChange()
     }
 
-    /// Markiert einen neuen GUI-Import. Langsame Antworten eines vorherigen
-    /// Datei-/Ordner-Drops verlieren damit sofort ihre Schreibberechtigung.
-    /// Nur auf dem Main Actor aufrufen.
+    /// Markiert einen neuen GUI-Import und entwertet Antworten des Vorgängers.
     public func beginImport(
         expectedItemCount: Int = 1,
         allowsSelectionUI: Bool = true
     ) -> ImportToken {
+        beginImport(expectedItemCount: expectedItemCount, allowsSelectionUI: allowsSelectionUI,
+                    reusePreparation: false)
+    }
+
+    private func beginImport(
+        expectedItemCount: Int,
+        allowsSelectionUI: Bool,
+        reusePreparation: Bool
+    ) -> ImportToken {
         projectOperation = UUID()
         importService.retainCachedArtwork(for: audioFiles.map(\.url))
-        // Derselbe Context besitzt Swift-Tasks und externe Analyseprozesse. Ein
-        // neuer Drop beendet damit die noch laufende Arbeit seines Vorgängers.
-        preparationCoordinator.begin()
+        // CLI-Signale erreichen den bereits angelegten Vorbereitungskontext.
+        // Nur ein neuer GUI-Import oder der Ersatz eines laufenden Batches
+        // braucht einen anderen Context für seine eigenen Prozesse und Tasks.
+        if !reusePreparation || isImporting || currentPreparationContext() == nil {
+            preparationCoordinator.begin()
+        }
         importGeneration = UUID()
-        // Wird ein bereits laufender Drop ersetzt, muss ein späteres Verwerfen
-        // des neuen Batches auch die ursprüngliche Artwork-Suche wiederaufnehmen.
-        let shouldResumeArtworkSearch = pendingImportShouldResumeArtworkSearch
-            || isPreparingArtwork
+        let batch = PendingImportBatch(
+            expectedItemCount: expectedItemCount,
+            shouldResumeArtworkSearch: pendingImport?.shouldResumeArtworkSearch == true || isPreparingArtwork
+        )
+        pendingImport = batch
         importCompletedItems = 0
-        importTotalItems = max(0, expectedItemCount)
+        importTotalItems = batch.remainingItems
         importDetail = "Dateien suchen und analysieren …"
-        pendingImportOperations = max(0, expectedItemCount)
-        isImporting = pendingImportOperations > 0
+        isImporting = batch.remainingItems > 0
         importErrorMessage = nil
         lastImportFailures = []
-        pendingImportAudioFiles = []
-        pendingImportImageURLs = []
-        pendingImportArtwork = nil
-        pendingImportWarnings = []
-        pendingImportFailures = []
-        pendingImportWasCancelled = false
-        pendingImportRequiresArtworkSearch = false
-        pendingImportArtworkAnalyzed = false
-        pendingImportShouldResumeArtworkSearch = shouldResumeArtworkSearch
-        pendingImportFolderURL = nil
-        pendingImportCanRepresentFolder = expectedItemCount == 1
         invalidateArtworkWork()
-        // Ein leerer Batch (Auswahl ohne Dateien) hat nichts abzuschließen:
-        // `finishImport` läuft nie, also müsste die eben entwertete Cover-Suche
-        // des Vorgängers hier verfallen. Stattdessen den Batch sofort verwerfen,
-        // damit `abandonPendingImport` die Suche wieder anwirft.
-        if pendingImportOperations == 0 { abandonPendingImport() }
+        if batch.remainingItems == 0 { abandonPendingImport() }
+
         return ImportToken(
             generation: importGeneration,
             coverRevision: coverRevision,
@@ -1141,73 +956,178 @@ public final class ConversionSession: ObservableObject, Identifiable {
         )
     }
 
-    /// Meldet genau einen Provider/Scan als abgeschlossen. Erst wenn alle Teile
-    /// desselben Drops übernommen sind, beginnt eine einzige Metadatenabfrage.
+    /// Importiert die explizite Dateiliste in Eingabereihenfolge und wartet auf
+    /// den für die CLI benötigten Metadaten- und Coverzustand. Die CLI
+    /// verwendet ihre bereits für Prozesssignale registrierte Vorbereitung.
+    public func importFiles(
+        _ urls: [URL],
+        analyzeArtwork: Bool = true,
+        usingExistingPreparation: Bool = false
+    ) async {
+        let token = beginImport(expectedItemCount: urls.count, allowsSelectionUI: false,
+                                reusePreparation: usingExistingPreparation)
+        let ranks = Dictionary(urls.enumerated().map { ($0.element.standardizedFileURL, $0.offset) },
+                               uniquingKeysWith: min)
+        await runImportTask(token) {
+            await self.processImportURLs(urls, importToken: token, fileOrder: ranks,
+                                         analyzeArtwork: analyzeArtwork)
+        }
+    }
+
+    /// Importiert einen gemeinsamen GUI-Batch aus Dateien und Ordnern.
+    public func importURLs(_ urls: [URL]) async {
+        let token = beginImport(expectedItemCount: urls.count)
+        await runImportTask(token) {
+            await self.processImportURLs(urls, importToken: token)
+        }
+    }
+
+    /// Reserviert den GUI-Batch sofort. Die Dateianalyse startet erst, wenn
+    /// die Provider ihre Adressen oder Fehler gemeinsam geliefert haben.
+    public func startProviderImport(
+        expectedItemCount: Int,
+        load: @escaping @MainActor @Sendable () async -> FileProviderImportResult,
+        onTimeout: @escaping @MainActor @Sendable () -> Void
+    ) {
+        let token = beginImport(expectedItemCount: expectedItemCount)
+        Task { @MainActor in
+            await runImportTask(token) {
+                let result = await load()
+                guard self.hasPendingImport(token), !Task.isCancelled else { return }
+                switch result {
+                case .ready(let items):
+                    guard items.count == expectedItemCount else {
+                        self.cancelImport()
+                        return
+                    }
+                    var urls: [URL] = []
+                    for (index, item) in items.enumerated() {
+                        switch item {
+                        case .url(let url):
+                            urls.append(url)
+                        case .failure(let details):
+                            self.stageProviderLoadFailure(position: index + 1, total: items.count,
+                                                          errorDescription: details, importToken: token)
+                        }
+                    }
+                    await self.finishImport(token, completed: items.count - urls.count,
+                                            countingProgress: true)
+                    await self.processImportURLs(urls, importToken: token)
+                case .timedOut:
+                    self.cancelImport()
+                    onTimeout()
+                case .cancelled:
+                    self.cancelImport()
+                }
+            }
+        }
+    }
+
+    private func processImportURLs(
+        _ urls: [URL],
+        importToken token: ImportToken,
+        fileOrder: [URL: Int]? = nil,
+        analyzeArtwork: Bool = true
+    ) async {
+        var files: [FoundFile] = []
+        for url in urls {
+            guard hasPendingImport(token), !Task.isCancelled else { return }
+            var isDirectory: ObjCBool = false
+            if fileOrder == nil,
+               FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+               isDirectory.boolValue {
+                let scanned = await scanFolder(url, importToken: token)
+                stageScannedFolder(scanned, importToken: token)
+                await finishImport(token)
+            } else if let found = SourceDiscovery.foundFile(at: url) {
+                files.append(found)
+            } else {
+                stageAudioLoadResult(.failure(AudioImportFailure(sourceURL: url, reason: .analysisFailed)),
+                                     importToken: token)
+                await finishImport(token)
+            }
+        }
+        guard hasPendingImport(token), !files.isEmpty else { return }
+        let results = await loadAudioFiles(from: files, importToken: token)
+        for result in results { stageAudioLoadResult(result, importToken: token) }
+        if fileOrder != nil, hasPendingImport(token) {
+            // Die CLI liest das Cover direkt nach dem Import; ihr Ergebnis
+            // darf von keiner nachträglichen Hintergrundsuche abhängen.
+            pendingImport?.requiresArtworkSearch = false
+            if analyzeArtwork, let batch = pendingImport, batch.failures.isEmpty, !batch.wasCancelled {
+                switch await firstEmbeddedArtwork(in: batch.audioFiles) {
+                case .found(let artwork):
+                    if hasPendingImport(token) { pendingImport?.embeddedArtwork = artwork }
+                case .none:
+                    break
+                case .cancelled:
+                    if hasPendingImport(token) { pendingImport?.wasCancelled = true }
+                }
+            }
+        }
+        await finishImport(token, completed: results.count, countingProgress: false, fileOrder: fileOrder)
+    }
+
     public func finishImport(_ token: ImportToken, countingProgress: Bool = true) async {
-        guard isCurrentImport(token), pendingImportOperations > 0 else { return }
-        pendingImportOperations -= 1
-        if countingProgress { importCompletedItems += 1 }
-        guard pendingImportOperations == 0 else { return }
-        if pendingImportWasCancelled {
+        await finishImport(token, completed: 1, countingProgress: countingProgress)
+    }
+
+    private func finishImport(
+        _ token: ImportToken,
+        completed: Int,
+        countingProgress: Bool,
+        fileOrder: [URL: Int]? = nil
+    ) async {
+        guard hasPendingImport(token), completed > 0,
+              let remaining = pendingImport?.remainingItems, completed <= remaining else { return }
+        pendingImport?.remainingItems -= completed
+        if countingProgress { importCompletedItems += completed }
+        guard remaining == completed, let batch = pendingImport else { return }
+        if batch.wasCancelled || preparationCancellationRequested() {
             abandonPendingImport()
             return
         }
-        if !pendingImportFailures.isEmpty {
-            pendingImportWarnings.forEach { addLog($0) }
-            pendingImportFailures.forEach { addLog($0.logMessage, type: .highlight) }
-            lastImportFailures = pendingImportFailures
-            importErrorMessage = Self.importFailureMessage(pendingImportFailures)
+        if !batch.failures.isEmpty {
+            batch.warnings.forEach { addLog($0) }
+            batch.failures.forEach { addLog($0.logMessage, type: .highlight) }
+            lastImportFailures = batch.failures
+            importErrorMessage = Self.importFailureMessage(batch.failures)
             abandonPendingImport()
             return
         }
 
         importDetail = "Metadaten übernehmen …"
-        let stagedAudioFiles = pendingImportAudioFiles
-        let stagedImageURLs = pendingImportImageURLs
-        let stagedArtwork = pendingImportArtwork
-        let stagedWarnings = pendingImportWarnings
-        // Hat der Import das Cover bereits synchron bestimmt (CLI `--file`),
-        // ist die asynchrone Suche überflüssig — und für die CLI sogar falsch,
-        // weil sie deren Ergebnis nicht abwartet.
-        let requiresArtworkSearch = pendingImportRequiresArtworkSearch
-            && !pendingImportArtworkAnalyzed
-        let sourceFolder = pendingImportCanRepresentFolder ? pendingImportFolderURL : nil
-        // Auch ein erfolgreich verbuchter Batch kann leer bleiben (eine
-        // übersprungene Nicht-Audiodatei, ein Ordner ohne Audiodateien). Er
-        // ersetzt die von `beginImport` entwertete Suche des Vorgängers dann
-        // nicht. `clearPendingImportBatch` löscht das Merkmal, deshalb wird es
-        // vorher gelesen.
-        let shouldResumeArtworkSearch = pendingImportShouldResumeArtworkSearch
-        clearPendingImportBatch()
-        await applyScannedFolderContents(
-            audioFiles: stagedAudioFiles,
-            imageURLs: stagedImageURLs,
-            embeddedArtwork: stagedArtwork,
-            warnings: stagedWarnings,
+        pendingImport = nil
+        let first = applyScannedFolderContents(
+            audioFiles: batch.audioFiles,
+            imageURLs: batch.imageURLs,
+            embeddedArtwork: batch.embeddedArtwork,
+            warnings: batch.warnings,
             importToken: token,
-            sourceFolderForCLI: sourceFolder,
-            skipCoverExtraction: !requiresArtworkSearch
-        )
-        if shouldResumeArtworkSearch {
-            resumeArtworkSearchAfterBatch(token)
-        }
-        guard isCurrentImport(token) else { return }
-        if bookMetadataIncomplete, let first = audioFiles.first {
+            sourceFolderForCLI: batch.sourceFolder,
+            skipCoverExtraction: !batch.requiresArtworkSearch,
+            fileOrder: fileOrder
+        ) ?? audioFiles.first
+        if batch.shouldResumeArtworkSearch && !isPreparingArtwork { startArtworkSearch() }
+
+        if bookMetadataIncomplete, let first {
             await importGlobalMetadata(from: first, importToken: token)
             await finishMetadataImport(token: token, sourceFileID: first.id)
         } else {
             isImporting = false
         }
-        // Der Analyse-Cache hält je Quelle einen Metadaten-Snapshot samt
-        // AVFoundation-Backing. Nach dem Import braucht ihn nur noch die
-        // Coversuche über den sichtbaren Bestand; verworfene Quellen und
-        // übersprungene Dateien dürfen nicht bis zum nächsten Drop stehen
-        // bleiben.
+        // Ein inzwischen gestarteter Import besitzt seinen eigenen Analyse-Cache.
+        // Nur der aktuelle Abschluss darf ihn auf den sichtbaren Bestand kürzen.
+        guard isCurrentImport(token) else { return }
         importService.retainCachedArtwork(for: audioFiles.map(\.url))
     }
 
     private func finishMetadataImport(token: ImportToken, sourceFileID: UUID) async {
         guard isCurrentImport(token) else { return }
+        guard !preparationCancellationRequested() else {
+            isImporting = false
+            return
+        }
         // Wurde gerade die Datei entfernt, deren Tags gelesen wurden, darf ihr
         // Ergebnis nicht gewinnen. Ein verbleibendes erstes Kapitel bekommt
         // genau einen neuen Versuch.
@@ -1226,13 +1146,12 @@ public final class ConversionSession: ObservableObject, Identifiable {
         guard canCancelImport else { return }
         _ = preparationCoordinator.cancel()
         importGeneration = UUID()
-        pendingImportOperations = 0
         importDetail = "Import abgebrochen"
         abandonPendingImport()
     }
 
     private func reportImportScan(_ token: ImportToken, total: Int? = nil, filename: String? = nil, completed: Bool = false) {
-        guard isCurrentImport(token) else { return }
+        guard hasPendingImport(token) else { return }
         if let total { importTotalItems += max(0, total) }
         if let filename { importDetail = filename }
         if completed { importCompletedItems += 1 }
@@ -1241,60 +1160,28 @@ public final class ConversionSession: ObservableObject, Identifiable {
     private func invalidateImportWork() {
         _ = preparationCoordinator.cancel()
         importGeneration = UUID()
-        pendingImportOperations = 0
+        pendingImport = nil
         isImporting = false
         cliSourceFolderURL = nil
         cliRepresentedFileIDs = []
         cliRepresentedChapterTitles = [:]
-        clearPendingImportBatch()
         invalidateArtworkWork()
     }
 
-    /// Beendet einen Import, dessen Ergebnis nicht übernommen wird (Abbruch
-    /// oder Analysefehler). Hat `beginImport` eine noch laufende Artwork-Suche
-    /// des Vorgängers entwertet, muss sie danach wieder anlaufen — sonst bliebe
-    /// das Buch ohne Cover. `clearPendingImportBatch` löscht dieses Merkmal,
-    /// deshalb wird es vorher gelesen.
     private func abandonPendingImport() {
-        let shouldResumeArtworkSearch = pendingImportShouldResumeArtworkSearch
+        let shouldResumeArtworkSearch = pendingImport?.shouldResumeArtworkSearch == true
+        pendingImport = nil
         isImporting = false
-        clearPendingImportBatch()
         if shouldResumeArtworkSearch { startArtworkSearch() }
     }
 
-    /// Nimmt die von `beginImport` entwertete Suche des Vorgängers wieder auf,
-    /// nachdem ein Batch übernommen wurde. Hat der Batch selbst ein Cover
-    /// gesetzt oder eine eigene Suche gestartet, passiert nichts: `coverImage`/
-    /// `coverPath` beziehungsweise `isPreparingArtwork` zeigen das an.
-    private func resumeArtworkSearchAfterBatch(_ token: ImportToken) {
-        // Hat während der Übernahme schon der nächste Drop begonnen, gehört die
-        // Suche nicht mehr diesem Import. Der neue Batch erbt die Pflicht,
-        // damit sie nicht zwischen zwei Importen verloren geht.
-        guard isCurrentImport(token) else {
-            pendingImportShouldResumeArtworkSearch = true
-            return
-        }
-        guard !isPreparingArtwork else { return }
-        startArtworkSearch()
-    }
-
-    private func clearPendingImportBatch() {
-        pendingImportAudioFiles = []
-        pendingImportImageURLs = []
-        pendingImportArtwork = nil
-        pendingImportWarnings = []
-        pendingImportFailures = []
-        pendingImportWasCancelled = false
-        pendingImportRequiresArtworkSearch = false
-        pendingImportArtworkAnalyzed = false
-        pendingImportShouldResumeArtworkSearch = false
-        pendingImportFolderURL = nil
-        pendingImportCanRepresentFolder = false
+    private func hasPendingImport(_ token: ImportToken) -> Bool {
+        pendingImport != nil && isCurrentImport(token)
     }
 
     private static func importFailureMessage(_ failures: [AudioImportFailure]) -> String {
         let details = failures.map {
-            "• \($0.sourceURL.lastPathComponent): \($0.message)"
+            "• \($0.sourceDescription): \($0.message)"
         }.joined(separator: "\n")
         return "Der Import wurde vollständig verworfen, damit kein Hörbuch mit fehlenden Kapiteln entsteht.\n\n\(details)"
     }
@@ -1319,7 +1206,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// aus einem einzigen Ordner-Import stammt. Einzeldateien oder gemischte
     /// Imports kann die ordnerbasierte CLI nicht identisch darstellen.
     public var cliFolderIfRepresentable: URL? {
-        let currentIDs = Set(audioFiles.map(\.id))
+        let currentIDs = audioFiles.map(\.id)
         let chapterTitlesStillMatch = audioFiles.allSatisfy {
             cliRepresentedChapterTitles[$0.id] == $0.chapterTitle
         }
@@ -1329,21 +1216,28 @@ public final class ConversionSession: ObservableObject, Identifiable {
         return cliSourceFolderURL
     }
     
-    /// `skipCoverExtraction`: überspringt die (schwere, AVAsset-lastige) Suche nach
-    /// eingebettetem Cover. Wird vom Ordner-Pfad genutzt, der das Cover bereits beim
-    /// Hintergrund-Scan (`scanFolder`) ermittelt hat — so läuft die Suche nicht ein
-    /// zweites Mal, und vor allem nicht auf dem Main-Thread.
-    public func processIncomingFiles(
+    func processIncomingFiles(
         _ newFiles: [AudioFile],
         skipCoverExtraction: Bool = false,
         importToken: ImportToken? = nil,
         sourceFolderForCLI: URL? = nil
     ) async {
-        if let importToken, !isCurrentImport(importToken) { return }
-        // `append(contentsOf: [])` und sogar `sort()` lösen `didSet` aus. Bei
-        // weiterhin leerer Liste sähe das sonst wie ein ausdrückliches
-        // „Alle löschen“ aus und würde den gemeinsamen Mehrfach-Drop entwerten.
-        guard !newFiles.isEmpty else { return }
+        guard importToken.map(isCurrentImport) ?? true else { return }
+        if let first = commitAudioFiles(newFiles, sourceFolderForCLI: sourceFolderForCLI) {
+            if !skipCoverExtraction { startArtworkSearch(importToken: importToken) }
+            if importToken == nil, bookMetadataIncomplete {
+                await importGlobalMetadata(from: first, importToken: nil)
+            }
+        }
+    }
+
+    private func commitAudioFiles(
+        _ newFiles: [AudioFile],
+        sourceFolderForCLI: URL?,
+        fileOrder: [URL: Int]? = nil
+    ) -> AudioFile? {
+        // Eine leere Zuweisung würde als „Alle löschen“ den Import entwerten.
+        guard !newFiles.isEmpty else { return nil }
         let canRepresentFolder = audioFiles.isEmpty && sourceFolderForCLI != nil
         let sourceCount = Set(newFiles.map { $0.sourceURL.standardizedFileURL.path }).count
         let sourceLabel = sourceCount == 1 ? "Audiodatei" : "Audiodateien"
@@ -1352,10 +1246,19 @@ public final class ConversionSession: ObservableObject, Identifiable {
         } else {
             addLog("📥 Importiere \(sourceCount) \(sourceLabel) mit \(newFiles.count) Kapiteln...")
         }
-        let deduplicated = Self.deduplicateAudioFiles(audioFiles + newFiles)
+        let deduplicated = SourceDiscovery.deduplicateAudioFiles(audioFiles + newFiles)
         let existingIDs = Set(audioFiles.map(\.id))
-        self.audioFiles = deduplicated.files.filter { existingIDs.contains($0.id) }
-            + deduplicated.files.filter { !existingIDs.contains($0.id) }.sorted(by: Self.audioFileComesBefore)
+        let orderedFiles = deduplicated.files.filter { existingIDs.contains($0.id) }
+            + deduplicated.files.filter { !existingIDs.contains($0.id) }.sorted(by: SourceDiscovery.audioFileComesBefore)
+        if let fileOrder {
+            audioFiles = orderedFiles.sorted {
+                let left = fileOrder[$0.sourceURL.standardizedFileURL] ?? Int.max
+                let right = fileOrder[$1.sourceURL.standardizedFileURL] ?? Int.max
+                return left == right ? $0.startTime < $1.startTime : left < right
+            }
+        } else {
+            audioFiles = orderedFiles
+        }
         for duplicate in deduplicated.discardedSources {
             // Derselbe Pfad in beiden Feldern heißt: Ein Drop hat diese Datei
             // mehrfach geliefert (z.B. Ordner plus eine Datei daraus). Die
@@ -1374,22 +1277,16 @@ public final class ConversionSession: ObservableObject, Identifiable {
         }
         if canRepresentFolder, let sourceFolderForCLI {
             cliSourceFolderURL = sourceFolderForCLI
-            cliRepresentedFileIDs = Set(audioFiles.map(\.id))
+            cliRepresentedFileIDs = audioFiles.map(\.id)
             cliRepresentedChapterTitles = Dictionary(uniqueKeysWithValues: audioFiles.map { ($0.id, $0.chapterTitle) })
         } else {
             cliSourceFolderURL = nil
             cliRepresentedFileIDs = []
             cliRepresentedChapterTitles = [:]
         }
-        if !skipCoverExtraction { startArtworkSearch(importToken: importToken) }
-        // GUI-Drops sammeln erst alle Provider und starten danach in
-        // `finishImport` genau eine Metadatenabfrage. Der erwartete CLI-Pfad hat
-        // keinen Import-Token und löst die Abfrage hier direkt aus.
-        if importToken == nil, bookMetadataIncomplete {
-            if let first = audioFiles.first {
-                await importGlobalMetadata(from: first, importToken: importToken)
-            }
-        }
+        // Die explizite CLI-Reihenfolge bestimmt die Kapitel. Metadaten werden
+        // weiter aus der ersten Datei nach natürlicher Sortierung ermittelt.
+        return orderedFiles.first
     }
 
     /// Startet genau eine Suche über den aktuellen, bereits übernommenen
@@ -1451,32 +1348,6 @@ public final class ConversionSession: ObservableObject, Identifiable {
         }
     }
 
-    /// Vergleicht den gesamten sichtbaren Pfad komponentenweise in natürlicher
-    /// Finder-Reihenfolge. Dadurch bleiben `CD1/01`, `CD1/02`, `CD2/01` und
-    /// `CD2/02` gruppiert. Kapitel derselben Quelldatei folgen erst danach ihrer
-    /// Startzeit.
-    private static func audioFileComesBefore(_ left: AudioFile, _ right: AudioFile) -> Bool {
-        if left.sourceURL == right.sourceURL {
-            return left.startTime < right.startTime
-        }
-
-        let leftComponents = left.sourceURL.standardizedFileURL.pathComponents
-        let rightComponents = right.sourceURL.standardizedFileURL.pathComponents
-        for (leftComponent, rightComponent) in zip(leftComponents, rightComponents) {
-            let natural = leftComponent.localizedStandardCompare(rightComponent)
-            if natural != .orderedSame { return natural == .orderedAscending }
-            // `localizedStandardCompare` kann unterschiedliche Schreibweisen
-            // gleich behandeln. Der literale Tiebreak erhält eine stabile,
-            // strenge Reihenfolge, ohne vorzeitig die Kapitelzeit zu benutzen.
-            let literal = leftComponent.compare(rightComponent, options: .literal)
-            if literal != .orderedSame { return literal == .orderedAscending }
-        }
-        if leftComponents.count != rightComponents.count {
-            return leftComponents.count < rightComponents.count
-        }
-        return left.url.path < right.url.path
-    }
-
     private func importGlobalMetadata(
         from file: AudioFile,
         importToken: ImportToken?
@@ -1509,7 +1380,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
             return result
         }.value
 
-        guard importToken.map(isCurrentImport) ?? true,
+        guard !Task.isCancelled,
+              importToken.map(isCurrentImport) ?? true,
               importToken == nil || audioFiles.contains(where: { $0.id == file.id }),
               preparation?.isCancelled != true else {
             return
@@ -1635,43 +1507,13 @@ public final class ConversionSession: ObservableObject, Identifiable {
         )
     }
 
-    /// Ergebnis eines Ordner-Scans. Enthält keinen `@Published`-State und kann
-    /// deshalb sicher von der Audioanalyse zum Main Actor übertragen werden.
-    public struct ScannedFolder: Sendable {
-        public var folderURL: URL
-        public var audioFiles: [AudioFile]
-        public var imageURLs: [URL]
-        public var embeddedArtwork: Data?
-        public var warnings: [String]
-        public var failures: [AudioImportFailure]
-        public var wasCancelled: Bool
-
-        public init(
-            folderURL: URL,
-            audioFiles: [AudioFile],
-            imageURLs: [URL],
-            embeddedArtwork: Data?,
-            warnings: [String] = [],
-            failures: [AudioImportFailure] = [],
-            wasCancelled: Bool = false
-        ) {
-            self.folderURL = folderURL
-            self.audioFiles = audioFiles
-            self.imageURLs = imageURLs
-            self.embeddedArtwork = embeddedArtwork
-            self.warnings = warnings
-            self.failures = failures
-            self.wasCancelled = wasCancelled
-        }
-    }
-
     /// Schwerer Teil des Ordner-Imports: rekursiv scannen, m4b-Kapitel via ffmpeg
     /// extrahieren, Dauern/eingebettetes Artwork lesen. Rührt **keinen**
     /// `@Published`-State an. Die AVFoundation-Aufrufe suspendieren asynchron;
     /// der Dateisystem- und ffmpeg-Anteil läuft außerhalb des Main Actors.
     /// `analyzeArtwork == false` überspringt sowohl Ordnerbilder als auch
     /// eingebettete Bilder, wenn der Aufrufer sie danach ohnehin ersetzt.
-    public nonisolated func scanFolder(
+    nonisolated func scanFolder(
         _ url: URL,
         importToken: ImportToken? = nil,
         analyzeArtwork: Bool = true
@@ -1694,7 +1536,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
             )
         }
 
-        let discovery = Self.discoverFileURLs(
+        let discovery = SourceDiscovery.discoverFileURLs(
             in: url,
             cancellationRequested: { preparationCancellationRequested() }
         )
@@ -1711,7 +1553,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         }
         let discovered = discovery.files
         let supported = discovered.filter { $0.kind != .unsupported }
-        let deduplicated = Self.deduplicateFoundFiles(supported)
+        let deduplicated = SourceDiscovery.deduplicateFoundFiles(supported)
         var loggedTargets = Set<String>()
         for discarded in deduplicated.discarded {
             let target = discarded.resolved.standardizedFileURL.path
@@ -1772,98 +1614,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
         )
     }
 
-    /// Löst genau einen Dateipfad nach denselben Regeln wie der Ordnerscan auf.
-    /// Verzeichnis- und defekte Symlinks sind keine importierbaren Dateien.
     public nonisolated static func foundFile(at url: URL) -> FoundFile? {
-        guard let values = try? url.resourceValues(
-            forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
-        ) else { return nil }
-        if values.isRegularFile == true {
-            return FoundFile(source: url, resolved: url)
-        }
-        guard values.isSymbolicLink == true else { return nil }
-        let resolved = url.resolvingSymlinksInPath()
-        guard (try? resolved.resourceValues(forKeys: [.isRegularFileKey]))?
-            .isRegularFile == true else { return nil }
-        return FoundFile(source: url, resolved: resolved)
-    }
-
-    /// Entfernt physische Dubletten. Ein bewusst benannter Symlink gewinnt
-    /// gegen die danebenliegende Zieldatei; bei mehreren Links bleibt der erste
-    /// Enumerator-Treffer erhalten.
-    nonisolated static func deduplicateFoundFiles(
-        _ files: [FoundFile]
-    ) -> (files: [FoundFile], discarded: [FoundFile]) {
-        var kept: [FoundFile] = []
-        var indexByTarget: [String: Int] = [:]
-        var discarded: [FoundFile] = []
-        for file in files {
-            let target = file.resolved.standardizedFileURL.path
-            guard let index = indexByTarget[target] else {
-                indexByTarget[target] = kept.count
-                kept.append(file)
-                continue
-            }
-            if file.isSymbolicLink, !kept[index].isSymbolicLink {
-                discarded.append(kept[index])
-                kept[index] = file
-            } else {
-                discarded.append(file)
-            }
-        }
-        return (kept, discarded)
-    }
-
-    /// Dedupliziert auch über getrennt eintreffende Drop-Provider hinweg. Alle
-    /// Kapitel derselben Containerdatei bleiben als Gruppe erhalten; ein
-    /// sichtbarer Symlink gewinnt wie beim Ordnerscan gegen das direkte Ziel.
-    nonisolated static func deduplicateAudioFiles(
-        _ files: [AudioFile]
-    ) -> (files: [AudioFile], discardedSources: [(discarded: URL, kept: URL)]) {
-        var selectedSourceByTarget: [String: URL] = [:]
-        for file in files {
-            let target = file.url.standardizedFileURL.path
-            let source = file.sourceURL.standardizedFileURL
-            guard let selected = selectedSourceByTarget[target] else {
-                selectedSourceByTarget[target] = source
-                continue
-            }
-            let selectedIsLink = selected.path != target
-            let candidateIsLink = source.path != target
-            if candidateIsLink && !selectedIsLink {
-                selectedSourceByTarget[target] = source
-            }
-        }
-
-        var reportedDiscardedSources = Set<String>()
-        var seenSegments = Set<String>()
-        var discardedSources: [(discarded: URL, kept: URL)] = []
-        let kept = files.filter { file in
-            let target = file.url.standardizedFileURL.path
-            guard let selected = selectedSourceByTarget[target] else { return false }
-            let source = file.sourceURL.standardizedFileURL
-            if source != selected {
-                let reportKey = "\(target)\u{0}\(source.path)"
-                if reportedDiscardedSources.insert(reportKey).inserted {
-                    discardedSources.append((discarded: source, kept: selected))
-                }
-                return false
-            }
-            // Derselbe Provider darf dasselbe Kapitel nicht mehrfach liefern.
-            // Start und Dauer gehören zum Schlüssel, damit unterschiedliche
-            // Kapitel desselben m4b/mp4-Containers erhalten bleiben.
-            let segmentKey = "\(target)\u{0}\(source.path)\u{0}"
-                + "\(file.startTime.bitPattern)\u{0}\(file.duration.bitPattern)"
-            guard seenSegments.insert(segmentKey).inserted else {
-                let reportKey = "duplicate\u{0}\(segmentKey)"
-                if reportedDiscardedSources.insert(reportKey).inserted {
-                    discardedSources.append((discarded: source, kept: selected))
-                }
-                return false
-            }
-            return true
-        }
-        return (kept, discardedSources)
+        SourceDiscovery.foundFile(at: url)
     }
 
     /// Ein m4b liefert mehrere Kapitel mit derselben physischen URL. Seine
@@ -1873,98 +1625,9 @@ public final class ConversionSession: ObservableObject, Identifiable {
         return files.filter { seen.insert($0.url.standardizedFileURL.path).inserted }
     }
 
-    /// `FileManager.DirectoryEnumerator` ist absichtlich nicht über einen
-    /// asynchronen Aufruf hinweg haltbar. Die Dateiliste wird deshalb synchron
-    /// aufgebaut, prüft den laufbezogenen Abbruch aber vor und nach jedem
-    /// `nextObject()`, damit auch ein großer Ordnerscan sofort enden kann.
-    nonisolated static func discoverFileURLs(
-        in url: URL,
-        cancellationRequested: () -> Bool = { false }
-    ) -> FileDiscoveryResult {
-        guard !cancellationRequested() else {
-            return FileDiscoveryResult(files: [], failureDescription: nil)
-        }
-        let failureRecorder = DirectoryScanFailureRecorder()
-        guard let enumerator = FileManager.default.enumerator(
-            at: url,
-            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
-            errorHandler: { failedURL, error in
-                failureRecorder.record(url: failedURL, error: error)
-                // Bei einem Lesefehler wäre jedes Teilergebnis potenziell ein
-                // Hörbuch mit fehlenden Kapiteln. Deshalb sofort stoppen.
-                return false
-            }
-        ) else {
-            return FileDiscoveryResult(
-                files: [],
-                failureDescription: "\(url.path): Ordner kann nicht gelesen werden."
-            )
-        }
-
-        var files: [FoundFile] = []
-        while !cancellationRequested() {
-            guard let item = enumerator.nextObject() else { break }
-            guard !cancellationRequested() else { break }
-            guard let fileURL = item as? URL else { continue }
-            let values: URLResourceValues
-            do {
-                values = try fileURL.resourceValues(
-                    forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
-                )
-            } catch {
-                failureRecorder.record(url: fileURL, error: error)
-                break
-            }
-
-            if values.isRegularFile == true {
-                files.append(FoundFile(source: fileURL, resolved: fileURL))
-                continue
-            }
-            guard values.isSymbolicLink == true else { continue }
-            // Verzeichnis-Symlinks nie als Rekursionsweg verwenden. Ein
-            // Dateisymlink wird dagegen bis zur regulären Zieldatei aufgelöst;
-            // AVFoundation liefert für den Linkpfad selbst nicht zuverlässig
-            // Dauer und Metadaten. Der LINKNAME bleibt trotzdem erhalten: er
-            // bestimmt Reihenfolge und Kapiteltitel, sonst gäbe eine Sammlung
-            // aus `01.wav -> Original-B.wav`, `02.wav -> Original-A.wav` die
-            // vom Nutzer festgelegte Reihenfolge auf (Review-Fund 2026-08-17).
-            enumerator.skipDescendants()
-            if let found = foundFile(at: fileURL) { files.append(found) }
-        }
-        if let failure = failureRecorder.snapshot() {
-            return FileDiscoveryResult(files: [], failureDescription: failure)
-        }
-        return FileDiscoveryResult(files: files, failureDescription: nil)
-    }
-
-    nonisolated static func recursiveFileURLs(
-        in url: URL,
-        cancellationRequested: () -> Bool = { false }
-    ) -> [FoundFile] {
-        discoverFileURLs(in: url, cancellationRequested: cancellationRequested).files
-    }
-
-    /// Stellt einen Provider-Beitrag bis zum Abschluss des gesamten Drops
-    /// zurück. Erst `finishImport` übernimmt die gemeinsame Liste oder verwirft
-    /// sie bei einem einzigen Analysefehler vollständig.
-    public func stageAudioLoadResult(
-        _ result: AudioLoadResult,
-        importToken: ImportToken
-    ) {
-        guard isCurrentImport(importToken) else { return }
-        switch result {
-        case .success(let files, let warnings):
-            pendingImportAudioFiles.append(contentsOf: files)
-            pendingImportWarnings.append(contentsOf: warnings)
-            pendingImportRequiresArtworkSearch = pendingImportRequiresArtworkSearch
-                || !files.isEmpty
-        case .failure(let failure):
-            pendingImportFailures.append(failure)
-        case .cancelled:
-            pendingImportWasCancelled = true
-        case .skipped:
-            break
-        }
+    func stageAudioLoadResult(_ result: AudioLoadResult, importToken: ImportToken) {
+        guard hasPendingImport(importToken) else { return }
+        pendingImport?.stage(result)
     }
 
     /// Ergebnis der Cover-Suche. Der Abbruch ist ausdrücklich ein eigener Fall:
@@ -1990,69 +1653,24 @@ public final class ConversionSession: ObservableObject, Identifiable {
         return preparationCancellationRequested() ? .cancelled : .none
     }
 
-    /// Sucht wie der Ordnerscan synchron das erste dekodierbare eingebettete
-    /// Cover der übergebenen Dateien. Für den CLI-`--file`-Pfad: Die CLI liest
-    /// das Cover direkt nach dem Import für Bericht und Konvertierung, deshalb
-    /// darf es nicht erst in einer nicht abgewarteten Hintergrundsuche entstehen.
-    /// Bei laufbezogenem Abbruch liefert die Suche `nil`.
-    public nonisolated func analyzeImportArtwork(for files: [AudioFile]) async -> Data? {
-        if case .found(let artworkData) = await firstEmbeddedArtwork(in: files) { return artworkData }
-        return nil
-    }
-
-    /// Meldet dem laufenden Import ein bereits synchron gesuchtes Cover
-    /// (`analyzeImportArtwork`). Auch `nil` zählt als abgeschlossene Suche:
-    /// `finishImport` startet dann keine zweite, asynchrone Suche mehr.
-    public func stageImportArtwork(_ artwork: Data?, importToken: ImportToken) {
-        guard isCurrentImport(importToken) else { return }
-        if pendingImportArtwork == nil { pendingImportArtwork = artwork }
-        pendingImportArtworkAnalyzed = true
-    }
-
-    /// Ein fehlgeschlagener NSItemProvider ist kein absichtlicher leerer Drop.
-    /// Seine Position macht auch ohne gelieferte URL sichtbar, welcher Teil des
-    /// gemeinsamen Batches den atomaren Import verhindert hat.
-    public func stageProviderLoadFailure(
+    func stageProviderLoadFailure(
         position: Int,
         total: Int,
         errorDescription: String?,
         importToken: ImportToken
     ) {
-        guard isCurrentImport(importToken) else { return }
-        let safePosition = max(1, position)
-        let safeTotal = max(safePosition, total)
-        let label = safeTotal > 1
-            ? "Drop-Element \(safePosition) von \(safeTotal)"
-            : "Drop-Element \(safePosition)"
-        let normalizedDetails = errorDescription?
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
-        pendingImportFailures.append(AudioImportFailure(
-            sourceURL: URL(fileURLWithPath: "/\(label)"),
-            reason: .providerLoadFailed(normalizedDetails)
-        ))
+        let failure = AudioImportFailure(dropItemAt: position, total: total, details: errorDescription)
+        stageAudioLoadResult(.failure(failure), importToken: importToken)
     }
 
-    public func stageScannedFolder(
-        _ scanned: ScannedFolder,
-        importToken: ImportToken
-    ) {
-        guard isCurrentImport(importToken) else { return }
-        pendingImportAudioFiles.append(contentsOf: scanned.audioFiles)
-        pendingImportImageURLs.append(contentsOf: scanned.imageURLs)
-        if pendingImportArtwork == nil { pendingImportArtwork = scanned.embeddedArtwork }
-        pendingImportWarnings.append(contentsOf: scanned.warnings)
-        pendingImportFailures.append(contentsOf: scanned.failures)
-        pendingImportWasCancelled = pendingImportWasCancelled || scanned.wasCancelled
-        if pendingImportCanRepresentFolder {
-            pendingImportFolderURL = scanned.folderURL
-        }
+    func stageScannedFolder(_ scanned: ScannedFolder, importToken: ImportToken) {
+        guard hasPendingImport(importToken) else { return }
+        pendingImport?.stage(scanned)
     }
 
     /// Leichter Teil: das Scan-Ergebnis in den Main-Actor-isolierten
     /// `@Published`-State übernehmen.
-    public func applyScannedFolder(
+    func applyScannedFolder(
         _ scanned: ScannedFolder,
         importToken: ImportToken? = nil
     ) async {
@@ -2066,7 +1684,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
             importErrorMessage = Self.importFailureMessage(scanned.failures)
             return
         }
-        await applyScannedFolderContents(
+        let first = applyScannedFolderContents(
             audioFiles: scanned.audioFiles,
             imageURLs: scanned.imageURLs,
             embeddedArtwork: scanned.embeddedArtwork,
@@ -2075,6 +1693,9 @@ public final class ConversionSession: ObservableObject, Identifiable {
             sourceFolderForCLI: scanned.folderURL,
             skipCoverExtraction: true
         )
+        if importToken == nil, bookMetadataIncomplete, let first {
+            await importGlobalMetadata(from: first, importToken: nil)
+        }
     }
 
     private func applyScannedFolderContents(
@@ -2084,8 +1705,9 @@ public final class ConversionSession: ObservableObject, Identifiable {
         warnings: [String],
         importToken: ImportToken?,
         sourceFolderForCLI: URL?,
-        skipCoverExtraction: Bool
-    ) async {
+        skipCoverExtraction: Bool,
+        fileOrder: [URL: Int]? = nil
+    ) -> AudioFile? {
         for warning in warnings { addLog(warning) }
         let expectedCoverRevision = importToken?.coverRevision ?? coverRevision
         if coverRevision == expectedCoverRevision, !isCoverSuppressed,
@@ -2094,31 +1716,27 @@ public final class ConversionSession: ObservableObject, Identifiable {
            let image = CoverArtwork.preview(from: artworkData) {
             coverImage = image
             coverPath = nil
-            // Rohdaten merken (siehe processIncomingFiles): nur so landet ein
+            // Rohdaten merken: Nur so landet ein
             // eingebettetes Cover ohne separate Bilddatei auch im Output.
             embeddedCoverData = artworkData
             isCoverSuppressed = false
         }
-        // Ordnerscans haben Artwork bereits analysiert; direkte Datei-Provider
-        // werden dagegen erst als gemeinsamer Batch hier einmal durchsucht.
-        await processIncomingFiles(
-            audioFiles,
-            skipCoverExtraction: skipCoverExtraction,
-            importToken: importToken,
-            sourceFolderForCLI: sourceFolderForCLI
-        )
+        let first = commitAudioFiles(audioFiles, sourceFolderForCLI: sourceFolderForCLI,
+                                     fileOrder: fileOrder)
+        if first != nil && !skipCoverExtraction { startArtworkSearch(importToken: importToken) }
         if importToken.map(isCurrentImport) ?? true,
            coverRevision == expectedCoverRevision,
            !isCoverSuppressed,
            !imageURLs.isEmpty,
            let url = findLargestImage(from: imageURLs) {
-            selectCover(url: url)
+            applyCover(url: url)
         }
+        return first
     }
 
     /// Vollständiger Ordner-Import für die CLI: Audioanalyse außerhalb des Main
     /// Actors, anschließend Übernahme und Metadatenauflösung auf Main.
-    public func addFolder(_ url: URL, analyzeArtwork: Bool = true) async {
+    private func addFolder(_ url: URL, analyzeArtwork: Bool = true) async {
         let scanned = await scanFolder(url, analyzeArtwork: analyzeArtwork)
         guard !preparationCancellationRequested() else { return }
         await applyScannedFolder(scanned)
@@ -2136,6 +1754,13 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
     @discardableResult
     public func selectCover(url: URL) -> Bool {
+        guard applyCover(url: url) else { return false }
+        notifyCoverSelectionChange()
+        return true
+    }
+
+    @discardableResult
+    private func applyCover(url: URL) -> Bool {
         // Auswahl bedeutet Besitz eines unveränderlichen Inhalts-Snapshots,
         // nicht nur Merken eines später erneut gelesenen Pfads. Dadurch kann ein
         // gelöschtes oder ausgetauschtes Bild zwischen Auswahl und Start weder
@@ -2159,126 +1784,10 @@ public final class ConversionSession: ObservableObject, Identifiable {
         coverPath = nil
         embeddedCoverData = nil
         isCoverSuppressed = true
+        notifyCoverSelectionChange()
     }
 
-
-}
-
-public struct AudioFile: Identifiable, Equatable, Sendable {
-    public var id = UUID()
-    /// Physische Lese-URL: die reguläre Datei, aus der AVFoundation und ffmpeg
-    /// lesen. Bei einem Symlink ist das dessen aufgelöstes Ziel.
-    public let url: URL
-    /// Logischer Quellpfad: der Pfad, unter dem der Nutzer die Datei sieht.
-    /// Bei einem Symlink der Linkpfad, sonst gleich `url`. Reihenfolge und
-    /// Fallback-Kapiteltitel folgen ihm, damit zwei Links auf dasselbe Ziel
-    /// unterscheidbar bleiben (Review-Fund 2026-08-17).
-    public let sourceURL: URL
-    public let duration: TimeInterval
-    public let startTime: TimeInterval
-    public var chapterTitle: String
-    public var name: String { sourceURL.lastPathComponent }
-
-    /// Lädt Dauer und Kapiteltitel einer gewöhnlichen Datei. Für Symlinks
-    /// muss der strukturierte `FoundFile`-Initializer benutzt werden.
-    public init(url: URL) async {
-        let analyzed = await Self.loadDurationAndTitle(readURL: url, visibleURL: url)
-        self.url = url
-        self.sourceURL = url
-        self.startTime = 0
-        self.duration = analyzed.duration
-        self.chapterTitle = analyzed.title
-    }
-
-    /// Lädt aus der physischen Ziel-Datei, behält aber sichtbaren Namen und
-    /// Fallback-Titel des Quellpfads bei.
-    public init(foundFile: FoundFile) async {
-        let analyzed = await Self.loadDurationAndTitle(
-            readURL: foundFile.readURL,
-            visibleURL: foundFile.source
-        )
-        self.url = foundFile.readURL
-        self.sourceURL = foundFile.source
-        self.startTime = 0
-        self.duration = analyzed.duration
-        self.chapterTitle = analyzed.title
-    }
-
-    public init(url: URL, startTime: TimeInterval, duration: TimeInterval,
-                chapterTitle: String) {
-        self.url = url
-        self.sourceURL = url
-        self.startTime = AudioFile.sanitizeDuration(startTime)
-        self.duration = AudioFile.sanitizeDuration(duration)
-        self.chapterTitle = chapterTitle
-    }
-
-    public init(foundFile: FoundFile, startTime: TimeInterval,
-                duration: TimeInterval, chapterTitle: String) {
-        self.url = foundFile.readURL
-        self.sourceURL = foundFile.source
-        self.startTime = AudioFile.sanitizeDuration(startTime)
-        self.duration = AudioFile.sanitizeDuration(duration)
-        self.chapterTitle = chapterTitle
-    }
-
-    /// Gemeinsame AVFoundation-Analyse für reguläre Dateien und Symlink-Ziele.
-    /// CMTime-Werte werden an der Quelle auf endlich und nicht-negativ geklemmt;
-    /// unlesbare oder abgebrochene Metadaten fallen auf den sichtbaren Namen zurück.
-    private static func loadDurationAndTitle(
-        readURL: URL,
-        visibleURL: URL
-    ) async -> (duration: TimeInterval, title: String) {
-        let fallbackTitle = visibleURL.deletingPathExtension().lastPathComponent
-        guard !taskCancellationRequested() else { return (0, fallbackTitle) }
-        let asset = AVAsset(url: readURL)
-        let loadedDuration = try? await asset.load(.duration)
-        let duration = sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
-        guard !taskCancellationRequested() else { return (duration, fallbackTitle) }
-        let metadata = (try? await asset.load(.metadata)) ?? []
-        guard !taskCancellationRequested() else { return (duration, fallbackTitle) }
-        let title = await findRobustTag(for: "title", in: metadata) ?? fallbackTitle
-        return (duration, title)
-    }
-
-    /// Macht eine Sekundenangabe für Berechnungen sicher: NaN/Infinity/negativ → 0.
-    static func sanitizeDuration(_ seconds: TimeInterval) -> TimeInterval {
-        return (seconds.isFinite && seconds >= 0) ? seconds : 0
-    }
-
-    /// Wertet die strukturierte Task-Cancellation über `Task.checkCancellation`
-    /// aus, ohne die absichtlich fehlertoleranten Audio-APIs werfend zu machen.
-    static func taskCancellationRequested() -> Bool {
-        do {
-            try Task.checkCancellation()
-            return false
-        } catch {
-            return true
-        }
-    }
-
-    static func findRobustTag(
-        for tagName: String,
-        in metadata: [AVMetadataItem]
-    ) async -> String? {
-        guard !taskCancellationRequested() else { return nil }
-        if let commonItem = metadata.first(where: { $0.commonKey?.rawValue == tagName }) {
-            let value = try? await commonItem.load(.stringValue)
-            guard !taskCancellationRequested() else { return nil }
-            if let value, !value.isEmpty {
-                return value
-            }
-        }
-        for item in metadata {
-            guard !taskCancellationRequested() else { return nil }
-            guard let key = item.key else { continue }
-            let keyString = String(describing: key).lowercased()
-            if keyString.contains(tagName.lowercased()) {
-                let value = try? await item.load(.stringValue)
-                guard !taskCancellationRequested() else { return nil }
-                if let value, !value.isEmpty { return value }
-            }
-        }
-        return nil
+    func notifyCoverSelectionChange() {
+        coverSelectionDidChange.send()
     }
 }

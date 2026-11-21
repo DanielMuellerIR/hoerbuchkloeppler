@@ -9,6 +9,22 @@ struct ChapterEditSnapshot {
     var coverSuppressed: Bool
 }
 
+private let projectWriteQueue = DispatchQueue(label: "de.hoerbuchkloeppler.projects.write")
+
+private func performProjectIO<Result: Sendable>(_ work: @escaping @Sendable () throws -> Result) async throws -> Result {
+    let task = Task.detached(priority: Task.currentPriority) {
+        try Task.checkCancellation()
+        let result = try work()
+        try Task.checkCancellation()
+        return result
+    }
+    return try await withTaskCancellationHandler {
+        try await task.value
+    } onCancel: {
+        task.cancel()
+    }
+}
+
 @MainActor
 extension ConversionSession {
     public var bookMetadata: BookMetadata {
@@ -27,55 +43,76 @@ extension ConversionSession {
     }
 
     public func makeProject(at url: URL) throws -> AudiobookProject {
-        var sources: [ProjectSource] = []
-        var sections: [ProjectSection] = []
-        var ids: [URL: UUID] = [:]
-        for file in audioFiles {
-            let id: UUID
-            if let existing = ids[file.sourceURL] { id = existing }
-            else {
-                id = UUID(); ids[file.sourceURL] = id
-                // `resolve` liefert standardisierte URLs; die Quell-URL deshalb
-                // ebenso normalisieren, sonst findet ein Pfad mit `..` oder
-                // doppeltem Schrägstrich seinen Fingerprint nicht wieder.
-                let prior = loadedProjectURL.flatMap { loadedURL in
-                    projectSources.first { $0.location.resolve(from: loadedURL) == file.sourceURL.standardizedFileURL }
-                }
-                sources.append(ProjectSource(id: id,
-                    location: ProjectLocation(url: file.sourceURL, projectURL: url),
-                    readLocation: ProjectLocation(url: file.url, projectURL: url),
-                    sha256: try prior?.sha256 ?? projectFingerprints.fingerprint(file.url)))
-            }
-            sections.append(ProjectSection(id: file.id, sourceID: id, start: file.startTime, duration: file.duration, title: file.chapterTitle))
-        }
-        return AudiobookProject(sources: sources, sections: sections, metadata: bookMetadata,
+        let chapters = try Self.projectChapters(files: audioFiles, priorSources: projectSources,
+            priorURL: loadedProjectURL, destination: url, fingerprints: projectFingerprints)
+        return project(with: chapters)
+    }
+
+    private func project(with chapters: (sources: [ProjectSource], sections: [ProjectSection])) -> AudiobookProject {
+        AudiobookProject(sources: chapters.sources, sections: chapters.sections, metadata: bookMetadata,
             settings: settings, coverData: embeddedCoverData ?? coverImage?.tiffRepresentation,
             coverSuppressed: isCoverSuppressed)
     }
 
+    private nonisolated static func projectChapters(
+        files: [AudioFile], priorSources: [ProjectSource], priorURL: URL?, destination: URL,
+        fingerprints: ProjectFingerprintStore
+    ) throws -> (sources: [ProjectSource], sections: [ProjectSection]) {
+        var priorHashes: [URL: String] = [:]
+        if let priorURL {
+            priorHashes = Dictionary(priorSources.map { ($0.location.resolve(from: priorURL), $0.sha256) },
+                uniquingKeysWith: { first, _ in first })
+        }
+        var sources: [ProjectSource] = []
+        var sections: [ProjectSection] = []
+        var ids: [URL: UUID] = [:]
+        for file in files {
+            try Task.checkCancellation()
+            let id: UUID
+            if let existing = ids[file.sourceURL] { id = existing }
+            else {
+                id = UUID(); ids[file.sourceURL] = id
+                let prior = priorHashes[file.sourceURL.standardizedFileURL]
+                sources.append(ProjectSource(id: id,
+                    location: ProjectLocation(url: file.sourceURL, projectURL: destination),
+                    readLocation: ProjectLocation(url: file.url, projectURL: destination),
+                    sha256: try prior ?? fingerprints.fingerprint(file.url)))
+            }
+            sections.append(ProjectSection(id: file.id, sourceID: id, start: file.startTime, duration: file.duration, title: file.chapterTitle))
+        }
+        return (sources, sections)
+    }
+
     public func saveProject(to url: URL) throws {
+        projectOperation = UUID()
         refreshProjectSourceIssues()
         let project = try makeProject(at: url)
-        try project.write(to: url)
+        try projectWriteQueue.sync { try project.write(to: url) }
         projectSources = project.sources; loadedProjectURL = url
         refreshProjectSourceIssues()
     }
 
     public func openProject(from url: URL) throws {
         guard !isConverting else { throw ProjectError.invalid("Während einer Konvertierung kann kein Projekt geöffnet werden.") }
-        try applyProject(AudiobookProject.read(from: url), from: url)
+        projectOperation = UUID()
+        let project = try AudiobookProject.read(from: url)
+        let files = Self.audioFiles(in: project, at: url)
+        let issues = try Self.sourceIssues(project.sources, at: url, files: files, fingerprints: projectFingerprints)
+        try applyProject(project, from: url, files: files, issues: issues)
     }
 
-    private func applyProject(_ project: AudiobookProject, from url: URL) throws {
-        guard !isConverting else { throw ProjectError.invalid("Während einer Konvertierung kann kein Projekt geöffnet werden.") }
-        var files: [AudioFile] = []
+    private nonisolated static func audioFiles(in project: AudiobookProject, at url: URL) -> [AudioFile] {
         let sources = Dictionary(uniqueKeysWithValues: project.sources.map { ($0.id, $0) })
-        for section in project.sections {
-            guard let source = sources[section.sourceID] else { continue }
+        return project.sections.compactMap { section -> AudioFile? in
+            guard let source = sources[section.sourceID] else { return nil }
             var file = AudioFile(foundFile: FoundFile(source: source.location.resolve(from: url), resolved: source.readLocation.resolve(from: url)), startTime: section.start, duration: section.duration, chapterTitle: section.title)
             file.id = section.id
-            files.append(file)
+            return file
         }
+    }
+
+    private func applyProject(_ project: AudiobookProject, from url: URL, files: [AudioFile], issues: [ProjectSourceIssue]) throws {
+        guard !isConverting else { throw ProjectError.invalid("Während einer Konvertierung kann kein Projekt geöffnet werden.") }
         // Erst vollständig dekodieren, danach bestehenden Zustand ersetzen.
         resetSession()
         audioFiles = files
@@ -85,33 +122,58 @@ extension ConversionSession {
         else { embeddedCoverData = project.coverData; coverImage = project.coverData.flatMap(CoverArtwork.preview(from:)) }
         projectSources = project.sources; loadedProjectURL = url
         undoChapters = []; redoChapters = []; updateHistoryAvailability()
-        refreshProjectSourceIssues()
+        projectSourceIssues = issues
     }
 
     public func openProjectAsync(from url: URL) async throws {
+        try Task.checkCancellation()
+        guard !isConverting else { throw ProjectError.invalid("Während einer Konvertierung kann kein Projekt geöffnet werden.") }
         let operation = UUID(); projectOperation = operation
-        let store = projectFingerprints
-        let project = try await Task.detached {
+        let fingerprints = projectFingerprints
+        let (project, files, issues) = try await performProjectIO {
             let project = try AudiobookProject.read(from: url)
-            for source in project.sources { _ = try? store.fingerprint(source.readLocation.resolve(from: url)) }
-            return project
-        }.value
+            let files = Self.audioFiles(in: project, at: url)
+            let issues = try Self.sourceIssues(project.sources, at: url, files: files, fingerprints: fingerprints)
+            return (project, files, issues)
+        }
+        try Task.checkCancellation()
         // Ein zwischenzeitlicher Import oder ein neueres Öffnen hat diesen
         // Vorgang ersetzt. Das still zu schlucken hieße: Das Projekt öffnet
         // sich einfach nicht, ohne dass jemand erfährt warum.
         guard projectOperation == operation else {
             throw ProjectError.invalid("Das Öffnen wurde durch eine andere Aktion unterbrochen; bitte erneut öffnen.")
         }
-        try applyProject(project, from: url)
+        try applyProject(project, from: url, files: files, issues: issues)
     }
 
     public func saveProjectAsync(to url: URL) async throws {
+        try await saveProjectAsync(to: url) { project, destination in
+            // Sonst könnte ein langsamer älterer Vorgang eine neuere Datei überschreiben.
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                projectWriteQueue.async {
+                    continuation.resume(with: Result { try project.write(to: destination) })
+                }
+            }
+        }
+    }
+
+    func saveProjectAsync(
+        to url: URL,
+        writeProject: @Sendable (AudiobookProject, URL) async throws -> Void
+    ) async throws {
+        try Task.checkCancellation()
         let operation = UUID(); projectOperation = operation
         let files = audioFiles
-        let store = projectFingerprints
-        await Task.detached {
-            for file in files { _ = try? store.fingerprint(file.url) }
-        }.value
+        let priorSources = projectSources
+        let priorURL = loadedProjectURL
+        let fingerprints = projectFingerprints
+        let (chapters, issues) = try await performProjectIO {
+            let chapters = try Self.projectChapters(files: files, priorSources: priorSources, priorURL: priorURL,
+                destination: url, fingerprints: fingerprints)
+            let issues = try Self.sourceIssues(chapters.sources, at: url, files: files, fingerprints: fingerprints)
+            return (chapters, issues)
+        }
+        try Task.checkCancellation()
         // Sonst hielte der Nutzer das Projekt für gespeichert, obwohl nichts
         // geschrieben wurde — der Konfliktfall eine Zeile weiter meldet sich
         // aus demselben Grund.
@@ -119,34 +181,92 @@ extension ConversionSession {
             throw ProjectError.invalid("Das Speichern wurde durch eine andere Aktion unterbrochen; bitte erneut speichern.")
         }
         guard files == audioFiles else { throw ProjectError.invalid("Kapitel wurden während des Speicherns verändert; bitte erneut speichern.") }
-        try saveProject(to: url)
+        let savedCoverImage = coverImage
+        let savedCoverData = embeddedCoverData
+        let project = project(with: chapters)
+        try await writeProject(project, url)
+        // Ein Import oder Öffnen darf den bereits geschriebenen Stand nicht an
+        // seinen eigenen, inzwischen aktiven Zustand binden.
+        guard projectOperation == operation else {
+            throw ProjectError.invalid("Die Projektdatei wurde geschrieben. Eine andere Aktion hat inzwischen das aktive Projekt verändert.")
+        }
+        projectSources = project.sources; loadedProjectURL = url
+        guard files == audioFiles, project.metadata == bookMetadata, project.settings == settings,
+              savedCoverImage === coverImage, savedCoverData == embeddedCoverData,
+              project.coverSuppressed == isCoverSuppressed else {
+            try? refreshProjectSourceIssues(policy: .cachedOnly)
+            throw ProjectError.invalid("Die Projektdatei enthält den Stand vor den letzten Änderungen. Bitte erneut speichern.")
+        }
+        projectSourceIssues = issues
     }
 
     public func refreshProjectSourceIssues() {
+        try? refreshProjectSourceIssues(policy: .synchronous)
+    }
+
+    public func verifyProjectSources() async throws {
         guard let url = loadedProjectURL else { projectSourceIssues = []; return }
-        // Wie in `makeProject`: beide Seiten standardisiert vergleichen, damit
-        // eine veränderte Quelle nicht wegen Schreibweise des Pfads unbemerkt bleibt.
-        let activeURLs = Set(audioFiles.map { $0.sourceURL.standardizedFileURL })
-        projectSourceIssues = projectSources.compactMap { source in
+        let operation = projectOperation
+        let files = audioFiles
+        let sources = projectSources
+        let fingerprints = projectFingerprints
+        let issues = try await performProjectIO {
+            try Self.sourceIssues(sources, at: url, files: files, fingerprints: fingerprints)
+        }
+        try Task.checkCancellation()
+        guard projectOperation == operation, files == audioFiles, url == loadedProjectURL else {
+            throw ProjectError.invalid("Das Projekt wurde während der Prüfung verändert; bitte erneut starten.")
+        }
+        projectSourceIssues = issues
+    }
+
+    func refreshProjectSourceIssues(
+        policy: ProjectFingerprintStore.ReadPolicy, plan: ConversionPlan? = nil
+    ) throws {
+        projectSourceIssues = try Self.sourceIssues(projectSources, at: loadedProjectURL,
+            files: plan?.groups.flatMap { $0 } ?? audioFiles,
+            fingerprints: projectFingerprints, policy: policy, plannedInputs: plan?.inputSnapshots)
+    }
+
+    private nonisolated static func sourceIssues(
+        _ sources: [ProjectSource], at url: URL?, files: [AudioFile],
+        fingerprints: ProjectFingerprintStore, policy: ProjectFingerprintStore.ReadPolicy = .verifyCurrent,
+        plannedInputs: [String: OutputDestinationSnapshot]? = nil
+    ) throws -> [ProjectSourceIssue] {
+        try Task.checkCancellation()
+        guard let url else { return [] }
+        var activeReadURLs: [URL: Set<URL>] = [:]
+        for file in files {
+            activeReadURLs[file.sourceURL.standardizedFileURL, default: []].insert(file.url)
+        }
+        let issues = try sources.compactMap { source -> ProjectSourceIssue? in
+            try Task.checkCancellation()
             let visible = source.location.resolve(from: url)
-            guard activeURLs.contains(visible) else { return nil }
+            guard let readURLs = activeReadURLs[visible] else { return nil }
             let readURL = source.readLocation.resolve(from: url)
             let reason: String
-            do {
-                guard visible.resolvingSymlinksInPath() == readURL.resolvingSymlinksInPath() else {
-                    return ProjectSourceIssue(id: source.id, path: visible.path, reason: "Verknüpfung wurde verändert")
-                }
-                guard FFmpegWrapper.fileSystemIdentity(at: readURL, followSymlink: true) != nil else {
-                    return ProjectSourceIssue(id: source.id, path: visible.path, reason: "Quelle fehlt oder ist nicht lesbar")
-                }
-                if projectFingerprints.changedSinceLastRead(readURL) {
-                    return ProjectSourceIssue(id: source.id, path: visible.path, reason: "Quelle wurde verändert")
-                }
-                if try projectFingerprints.fingerprint(readURL) == source.sha256 { return nil }
+            guard visible.resolvingSymlinksInPath() == readURL.resolvingSymlinksInPath() else {
+                return ProjectSourceIssue(id: source.id, path: visible.path, reason: "Verknüpfung wurde verändert")
+            }
+            switch fingerprints.verify(readURL, expectedSHA256: source.sha256, policy: policy) {
+            case .unchanged(let identity):
+                // Der Export muss denselben Snapshot lesen, der den Projekt-Hash
+                // geliefert hat. Pfad und Session allein binden den Plan nicht daran.
+                let matchesPlan = plannedInputs.map { inputs in
+                    readURLs.allSatisfy { url in
+                        guard case .existing(let planned) = inputs[FFmpegWrapper.canonicalPath(url)] else { return false }
+                        return planned.matchesContentSnapshot(identity)
+                    }
+                } ?? true
+                guard !matchesPlan else { return nil }
                 reason = "Quelle wurde verändert"
-            } catch { reason = "Quelle fehlt oder ist nicht lesbar" }
+            case .changed: reason = "Quelle wurde verändert"
+            case .unreadable: reason = "Quelle fehlt oder ist nicht lesbar"
+            }
             return ProjectSourceIssue(id: source.id, path: visible.path, reason: reason)
         }
+        try Task.checkCancellation()
+        return issues
     }
 
     func recordChapterEdit(previous: [AudioFile]) {
@@ -210,8 +330,9 @@ extension ConversionSession {
                 embeddedCoverData = snapshot.coverData
                 coverImage = snapshot.coverData.flatMap(CoverArtwork.preview(from:))
                 coverPath = snapshot.coverPath
+                isCoverSuppressed = false
+                notifyCoverSelectionChange()
             }
-            isCoverSuppressed = snapshot.coverSuppressed
         }
         restoringChapters = false
         updateHistoryAvailability()

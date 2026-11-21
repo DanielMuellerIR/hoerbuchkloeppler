@@ -29,6 +29,21 @@ struct CLIInvocationTests {
         #expect(session.cliFolderIfRepresentable == nil)
     }
 
+    @Test("Die Ordner-CLI kann eine manuell geänderte Kapitelreihenfolge nicht darstellen")
+    func cliRepresentabilityTracksChapterOrder() async {
+        let session = ConversionSession()
+        session.title = "Buch"
+        session.author = "Autor"
+        let folder = URL(fileURLWithPath: "/tmp/buch")
+        let chapters = ["01.mp3", "02.mp3"].map { testAudioFile(folder.appendingPathComponent($0)) }
+        await session.applyScannedFolder(.init(folderURL: folder, audioFiles: chapters,
+                                              imageURLs: [], embeddedArtwork: nil))
+        #expect(session.cliFolderIfRepresentable == folder)
+        session.moveChapters(from: IndexSet(integer: 0), to: 2)
+        #expect(session.audioFiles.map(\.id) == chapters.reversed().map(\.id))
+        #expect(session.cliFolderIfRepresentable == nil)
+    }
+
     @Test("CLI-Befehl enthält alle GUI-Optionen und quotet Shell-Metazeichen")
     func completeShellSafeCLICommand() throws {
         let directory = try makeTestDirectory()

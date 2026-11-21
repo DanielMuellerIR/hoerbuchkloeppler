@@ -16,7 +16,7 @@ struct ImportLifecycleTests {
             duration: 1,
             chapterTitle: "Alt"
         )
-        let scanned = ConversionSession.ScannedFolder(
+        let scanned = ScannedFolder(
             folderURL: URL(fileURLWithPath: "/tmp/alt"),
             audioFiles: [file],
             imageURLs: [],
@@ -94,7 +94,7 @@ struct ImportLifecycleTests {
         }
         let results = await session.loadAudioFiles(from: files)
 
-        // Beide Frontends zählen ihre `finishImport`-Aufrufe über die Ergebnisse.
+        // Der Sammelimport zählt je Fund genau einen abgeschlossenen Beitrag.
         #expect(results.count == files.count)
         #expect(results.allSatisfy { if case .cancelled = $0 { return true } else { return false } })
     }
@@ -169,7 +169,7 @@ struct ImportLifecycleTests {
             AudioFile(url: container, startTime: 1, duration: 2, chapterTitle: "Zwei")
         ]
 
-        let result = ConversionSession.deduplicateAudioFiles(chapters + chapters)
+        let result = SourceDiscovery.deduplicateAudioFiles(chapters + chapters)
 
         #expect(result.files.count == 2)
         #expect(result.files.map(\.chapterTitle) == ["Eins", "Zwei"])
@@ -242,7 +242,7 @@ struct ImportLifecycleTests {
         await session.finishImport(token)
 
         #expect(session.audioFiles.isEmpty)
-        #expect(session.lastImportFailures.count == 1)
+        #expect(session.lastImportFailures.map(\.source) == [.dropItem(position: 2, total: 2)])
         #expect(session.importErrorMessage?.contains("Drop-Element 2 von 2") == true)
         #expect(session.importErrorMessage?.contains("Datei nicht verfügbar") == true)
         #expect(!session.isImporting)

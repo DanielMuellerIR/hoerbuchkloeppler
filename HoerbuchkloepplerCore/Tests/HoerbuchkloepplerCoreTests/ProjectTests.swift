@@ -83,6 +83,121 @@ struct ProjectTests {
         #expect(reopened.projectSourceIssues.count == 1)
     }
 
+    @Test("Export prüft eine zurückgekehrte Projektquelle und lehnt abweichende Inhalte ab")
+    func conversionReverifiesProjectSource() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Quelle.wav")
+        let bytes = Data([1, 2, 3])
+        try bytes.write(to: source)
+        let original = ConversionSession(settings: AudioSettings())
+        original.audioFiles = [AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Kapitel")]
+        let projectURL = root.appendingPathComponent("Buch.hkproject")
+        try original.saveProject(to: projectURL)
+        try FileManager.default.removeItem(at: source)
+
+        let reopened = ConversionSession(settings: AudioSettings())
+        try await reopened.openProjectAsync(from: projectURL)
+        #expect(reopened.projectSourceIssues.first?.reason == "Quelle fehlt oder ist nicht lesbar")
+        let legacy = ConversionSession(settings: AudioSettings())
+        try legacy.openProject(from: projectURL)
+        try bytes.write(to: source)
+
+        // Der Zielordner verhindert einen Werkzeugstart nach erfolgreicher Quellenprüfung.
+        func plan() -> ConversionPlan {
+            FFmpegWrapper.makeConversionPlan(files: reopened.audioFiles, outputURL: root, maxDurationHours: nil)
+        }
+        #expect(FFmpegWrapper.startVerifiedConversion(session: reopened, plan: plan()) == .rejected("Projektquellen fehlen oder wurden verändert."))
+        let directoryError = ConversionOutputError.destinationIsDirectory(root).localizedDescription
+        #expect(await FFmpegWrapper.convertAsync(session: reopened, plan: plan()) == .rejected(directoryError))
+        #expect(reopened.projectSourceIssues.isEmpty)
+        #expect(FFmpegWrapper.convert(session: legacy, outputURL: root) == .rejected(directoryError))
+
+        // Die gleiche Datei mit geänderter mtime darf nach erneuter Inhaltsprüfung passieren.
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 100)], ofItemAtPath: source.path)
+        #expect(await FFmpegWrapper.convertAsync(session: reopened, plan: plan()) == .rejected(directoryError))
+        #expect(reopened.projectSourceIssues.isEmpty)
+
+        try Data([3, 2, 1]).write(to: source, options: .atomic)
+        #expect(await FFmpegWrapper.convertAsync(session: reopened, plan: plan()) == .rejected("Projektquellen fehlen oder wurden verändert."))
+        #expect(reopened.projectSourceIssues.first?.reason == "Quelle wurde verändert")
+    }
+
+    @Test("Verifizierter Export bindet die Projektquelle an die geplante Dateiidentität")
+    func projectSourceMustMatchPlannedSnapshot() throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Quelle.wav")
+        let original = root.appendingPathComponent("Original.wav")
+        let output = root.appendingPathComponent("Ausgabe.m4b")
+        try Data([1, 2, 3]).write(to: source)
+        let session = ConversionSession(settings: AudioSettings())
+        session.audioFiles = [AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Kapitel")]
+        try session.saveProject(to: root.appendingPathComponent("Buch.hkproject"))
+
+        try FileManager.default.moveItem(at: source, to: original)
+        try Data([4, 5, 6]).write(to: source)
+        let wrongFilePlan = FFmpegWrapper.makeConversionPlan(files: session.audioFiles, outputURL: output, maxDurationHours: nil)
+        try FileManager.default.removeItem(at: source)
+        try FileManager.default.moveItem(at: original, to: source)
+
+        session.refreshProjectSourceIssues()
+        #expect(session.projectSourceIssues.isEmpty)
+        #expect(FFmpegWrapper.startVerifiedConversion(session: session, plan: wrongFilePlan) == .rejected("Projektquellen fehlen oder wurden verändert."))
+        #expect(session.projectSourceIssues.first?.reason == "Quelle wurde verändert")
+        #expect(!session.isConverting && !FileManager.default.fileExists(atPath: output.path))
+    }
+
+    @Test("Verifizierter Start verwendet ausschließlich Kapitel des aktuellen Buchs")
+    func verifiedStartRejectsObsoleteChapters() {
+        let session = ConversionSession(settings: AudioSettings())
+        let source = URL(fileURLWithPath: "/tmp/kloeppler-alte-quelle.wav")
+        session.audioFiles = [AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Alt")]
+        let plan = FFmpegWrapper.makeConversionPlan(files: session.audioFiles, outputURL: source, maxDurationHours: nil)
+        session.audioFiles[0].chapterTitle = "Neu"
+        #expect(FFmpegWrapper.startVerifiedConversion(session: session, plan: plan) == .rejected("Das Hörbuch wurde geändert oder wird bereits bearbeitet. Bitte erneut starten."))
+        #expect(FFmpegWrapper.convert(session: session, plan: plan) == .rejected("Das Hörbuch wurde geändert oder wird bereits bearbeitet. Bitte erneut starten."))
+        _ = session.beginImport()
+        #expect(FFmpegWrapper.convert(session: session, outputURL: source) == .rejected("Das Hörbuch wurde geändert oder wird bereits bearbeitet. Bitte erneut starten."))
+        session.cancelImport()
+        #expect(!session.isConverting)
+    }
+
+    @Test("Ein fremder synchroner Exportplan kann eine fehlende Projektquelle nicht umgehen")
+    func synchronousStartRejectsPlanFromAnotherBook() throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Quelle.wav")
+        let unrelated = root.appendingPathComponent("Andere Quelle.wav")
+        try Data([1]).write(to: source)
+        try Data([2]).write(to: unrelated)
+        let session = ConversionSession(settings: AudioSettings())
+        session.audioFiles = [AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Kapitel")]
+        try session.saveProject(to: root.appendingPathComponent("Buch.hkproject"))
+        try FileManager.default.removeItem(at: source)
+        session.refreshProjectSourceIssues()
+        #expect(session.projectSourceIssues.first?.reason == "Quelle fehlt oder ist nicht lesbar")
+
+        let unrelatedFile = AudioFile(url: unrelated, startTime: 0, duration: 1, chapterTitle: "Ein anderes Kapitel")
+        let plan = FFmpegWrapper.makeConversionPlan(files: [unrelatedFile], outputURL: root, maxDurationHours: nil)
+        #expect(FFmpegWrapper.convert(session: session, plan: plan) == .rejected("Das Hörbuch wurde geändert oder wird bereits bearbeitet. Bitte erneut starten."))
+        #expect(session.projectSourceIssues.first?.reason == "Quelle fehlt oder ist nicht lesbar")
+    }
+
+    @Test("Ein abgebrochener Öffnen-Aufruf erhält die vorige Session")
+    func cancelledAsyncOpenKeepsSession() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let projectURL = root.appendingPathComponent("Buch.hkproject")
+        let original = ConversionSession(settings: AudioSettings())
+        original.title = "Anderes Buch"
+        try original.saveProject(to: projectURL)
+
+        let session = ConversionSession(settings: AudioSettings())
+        session.title = "Behalten"
+        let opening = Task { try await session.openProjectAsync(from: projectURL) }
+        opening.cancel()
+        await #expect(throws: CancellationError.self) { try await opening.value }
+        #expect(session.title == "Behalten")
+        #expect(session.loadedProjectURL == nil)
+    }
+
     @Test("Teilen, Zusammenführen, Nummerieren und Undo/Redo erhalten Zeitabschnitte")
     func editing() {
         let source = URL(fileURLWithPath: "/tmp/source.wav")
@@ -213,6 +328,56 @@ struct ProjectTests {
         #expect(throws: (any Error).self) { _ = try ProjectSource.fingerprint(fifo) }
     }
 
+    @Test("Projektdateien werden nur als reguläre Datei bis 48 MiB gelesen")
+    func rejectsSpecialAndOversizedProjectFiles() throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let fifo = root.appendingPathComponent("Warteschlange.hkproject")
+        try #require(mkfifo(fifo.path, 0o600) == 0)
+        #expect { _ = try AudiobookProject.read(from: fifo) } throws: { error in
+            error.localizedDescription.contains("keine reguläre Datei")
+        }
+
+        let oversized = root.appendingPathComponent("Gross.hkproject")
+        try Data().write(to: oversized)
+        let handle = try FileHandle(forWritingTo: oversized)
+        try handle.truncate(atOffset: 48 * 1024 * 1024 + 1)
+        try handle.close()
+        #expect { _ = try AudiobookProject.read(from: oversized) } throws: { error in
+            error.localizedDescription == "Projektdatei überschreitet 48 MiB."
+        }
+    }
+
+    @Test("Projekt lädt nur in Vorschau und Kapitelmetadaten darstellbare Zeitwerte")
+    func projectSectionTimesMustFitIntegerTimebases() throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("Zeiten.hkproject")
+        let source = root.appendingPathComponent("Quelle.wav")
+        try Data([1]).write(to: source)
+        let session = ConversionSession(settings: AudioSettings())
+        session.audioFiles = [AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Kapitel")]
+        var project = try session.makeProject(at: url)
+        let section = try #require(project.sections.first)
+        let limit = Double(Int64.max)
+
+        let invalidTimes: [[(start: Double, duration: Double)]] = [
+            [(1e20, 1)], [(limit / 600, 1)], [(0, limit / 1000)], [(0, 6e15), (0, 6e15)]
+        ]
+        for times in invalidTimes {
+            project.sections = times.map { time in
+                ProjectSection(id: UUID(), sourceID: section.sourceID, start: time.start, duration: time.duration, title: section.title)
+            }
+            try project.write(to: url)
+            #expect { _ = try AudiobookProject.read(from: url) } throws: { error in
+                error.localizedDescription == "Kapitelzeiten oder Gesamtdauer des Projekts sind ungültig."
+            }
+        }
+
+        project.sections = [ProjectSection(id: section.id, sourceID: section.sourceID,
+            start: 10_000_000_000, duration: 1e15, title: section.title)]
+        try project.write(to: url)
+        #expect(try AudiobookProject.read(from: url).sections.first?.duration == 1e15)
+    }
+
     @Test("Externe Quellen bleiben eindeutig absolut, ungültiges Umordnen bleibt folgenlos")
     func externalLocationsAndInvalidMoves() {
         let location = ProjectLocation(url: URL(fileURLWithPath: "/other/source.wav"), projectURL: URL(fileURLWithPath: "/books/test.hkproject"))
@@ -248,8 +413,7 @@ struct ProjectTests {
         let url = root.appendingPathComponent("Buch.hkproject")
         try session.saveProject(to: url)
 
-        // Wie in der GUI: Das asynchrone Öffnen wärmt den Fingerprint-Speicher
-        // außerhalb des Main Actors vor.
+        // Wie in der GUI: Das asynchrone Öffnen prüft die Quellen im Hintergrund.
         let reopened = ConversionSession(settings: AudioSettings())
         try await reopened.openProjectAsync(from: url)
         #expect(reopened.projectSourceIssues.isEmpty)
@@ -259,7 +423,7 @@ struct ProjectTests {
         var tag: [UInt8] = [0x41]
         #expect(setxattr(source.path, "com.apple.metadata:_kMDItemUserTags", &tag, tag.count, 0, 0) == 0)
 
-        reopened.refreshProjectSourceIssues()
+        try await reopened.verifyProjectSources()
         #expect(reopened.projectSourceIssues.isEmpty)
         // Auch der zweite Aufruf darf nicht kippen: Der Fehlalarm war früher
         // selbsterhaltend, weil nie neu gehasht wurde.
@@ -267,11 +431,42 @@ struct ProjectTests {
         #expect(reopened.projectSourceIssues.isEmpty)
     }
 
+    @Test("Gleich großer neuer Inhalt bleibt auch mit wiederhergestellter mtime erkennbar")
+    func sourceRewriteWithRestoredModificationTime() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Quelle.wav")
+        try Data([1, 2, 3]).write(to: source)
+        let session = ConversionSession(settings: AudioSettings())
+        session.audioFiles = [AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Kapitel")]
+        try session.saveProject(to: root.appendingPathComponent("Buch.hkproject"))
+        let plan = FFmpegWrapper.makeConversionPlan(files: session.audioFiles, outputURL: root, maxDurationHours: nil)
+
+        let handle = try FileHandle(forWritingTo: source)
+        defer { try? handle.close() }
+        var before = stat()
+        try #require(fstat(handle.fileDescriptor, &before) == 0)
+        try handle.write(contentsOf: Data([3, 2, 1]))
+        let originalTimes = [before.st_atimespec, before.st_mtimespec]
+        let timeUpdate = originalTimes.withUnsafeBufferPointer { futimens(handle.fileDescriptor, $0.baseAddress) }
+        try #require(timeUpdate == 0)
+        var after = stat()
+        try #require(fstat(handle.fileDescriptor, &after) == 0)
+        let old = FileSystemIdentity(stat: before)
+        let new = FileSystemIdentity(stat: after)
+        try #require(old.matchesContentSnapshot(new) && old != new)
+
+        let rejection = ConversionStartResult.rejected("Projektquellen fehlen oder wurden verändert.")
+        #expect(FFmpegWrapper.startVerifiedConversion(session: session, plan: plan) == rejection)
+        #expect(FFmpegWrapper.convert(session: session, plan: plan) == rejection)
+        try await session.verifyProjectSources()
+        #expect(session.projectSourceIssues.first?.reason == "Quelle wurde verändert")
+    }
+
     @Test("Ein unterbrochenes Speichern meldet sich, statt still nichts zu tun")
     func interruptedAsyncSaveReportsInsteadOfSilence() async throws {
         let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("Quelle.wav")
-        // Bewusst groß: Der Prewarm hasht die Quelle außerhalb des Main Actors,
+        // Bewusst groß: Das Speichern hasht die Quelle außerhalb des Main Actors,
         // und dieser Test braucht dafür ein Zeitfenster, das deutlich über der
         // Einplanungsdauer eines Main-Actor-Sprungs liegt.
         try Data(count: 64 * 1024 * 1024).write(to: source)
@@ -305,5 +500,40 @@ struct ProjectTests {
                 == "Das Speichern wurde durch eine andere Aktion unterbrochen; bitte erneut speichern."
         }
         #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
+    @Test("Bereits geschriebener Projektstand meldet spätere Änderungen", arguments: [false, true])
+    func lateChangeAfterAsyncSave(reset: Bool) async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Quelle.wav")
+        let url = root.appendingPathComponent("Buch.hkproject")
+        try Data([1, 2, 3]).write(to: source)
+        let session = ConversionSession(settings: AudioSettings())
+        session.audioFiles = [AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Alt")]
+
+        let expectedMessage = reset
+            ? "Die Projektdatei wurde geschrieben. Eine andere Aktion hat inzwischen das aktive Projekt verändert."
+            : "Die Projektdatei enthält den Stand vor den letzten Änderungen. Bitte erneut speichern."
+        await #expect {
+            try await session.saveProjectAsync(to: url) { project, destination in
+                try project.write(to: destination)
+                await MainActor.run {
+                    if reset { session.resetSession() }
+                    else { session.audioFiles[0].chapterTitle = "Neu" }
+                }
+            }
+        } throws: { error in
+            error.localizedDescription == expectedMessage
+        }
+        #expect(try AudiobookProject.read(from: url).sections[0].title == "Alt")
+        if reset {
+            #expect(session.loadedProjectURL == nil && session.audioFiles.isEmpty)
+        } else {
+            #expect(session.loadedProjectURL == url && session.audioFiles[0].chapterTitle == "Neu")
+            try Data([4, 5, 6]).write(to: source, options: .atomic)
+            let output = root.appendingPathComponent("Ausgabe.m4b")
+            let plan = FFmpegWrapper.makeConversionPlan(files: session.audioFiles, outputURL: output, maxDurationHours: nil)
+            #expect(FFmpegWrapper.startVerifiedConversion(session: session, plan: plan) == .rejected("Projektquellen fehlen oder wurden verändert."))
+        }
     }
 }

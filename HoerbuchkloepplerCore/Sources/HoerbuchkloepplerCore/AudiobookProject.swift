@@ -2,9 +2,29 @@ import Foundation
 import CryptoKit
 import Darwin
 
+private func openRegularFile(_ url: URL, label: String) throws -> (FileHandle, FileSystemIdentity) {
+    // Ein FIFO darf schon beim Öffnen nicht blockieren. Der Typ wird am
+    // geöffneten Deskriptor geprüft, damit ein Pfadtausch die Prüfung nicht umgeht.
+    let descriptor = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+        guard let path else { errno = EINVAL; return -1 }
+        return Darwin.open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC)
+    }
+    guard descriptor >= 0 else {
+        let reason = String(cString: strerror(errno))
+        throw ProjectError.invalid("\(label) kann nicht gelesen werden: \(url.lastPathComponent) (\(reason))")
+    }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    var information = stat()
+    guard fstat(descriptor, &information) == 0, information.st_mode & S_IFMT == S_IFREG else {
+        throw ProjectError.invalid("\(label) ist keine reguläre Datei: \(url.lastPathComponent)")
+    }
+    return (handle, FileSystemIdentity(stat: information))
+}
+
 /// Transportformat ohne Audiodaten. Abschnittsfolge ist bewusst die Arrayfolge.
 public struct AudiobookProject: Codable, Sendable {
     public static let currentVersion = 1
+    private static let maximumByteCount = 48 * 1024 * 1024
     public var formatVersion = currentVersion
     public var sources: [ProjectSource]
     public var sections: [ProjectSection]
@@ -65,9 +85,7 @@ public struct AudiobookProject: Codable, Sendable {
     }
 
     public static func read(from url: URL) throws -> Self {
-        let values = try url.resourceValues(forKeys: [.fileSizeKey])
-        guard (values.fileSize ?? 0) <= 48 * 1024 * 1024 else { throw ProjectError.invalid("Projektdatei überschreitet 48 MiB.") }
-        let data = try Data(contentsOf: url)
+        let data = try readBoundedData(from: url)
         if let probe = try? JSONDecoder().decode(VersionProbe.self, from: data), probe.hasField {
             guard let declaredVersion = probe.declared else {
                 throw ProjectError.invalid("Projektversion ist keine Zahl; die Datei stammt aus einem anderen Format.")
@@ -81,11 +99,54 @@ public struct AudiobookProject: Codable, Sendable {
         guard ids.count == project.sources.count,
               project.sources.allSatisfy({ $0.location.isWellFormed && $0.readLocation.isWellFormed }),
               Set(project.sections.map(\.id)).count == project.sections.count,
-              project.sections.allSatisfy({ ids.contains($0.sourceID) && $0.start.isFinite && $0.start >= 0 && $0.duration.isFinite && $0.duration > 0 }),
+              project.sections.allSatisfy({ ids.contains($0.sourceID) }),
               (project.coverData?.count ?? 0) <= 32 * 1024 * 1024 else {
             throw ProjectError.invalid("Ungültige Quellen, Abschnitte oder Coverdaten im Projekt.")
         }
+        guard sectionsHaveRepresentableTimes(project.sections) else {
+            throw ProjectError.invalid("Kapitelzeiten oder Gesamtdauer des Projekts sind ungültig.")
+        }
         return project
+    }
+
+    private static func sectionsHaveRepresentableTimes(_ sections: [ProjectSection]) -> Bool {
+        // Vorschau und FFmetadata verwenden Int64-Zeitwerte mit verschiedenen
+        // Skalen. Double(Int64.max) rundet auf den ersten unzulässigen Wert auf.
+        let exclusiveLimit = Double(Int64.max)
+        var duration: Double = 0
+        for section in sections {
+            guard section.start.isFinite, section.start >= 0,
+                  section.duration.isFinite, section.duration > 0,
+                  (section.start + section.duration) * 600 < exclusiveLimit else { return false }
+            duration += section.duration
+            guard duration * 1000 < exclusiveLimit else { return false }
+        }
+        return true
+    }
+
+    private static func readBoundedData(from url: URL) throws -> Data {
+        let (handle, identity) = try openRegularFile(url, label: "Projektdatei")
+        defer { try? handle.close() }
+        let tooLarge = ProjectError.invalid("Projektdatei überschreitet 48 MiB.")
+        guard identity.size <= maximumByteCount else { throw tooLarge }
+
+        var data = Data()
+        data.reserveCapacity(Int(identity.size))
+        repeat {
+            try Task.checkCancellation()
+            let remaining = maximumByteCount + 1 - data.count
+            guard let chunk = try handle.read(upToCount: min(1024 * 1024, remaining)), !chunk.isEmpty else { break }
+            data.append(chunk)
+            guard data.count <= maximumByteCount else { throw tooLarge }
+        } while true
+
+        var after = stat()
+        guard data.count == identity.size,
+              fstat(handle.fileDescriptor, &after) == 0,
+              identity == FileSystemIdentity(stat: after) else {
+            throw ProjectError.invalid("Projektdatei wurde beim Lesen verändert: \(url.lastPathComponent)")
+        }
+        return data
     }
 }
 
@@ -165,32 +226,26 @@ public struct ProjectSource: Codable, Sendable {
     public var sha256: String
 
     public static func fingerprint(_ url: URL) throws -> String {
-        // O_NONBLOCK verhindert, dass ein ausgetauschter FIFO schon beim
-        // Öffnen hängen bleibt. Erst der geöffnete Descriptor beweist den Typ.
-        let descriptor = Darwin.open(url.path, O_RDONLY | O_NONBLOCK)
-        guard descriptor >= 0 else {
-            let reason = String(cString: strerror(errno))
-            throw ProjectError.invalid("Quelle kann nicht gelesen werden: \(url.lastPathComponent) (\(reason))")
-        }
-        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        try fingerprintSnapshot(url).sha256
+    }
+
+    static func fingerprintSnapshot(_ url: URL) throws -> (identity: FileSystemIdentity, sha256: String) {
+        let (handle, identity) = try openRegularFile(url, label: "Quelle")
         defer { try? handle.close() }
-        var before = stat()
-        guard fstat(descriptor, &before) == 0, before.st_mode & S_IFMT == S_IFREG else {
-            throw ProjectError.invalid("Quelle ist keine reguläre Datei: \(url.lastPathComponent)")
-        }
         var digest = SHA256()
-        while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty { digest.update(data: data) }
+        var remaining = identity.size
+        while remaining > 0 {
+            try Task.checkCancellation()
+            guard let data = try handle.read(upToCount: Int(min(1024 * 1024, remaining))), !data.isEmpty else { break }
+            digest.update(data: data)
+            remaining -= off_t(data.count)
+        }
         var after = stat()
-        // Gemeinsames Inhaltsprädikat statt eines eigenen Feldvergleichs. Die
-        // frühere Fassung schloss die Statuszeit ein: Ein Finder-Tag während
-        // des minutenlangen Hashens einer großen Quelle ließ das Speichern mit
-        // „Quelle wurde während der Prüfung verändert" scheitern, obwohl der
-        // Inhalt unangetastet war.
-        guard fstat(descriptor, &after) == 0,
-              FileSystemIdentity(stat: before).matchesContentSnapshot(FileSystemIdentity(stat: after)) else {
+        guard remaining == 0, fstat(handle.fileDescriptor, &after) == 0,
+              identity == FileSystemIdentity(stat: after) else {
             throw ProjectError.invalid("Quelle wurde während der Prüfung verändert: \(url.lastPathComponent)")
         }
-        return digest.finalize().map { String(format: "%02x", $0) }.joined()
+        return (identity, digest.finalize().map { String(format: "%02x", $0) }.joined())
     }
 }
 

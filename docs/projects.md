@@ -15,6 +15,8 @@ Fingerprints erhalten, damit Speichern eine veränderte Quelle nicht still
 akzeptiert. Entfernte Kapitel können entfernt und die Quelle neu importiert
 werden. Unbekannte Formatversionen werden abgewiesen, bevor die Session ersetzt
 wird. Projektdateien sind auf 48 MiB und Coverdaten auf 32 MiB begrenzt.
+Kapitelenden müssen als Vorschauzeiten darstellbar sein. Die Gesamtdauer
+muss für die Kapitelmetadaten in Millisekunden als 64-Bit-Ganzzahl darstellbar sein.
 
 „Projekt speichern …“ (Cmd+S) speichert den bearbeiteten Zustand.
 „Projekt öffnen …“ (Cmd+Shift+O) öffnet ihn. Cmd+O bleibt der Audioimport.
@@ -48,10 +50,10 @@ Konvertierung oder eines offenen Sheets bleibt dieser gesperrt.
 Während eines Imports sind auch Kapitelbearbeitung und Listendrag gesperrt.
 
 Die Kapitelhistorie umfasst höchstens 100 Schritte und wird beim Projektöffnen
-geleert; sie ist nicht Bestandteil der Projektdatei. Die GUI liest Quellen
-beim Öffnen und Speichern außerhalb des Main Actors. Vor dem Start prüft sie
-unveränderte Datei-Snapshots ohne erneutes vollständiges Lesen. Das erstmalige
-Hashen eines großen Buchs benötigt dennoch entsprechende Lesezeit.
+geleert; sie ist nicht Bestandteil der Projektdatei. Die GUI liest und
+schreibt Projekte außerhalb des Main Actors. Die Quellenprüfung vor dem Export
+ist abbrechbar. Für bereits verifizierte Datei-Snapshots verwendet sie die
+gespeicherten Hashes. Neue oder geänderte Snapshots werden im Hintergrund gelesen.
 
 ## CLI
 
@@ -100,8 +102,9 @@ das Ergebnis steht in `event` und `success`. Die deutschen UI-Beschriftungen
 werden nicht als Maschinenwerte verwendet. Schema 2 ersetzt das frühere
 Laufbericht-Schema 1; Projektformat und Inspect-Bericht bleiben bei Version 1.
 
-Die GUI berechnet Quellenhashes beim Öffnen/Speichern außerhalb des Main Actors.
-`ProjectFingerprintStore` bindet den wiederverwendeten Hash an Gerät, Inode,
-Größe und Änderungszeiten; eine anschließend veränderte Quelle wird beim Start
-ohne erneutes vollständiges Lesen abgewiesen. Der synchrone Core-/CLI-Einstieg
-bleibt verfügbar.
+GUI und CLI berechnen Quellenhashes außerhalb des Main Actors.
+`ProjectFingerprintStore` bindet jeden Hash an Gerät, Inode, Größe sowie
+Änderungs- und Statuszeit. Ein Finder-Tag löst eine erneute Prüfung aus.
+Unmittelbar vor dem Export werden die verifizierten Snapshots
+erneut geprüft. Die synchronen Core-Methoden zum Lesen, Speichern und Prüfen
+bleiben verfügbar.

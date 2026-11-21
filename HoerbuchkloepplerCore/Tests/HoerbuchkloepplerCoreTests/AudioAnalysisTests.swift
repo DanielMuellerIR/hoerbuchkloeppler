@@ -94,13 +94,13 @@ struct AsyncAVFoundationTests {
         }
         var cancellationChecks = 0
 
-        let files = ConversionSession.recursiveFileURLs(in: directory) {
+        let files = SourceDiscovery.discoverFileURLs(in: directory) {
             cancellationChecks += 1
             // 1: vor dem Enumerator, 2: vor dem ersten nextObject,
             // 3: direkt danach. Das erste Ergebnis darf dann nicht mehr in die
             // vollständig materialisierte Dateiliste gelangen.
             return cancellationChecks >= 3
-        }
+        }.files
 
         #expect(files.isEmpty)
         #expect(cancellationChecks == 3)
@@ -124,7 +124,7 @@ struct AsyncAVFoundationTests {
             ofItemAtPath: blocked.path
         )
 
-        let discovered = ConversionSession.discoverFileURLs(in: directory)
+        let discovered = SourceDiscovery.discoverFileURLs(in: directory)
 
         #expect(discovered.files.isEmpty)
         #expect(discovered.failureDescription?.contains("zz-nicht-lesbar") == true)

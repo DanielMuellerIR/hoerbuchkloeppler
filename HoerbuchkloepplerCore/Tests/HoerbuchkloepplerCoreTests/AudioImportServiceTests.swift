@@ -135,7 +135,7 @@ struct AudioImportServiceTests {
             Issue.record("Uneinheitliche Quelle muss abgelehnt werden")
             return
         }
-        #expect(failure.sourceURL == visible)
+        #expect(failure.source == .file(visible))
         #expect(failure.reason == .sourceChanged)
     }
 
@@ -213,7 +213,7 @@ struct AudioImportServiceTests {
         let session = ConversionSession()
         let result = await session.scanFolder(folder, analyzeArtwork: false)
         #expect(result.audioFiles.map(\.chapterTitle) == ["02-valid", "04-valid"])
-        #expect(result.failures.map { $0.sourceURL.lastPathComponent } == ["01-broken.wav", "03-broken.wav"])
+        #expect(result.failures.map(\.sourceDescription) == ["01-broken.wav", "03-broken.wav"])
         #expect(session.importService.metrics.sourceAnalyses == 4)
         #expect(session.importService.metrics.assetLoadRequests == 4)
         #expect(session.importService.metrics.artworkDataRequests == 0)

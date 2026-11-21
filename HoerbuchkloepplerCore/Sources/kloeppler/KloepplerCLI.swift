@@ -428,6 +428,16 @@ struct KloepplerCLI: AsyncParsableCommand {
             throw exitCode
         }
 
+        func prepareProject(_ operation: @escaping @MainActor @Sendable () async throws -> Void) async throws {
+            var failure: (any Error)?
+            await session.runPreparationTask {
+                do { try await operation() }
+                catch { failure = error }
+            }
+            try throwIfInterrupted()
+            if let failure { throw failure }
+        }
+
         // Jeder Ausgang nach Installation der Signalquellen läuft durch denselben
         // Abschluss. So gewinnt ein bereits begonnener und anschließend
         // akzeptierter Signal-Handler auch gegen einen gleichzeitig entstehenden
@@ -443,56 +453,21 @@ struct KloepplerCLI: AsyncParsableCommand {
             // diesen Fällen weder eingebettete Bilder noch Ordnerbilder vorab
             // dekodieren.
             if let projectPath = options.project {
-                try session.openProject(from: URL(fileURLWithPath: projectPath))
+                try await prepareProject { try await session.openProjectAsync(from: URL(fileURLWithPath: projectPath)) }
+                // Die Projektübernahme hat den alten Import-Kontext beendet.
+                // Die Quellenprüfung vor Inspect oder Export braucht einen neuen.
+                session.beginPreparation()
                 // Das Projekt ersetzt die kompletten Einstellungen. Die oben vor
                 // dem Import gesetzte Worker-Zahl der CLI muss deshalb hier
                 // erneut gewinnen.
                 if let workers = options.importWorkers { session.settings.importWorkerLimit = workers }
             } else if !options.files.isEmpty {
                 if cover != nil || noCover { session.removeCover() }
-                let token = session.beginImport(
-                    expectedItemCount: options.files.count,
-                    allowsSelectionUI: false
+                await session.importFiles(
+                    options.files.map { URL(fileURLWithPath: $0) },
+                    analyzeArtwork: cover == nil && !noCover,
+                    usingExistingPreparation: true
                 )
-                await session.runImportTask(token) {
-                    var foundFiles: [FoundFile] = []
-                    for path in options.files {
-                        let source = URL(fileURLWithPath: path)
-                        if let found = ConversionSession.foundFile(at: source) { foundFiles.append(found) }
-                        else {
-                            session.stageAudioLoadResult(.failure(AudioImportFailure(sourceURL: source, reason: .analysisFailed)), importToken: token)
-                            await session.finishImport(token)
-                        }
-                    }
-                    let results = await session.loadAudioFiles(from: foundFiles, importToken: token)
-                    for result in results {
-                        session.stageAudioLoadResult(result, importToken: token)
-                    }
-                    // Das eingebettete Cover wie im Ordnerscan synchron bestimmen,
-                    // bevor der Batch übernommen wird. Sonst startete `finishImport`
-                    // eine Hintergrundsuche, deren Ergebnis weder --inspect noch
-                    // die Konvertierung abwarten: Das Cover fehlte dann je nach
-                    // Zeitablauf. Bei --cover/--no-cover ist die Suche wirkungslos.
-                    if cover == nil && !noCover {
-                        let loadedFiles = results.flatMap { result -> [AudioFile] in
-                            if case .success(let files, _) = result { return files }
-                            return []
-                        }
-                        let artwork = await session.analyzeImportArtwork(for: loadedFiles)
-                        session.stageImportArtwork(artwork, importToken: token)
-                    }
-                    for _ in results {
-                        await session.finishImport(token, countingProgress: false)
-                    }
-                }
-                // Core-Import dedupliziert nach gemeinsamer Dateiidentität. Nur
-                // die verbleibenden Kapitel werden nach der CLI-Folge geordnet.
-                let ranks = Dictionary(options.files.enumerated().map { (URL(fileURLWithPath: $0.element).standardizedFileURL, $0.offset) }, uniquingKeysWith: min)
-                session.audioFiles.sort {
-                    let left = ranks[$0.sourceURL.standardizedFileURL] ?? Int.max
-                    let right = ranks[$1.sourceURL.standardizedFileURL] ?? Int.max
-                    return left == right ? $0.startTime < $1.startTime : left < right
-                }
             } else {
                 await session.prepareFolder(url, analyzeArtwork: cover == nil && !noCover)
             }
@@ -502,7 +477,7 @@ struct KloepplerCLI: AsyncParsableCommand {
             if !session.lastImportFailures.isEmpty {
                 writeStandardError("Fehler: Der Ordnerimport wurde vollständig verworfen:")
                 session.lastImportFailures.forEach {
-                    writeStandardError("  \($0.sourceURL.lastPathComponent): \($0.message)")
+                    writeStandardError("  \($0.sourceDescription): \($0.message)")
                 }
                 throw ExitCode.failure
             }
@@ -592,7 +567,7 @@ struct KloepplerCLI: AsyncParsableCommand {
                 )
                 throw ExitCode.failure
             }
-            session.refreshProjectSourceIssues()
+            if options.project != nil { try await prepareProject { try await session.verifyProjectSources() } }
             if options.inspect {
                 if machineOutput {
                     try emitJSON(await InspectionReport(session: session, outputs: conversionPlan.outputURLs))
@@ -645,7 +620,7 @@ struct KloepplerCLI: AsyncParsableCommand {
                 try throwIfInterrupted()
                 throw ExitCode.failure
             }
-            if case .rejected(let message) = FFmpegWrapper.convert(
+            if case .rejected(let message) = FFmpegWrapper.startVerifiedConversion(
                 session: session,
                 plan: conversionPlan
             ) {

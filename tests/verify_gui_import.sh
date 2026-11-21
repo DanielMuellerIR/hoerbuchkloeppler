@@ -13,6 +13,7 @@ else
     core_args=(-I "$binary_dir/Modules" "$binary_dir/HoerbuchkloepplerCore.build/"*.swift.o)
 fi
 swiftc -swift-version 6 -warnings-as-errors -parse-as-library "${core_args[@]}" \
-    Hörbuchklöppler/ImportCoordinator.swift tests/verify_gui_import.swift \
+    Hörbuchklöppler/ImportCoordinator.swift Hörbuchklöppler/CoverDropCoordinator.swift \
+    Hörbuchklöppler/ToolStatus.swift tests/verify_gui_import.swift \
     -o "$work_dir/verify-gui-import"
 "$work_dir/verify-gui-import" "$@"

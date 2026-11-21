@@ -90,6 +90,39 @@ struct CancellationIsolationTests {
         #expect(scanned.imageURLs.isEmpty)
     }
 
+    @Test("Der explizite Dateiimport startet nach Vorbereitungsabbruch keine Analyse")
+    func orderedFileImportRetainsPreparationCancellation() async throws {
+        let directory = try makeTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("Kapitel.wav")
+        try writeSilentWAV(to: file)
+        let session = ConversionSession(settings: AudioSettings())
+        session.beginPreparation()
+        #expect(session.cancelPreparation())
+
+        await session.importFiles([file], usingExistingPreparation: true)
+
+        #expect(session.importService.metrics.sourceAnalyses == 0)
+        #expect(session.audioFiles.isEmpty)
+        #expect(!session.isImporting)
+    }
+
+    @Test("Ein neuer Dateiimport löst sich von der abgebrochenen Vorbereitung")
+    func orderedFileImportCanRetry() async throws {
+        let directory = try makeTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("Kapitel.wav")
+        try writeSilentWAV(to: file)
+        let session = ConversionSession(settings: AudioSettings())
+        session.beginPreparation()
+        #expect(session.cancelPreparation())
+
+        await session.importFiles([file], analyzeArtwork: false)
+
+        #expect(session.audioFiles.map(\.name) == ["Kapitel.wav"])
+        #expect(!session.isImporting)
+    }
+
     @Test("Vorbereitungsabbruch cancelt den registrierten Swift-Task")
     func preparationCancellationReachesTask() async throws {
         let session = ConversionSession(settings: AudioSettings())

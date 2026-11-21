@@ -87,7 +87,10 @@ Symbolnamen als Anker (bewusst **ohne** Zeilennummern — die driften bei jeder
 | `OutputLeases.swift` | Kanonische Zielschlüssel, prozessinternes Register und prozessübergreifende POSIX-Sperren | `OutputLeases.acquire` · `OutputLeaseSet` |
 | `OutputStaging.swift` | Geschützte Zwischendateien anlegen, Ziele atomar übernehmen und nur nachweislich eigene Einträge bereinigen | `FileSystemIdentity` · `StagingOwnership` · `createProtectedStagingOutput` · `commitStagedOutput` · `removeOrphanedStagedOutputs` · `removeOwnedTempDirectory` |
 | `CLIInvocation.swift` | Vollständiger, POSIX-shell-sicherer GUI→CLI-Handoff | `CLIInvocation.arguments` · `shellCommand` |
-| `ConversionSession.swift` | Main-Actor-isolierter Lebenszyklus und `@Published`-State, gemeinsame Pfad-/Symlink-Auflösung, atomarer und abbrechbarer asynchroner Import, Worker→UI-Nachrichten | `FoundFile` · `AudioLoadResult` · `beginImport` · `finishImport` · `foundFile(at:)` · `deduplicateFoundFiles` · `loadAudioFiles` · `processIncomingFiles` · `scanFolder` · `prepareFolder` · `addFolder` · `addLog` |
+| `ConversionSession.swift` | Main-Actor-isolierter Sitzungszustand, Übernahme und Abbruch von Importen, Worker→UI-Nachrichten | `importURLs` · `startProviderImport` · `importFiles` · `prepareFolder` · `addLog` |
+| `ImportTypes.swift` | Vorgemerkte Importdaten, Scanergebnis und typisierte Quellen bei Importfehlern | `PendingImportBatch` · `ScannedFolder` · `AudioImportFailure` |
+| `SourceDiscovery.swift` | Dateisuche, Symlink-Auflösung, Deduplizierung und natürliche Kapitelreihenfolge | `discoverFileURLs` · `foundFile(at:)` · `deduplicateAudioFiles` · `audioFileComesBefore` |
+| `AudioFile.swift`, `FoundFile.swift` | Kapitelzeiträume, sichtbare Quellpfade und aufgelöste Lese-URLs | `AudioFile` · `FoundFile` |
 | `CoverArtwork.swift` | ImageIO-Validierung und Thumbnail-Vorschau ohne vorherigen NSImage-Voll-Decode | `thumbnail` · `preview` |
 | `AudioSettings.swift` | Einstellungs-Struct (`Codable`) | Felder → [settings.md](settings.md) |
 | `SettingsManager.swift` | Laden/Speichern `~/.Hoerbuchkloeppler/settings.json` | `shared` · `loadSettings` · `saveSettings` |
@@ -114,9 +117,8 @@ in [opportunities.md](opportunities.md).
   gespeicherten Projekt; vorhandene Session-Eigenschaften bleiben Adapter.
 - `RunReport.swift`: versionierte Inspect- und JSON-Laufberichte für die CLI.
 - `ChapterPreviewPlayer.swift`: Besitz und Abspielposition des Vorschauplayers.
-- `ImportCoordinator.swift`: GUI-Providerkoordination über Core-Importtokens;
-  abbrechbare Adressensammlung mit 60-Sekunden-Frist, einmaligem Abschluss
-  und entwerteten späten Callbacks vor der eigentlichen Audioanalyse.
+- `ImportCoordinator.swift`: abbrechbare Adressensammlung mit 60-Sekunden-Frist;
+  übergibt die Ergebnisse gemeinsam an den Core, der Analyse und Übernahme steuert.
 - `DocumentOpenCoordinator.swift`: AppKit-Delegate übernimmt vollständige
   System-Dateilisten; der Koordinator bündelt Audioimport und Projektöffnung
   mit Bestätigung und serialisiert spätere Ereignisse während eines eigenen

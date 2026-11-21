@@ -18,6 +18,8 @@ import HoerbuchkloepplerCore
     @Published var pendingPlan: ConversionPlan?
     @Published var collidingOutputNames: [String] = []
     @Published var conversionStartError: String?
+    @Published private(set) var isCheckingSources = false
+    private var startTask: Task<Void, Never>?
 
     func selectOutput(session: ConversionSession) {
         let savePanel = NSSavePanel()
@@ -69,10 +71,32 @@ import HoerbuchkloepplerCore
     }
 
     func start(_ plan: ConversionPlan, session: ConversionSession) {
+        guard startTask == nil, !session.isConverting else { return }
         pendingPlan = nil
         previewPlan = nil
         collidingOutputNames = []
-        switch FFmpegWrapper.convert(session: session, plan: plan) {
+        guard session.loadedProjectURL != nil else {
+            showStartResult(FFmpegWrapper.startVerifiedConversion(session: session, plan: plan))
+            return
+        }
+        isCheckingSources = true
+        startTask = Task { [weak self] in
+            let result = await FFmpegWrapper.convertAsync(session: session, plan: plan)
+            guard !Task.isCancelled, let self else { return }
+            self.startTask = nil
+            self.isCheckingSources = false
+            self.showStartResult(result)
+        }
+    }
+
+    func cancelStart() {
+        startTask?.cancel()
+        startTask = nil
+        isCheckingSources = false
+    }
+
+    private func showStartResult(_ result: ConversionStartResult) {
+        switch result {
         case .started: conversionStartError = nil
         case .rejected(let message): conversionStartError = message
         }
@@ -92,4 +116,6 @@ import HoerbuchkloepplerCore
         preview = nil
         previewPlan = nil
     }
+
+    deinit { startTask?.cancel() }
 }

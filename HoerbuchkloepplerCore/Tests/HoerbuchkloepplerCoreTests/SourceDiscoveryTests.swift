@@ -22,8 +22,10 @@ struct SourceDiscoveryTests {
         try FileManager.default.createSymbolicLink(at: linkZwei, withDestinationURL: zielA)
 
         let session = ConversionSession(settings: AudioSettings())
-        let scanned = await session.scanFolder(directory)
-        await session.applyScannedFolder(scanned)
+        await session.importURLs([directory])
+
+        #expect(session.cliFolderIfRepresentable == directory)
+        #expect(session.importCompletedItems == session.importTotalItems)
 
         #expect(session.audioFiles.map(\.name) == ["01.wav", "02.wav"])
         #expect(session.audioFiles.map { $0.url.lastPathComponent } == [
@@ -82,7 +84,7 @@ struct SourceDiscoveryTests {
 
         #expect(loaded.files.isEmpty)
         #expect(loaded.failures.count == 1)
-        #expect(loaded.failures.first?.sourceURL == link)
+        #expect(loaded.failures.first?.source == .file(link))
         #expect(loaded.failures.first?.reason == .analysisFailed)
     }
 

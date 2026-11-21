@@ -6,27 +6,16 @@ import HoerbuchkloepplerCore
 /// großen Datei-Drops durch den gemeinsamen Importdienst begrenzt.
 @MainActor
 enum ImportCoordinator {
-    private enum ProviderResult: Sendable {
-        case url(URL)
-        case failure(String?)
-    }
-
-    private enum ProviderOutcome: Sendable {
-        case ready([ProviderResult])
-        case timedOut
-        case cancelled
-    }
-
     @MainActor private final class ProviderCollection {
-        private var results: [ProviderResult?]
+        private var results: [FileProviderItem?]
         private var remaining: Int
-        private var continuation: CheckedContinuation<ProviderOutcome, Never>?
+        private var continuation: CheckedContinuation<FileProviderImportResult, Never>?
         private var progress: [Progress] = []
         private var timer: Task<Void, Never>?
 
         init(count: Int) { results = Array(repeating: nil, count: count); remaining = count }
 
-        func start(_ providers: [NSItemProvider], timeout: Duration, continuation: CheckedContinuation<ProviderOutcome, Never>) {
+        func start(_ providers: [NSItemProvider], timeout: Duration, continuation: CheckedContinuation<FileProviderImportResult, Never>) {
             self.continuation = continuation
             guard !Task.isCancelled else { finish(.cancelled); return }
             timer = Task { [weak self] in
@@ -36,7 +25,7 @@ enum ImportCoordinator {
             }
             for (index, provider) in providers.enumerated() {
                 let operation = provider.loadObject(ofClass: URL.self) { [weak self] url, error in
-                    let result: ProviderResult = if let url, error == nil { .url(url) }
+                    let result: FileProviderItem = if let url, error == nil { .url(url) }
                         else { .failure(error?.localizedDescription) }
                     Task { @MainActor [weak self] in self?.receive(result, at: index) }
                 }
@@ -44,7 +33,7 @@ enum ImportCoordinator {
             }
         }
 
-        private func receive(_ result: ProviderResult, at index: Int) {
+        private func receive(_ result: FileProviderItem, at index: Int) {
             guard continuation != nil, results[index] == nil else { return }
             results[index] = result
             remaining -= 1
@@ -53,7 +42,7 @@ enum ImportCoordinator {
 
         func cancel() { finish(.cancelled) }
 
-        private func finish(_ outcome: ProviderOutcome) {
+        private func finish(_ outcome: FileProviderImportResult) {
             guard let continuation else { return }
             self.continuation = nil
             timer?.cancel()
@@ -76,65 +65,22 @@ enum ImportCoordinator {
         onTimeout: @escaping @MainActor ([NSItemProvider]) -> Void = { _ in }
     ) {
         guard !providers.isEmpty else { return }
-        let providerCount = providers.count
-        let token = session.beginImport(expectedItemCount: providerCount)
-        let collection = ProviderCollection(count: providerCount)
-        Task { @MainActor in
-            await session.runImportTask(token) {
-                let outcome = await withTaskCancellationHandler {
-                    await withCheckedContinuation { continuation in
-                        collection.start(providers, timeout: timeout, continuation: continuation)
-                    }
-                } onCancel: {
-                    Task { @MainActor in collection.cancel() }
+        let collection = ProviderCollection(count: providers.count)
+        session.startProviderImport(expectedItemCount: providers.count) {
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    collection.start(providers, timeout: timeout, continuation: continuation)
                 }
-                guard !Task.isCancelled else { return }
-                switch outcome {
-                case .ready(let results):
-                    var urls: [URL] = []
-                    for (index, result) in results.enumerated() {
-                        if case .url(let url) = result { urls.append(url); continue }
-                        guard case .failure(let message) = result else { continue }
-                        session.stageProviderLoadFailure(position: index + 1, total: providerCount,
-                                                         errorDescription: message, importToken: token)
-                        await session.finishImport(token)
-                    }
-                    await processURLs(urls, session: session, token: token)
-                case .timedOut:
-                    session.addLog("⏱️ Datei-Adressen nicht innerhalb der Wartefrist erhalten; neuer Import vollständig verworfen.")
-                    session.cancelImport()
-                    onTimeout(providers)
-                case .cancelled:
-                    break
-                }
+            } onCancel: {
+                Task { @MainActor in collection.cancel() }
             }
+        } onTimeout: {
+            session.addLog("⏱️ Datei-Adressen nicht innerhalb der Wartefrist erhalten; neuer Import vollständig verworfen.")
+            onTimeout(providers)
         }
     }
 
     static func importURLs(_ urls: [URL], session: ConversionSession) async {
-        let token = session.beginImport(expectedItemCount: urls.count)
-        await session.runImportTask(token) { await processURLs(urls, session: session, token: token) }
-    }
-
-    private static func processURLs(_ urls: [URL], session: ConversionSession, token: ImportToken) async {
-        var files: [FoundFile] = []
-        for url in urls {
-            guard !Task.isCancelled else { return }
-            var directory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: url.path, isDirectory: &directory), directory.boolValue {
-                let scanned = await session.scanFolder(url, importToken: token)
-                session.stageScannedFolder(scanned, importToken: token)
-                await session.finishImport(token)
-            } else if let found = ConversionSession.foundFile(at: url) { files.append(found) }
-            else {
-                session.stageAudioLoadResult(.failure(AudioImportFailure(sourceURL: url, reason: .analysisFailed)), importToken: token)
-                await session.finishImport(token)
-            }
-        }
-        let results = await session.loadAudioFiles(from: files, importToken: token)
-        for result in results {
-            session.stageAudioLoadResult(result, importToken: token)
-            await session.finishImport(token, countingProgress: false)
-        }
+        await session.importURLs(urls)
     }
 }
