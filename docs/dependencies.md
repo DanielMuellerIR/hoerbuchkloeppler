@@ -25,8 +25,8 @@
   (`/opt/homebrew/bin`, `/usr/local/bin`) und MacPorts (`/opt/local/bin`)
   (Fallback, falls die eingebetteten Binaries fehlen).
 - `ffprobe` wird **nicht** benötigt — die Kapitel-Analyse von m4b/mp4 läuft über
-  `ffmpeg` (`-f ffmetadata`, geparst in `AudioFile+Extensions.swift` →
-  `extractChapters`/`parseFFMetadataChapters`). So funktioniert der m4b-Re-Import
+  `ffmpeg` (`-f ffmetadata`, ausgewertet mit `FFMetadata.decodeChapters`).
+  So funktioniert der m4b-Re-Import
   auch ohne separat installiertes ffprobe.
 
 ## Ausführungsrecht (x-Bit)
