@@ -11,7 +11,7 @@ import tempfile
 
 REPO = Path(__file__).resolve().parents[1]
 APP_NAME = "Hörbuchklöppler.app"
-REAL_TOOLS = {name: shutil.which(name) for name in ("ditto", "pgrep", "ps", "clang")}
+REAL_TOOLS = {name: shutil.which(name) for name in ("ditto", "pgrep", "ps", "clang", "xcrun", "git", "swift")}
 assert all(REAL_TOOLS.values()), REAL_TOOLS
 
 WRAPPER = r'''#!/usr/bin/env python3
@@ -19,18 +19,48 @@ import json, os, shutil, subprocess, sys
 from pathlib import Path
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
+if name == "xcrun" and args[:1] not in (["notarytool"], ["stapler"]):
+    os.execv(os.environ["HK_INSTALL_REAL_XCRUN"], [name, *args])
+if name == "git" and "hoerbuchkloeppler.notaryProfile" not in args:
+    os.execv(os.environ["HK_INSTALL_REAL_GIT"], [name, *args])
 destination = Path(os.environ["HK_INSTALL_DEST"]).resolve()
 target = Path(sys.argv[0]).resolve() if name in ("ffmpeg", "mediainfo") else (Path(args[-1]).resolve() if args else Path.cwd())
 step = "destination" if target == destination or destination in target.parents else (
        "staging" if any(".install-" in part for part in target.parts) else "source")
 with open(os.environ["HK_INSTALL_LOG"], "a") as handle:
     handle.write(json.dumps({"tool": name, "args": args, "step": step}) + "\n")
+race = os.environ.get("HK_INSTALL_REPLACE_STEP")
 def replace_destination():
-    saved = destination.parent / "InterferencePrevious.app"
-    destination.rename(saved)
-    shutil.copytree(saved, destination)
+    if destination.exists():
+        saved = destination.parent / "InterferencePrevious.app"
+        destination.rename(saved)
+        shutil.copytree(saved, destination)
+    else:
+        shutil.copytree(os.environ["HK_INSTALL_TEMPLATE"], destination)
     (destination / "version.txt").write_text("foreign")
-if name == "build.sh":
+if name == "swift":
+    swift = os.environ["HK_INSTALL_REAL_SWIFT"]
+    if "--product" in args:
+        if race == "helper_build_destination":
+            replace_destination()
+        if race == "helper_build_parent":
+            saved = destination.parent.with_name("InterferenceParentBeforeBuild")
+            destination.parent.rename(saved)
+            destination.parent.mkdir()
+            (saved / destination.name).rename(destination)
+    if "--show-bin-path" in args and race == "after_installed_check":
+        bin_dir = Path(subprocess.check_output([swift, *args], text=True).strip())
+        wrapper_dir = Path(sys.argv[0]).parent
+        (wrapper_dir / "real-install-bundle").symlink_to(bin_dir / "install-bundle")
+        (wrapper_dir / "install-bundle").symlink_to(Path(sys.argv[0]))
+        print(wrapper_dir)
+    else:
+        os.execv(swift, [name, *args])
+elif name == "install-bundle":
+    if args[1] == "cleanup":
+        destination.rename(destination.with_name("InterferenceDisplaced.app"))
+    os.execv(str(Path(sys.argv[0]).with_name("real-install-bundle")), [name, *args])
+elif name == "build.sh":
     shutil.copytree(os.environ["HK_INSTALL_TEMPLATE"], Path.cwd() / "Hörbuchklöppler.app")
     if os.environ.get("HK_INSTALL_REPLACE_STEP") == "build":
         replace_destination()
@@ -45,10 +75,11 @@ elif name == "sign-bundle.sh" or name == "git":
 elif name == "xcrun":
     if args[:2] == ["notarytool", "submit"]:
         print("status: Accepted (kontrolliertes Fixture)")
+    if args[:2] == ["stapler", "validate"] and os.environ.get("HK_INSTALL_FAIL") == "stapler:" + step:
+        sys.exit(27)
 elif name in ("codesign", "spctl", "ffmpeg", "mediainfo"):
     if name == "mediainfo" and step == "staging" and os.environ.get("HK_INSTALL_REPLACE_STEP") == "staging":
         replace_destination()
-    race = os.environ.get("HK_INSTALL_REPLACE_STEP")
     if name == "mediainfo" and step == "staging" and race in ("staging_parent", "staging_entry"):
         staged = next(p for p in target.parents if ".install-" in p.name and p.suffix == ".app")
         if race == "staging_parent":
@@ -71,6 +102,11 @@ elif name in ("codesign", "spctl", "ffmpeg", "mediainfo"):
         (backup / "version.txt").write_text("foreign-backup")
     if name == "codesign" and step == "destination" and os.environ.get("HK_INSTALL_REPLACE_STEP") == "destination":
         replace_destination()
+        sys.exit(27)
+    if name == "mediainfo" and step == "destination" and race == "destination_before_commit":
+        replace_destination()
+    if name == "codesign" and step == "destination" and race == "destination_removed":
+        destination.rename(destination.with_name("InterferenceDisplaced.app"))
         sys.exit(27)
     if os.environ.get("HK_INSTALL_FAIL") == name + ":" + step:
         sys.exit(27)
@@ -127,11 +163,15 @@ def run_case(root, executable, name, *, existing=True, arguments=(), failure=Non
     wrappers.mkdir()
     for script in ("install.sh", "script-helpers.sh", "notary-profile.sh"):
         shutil.copyfile(REPO / script, workspace / script)
+    if not set(arguments).intersection({"--no-install", "--no-notarize"}):
+        package = workspace / "tools/InstallBundle"
+        package.parent.mkdir()
+        package.symlink_to(root / "InstallBundle", target_is_directory=True)
     for tool in ("build.sh", "sign-bundle.sh"):
         path = workspace / tool
         path.write_text(WRAPPER)
         path.chmod(0o755)
-    for tool in ("git", "xcrun", "codesign", "spctl", "ditto", "pgrep", "ps"):
+    for tool in ("git", "xcrun", "codesign", "spctl", "ditto", "pgrep", "ps", "swift"):
         path = wrappers / tool
         path.write_text(WRAPPER)
         path.chmod(0o755)
@@ -198,23 +238,41 @@ def main():
     with tempfile.TemporaryDirectory(prefix="hk-install-fixtures-") as directory:
         root = Path(directory).resolve()
         assert not root.is_relative_to("/Applications")
+        shutil.copytree(REPO / "tools/InstallBundle", root / "InstallBundle",
+                        ignore=shutil.ignore_patterns(".build", ".swiftpm"))
         source = root / "fixture.c"
         source.write_text("#include <unistd.h>\nint main(void) { for (;;) sleep(1); }\n")
         executable = root / "Fixture"
         subprocess.run([REAL_TOOLS["clang"], str(source), "-o", str(executable)], check=True)
         for kind, expected in [("symlink", "1.0"), ("file", "untouched-file")]:
             result, calls, version, _ = run_case(root, executable, "initial_" + kind, initial_target=kind)
-            assert result.returncode != 0 and version == expected and not calls, (kind, result.stderr)
+            assert result.returncode != 0 and version == expected and not calls, (kind, calls, result.stderr)
             print("PASS: ungeeignetes Ziel", kind, "vor Build zurückgewiesen und erhalten")
         result, calls, version, _ = run_case(root, executable, "unknown_option", arguments=["--unknown-fixture-option"])
         assert result.returncode == 64 and version == "1.0" and not calls
         print("PASS: unbekannte Option endet vor Build mit Usage-Fehler")
+        for race, existing, expected in [
+            ("helper_build_destination", True, "foreign"),
+            ("helper_build_destination", False, "foreign"),
+            ("helper_build_parent", True, "1.0"),
+        ]:
+            name = race + ("_existing" if existing else "_first")
+            result, calls, version, _ = run_case(root, executable, name, existing=existing, race=race)
+            assert result.returncode != 0 and version == expected, (name, version, result.stdout, result.stderr)
+            assert [call["tool"] for call in calls] == ["xcrun", "git", "swift", "swift"], (name, calls)
+            assert calls[0]["args"][:2] == ["notarytool", "history"], (name, calls)
+            assert "wurde inzwischen verändert" in result.stderr, (name, result.stderr)
+            print("PASS:", name, "Änderung während des Helfer-Builds vor App-Build erkannt")
         for name, existing in [("first_install", False), ("replacement", True)]:
             result, calls, version, _ = run_case(root, executable, name, existing=existing)
             assert result.returncode == 0 and version == "2.0", (name, result.stderr, result.stdout)
             assert "INSTALL OK:" in result.stdout
-            assert any(call["tool"] == "codesign" and call["step"] == "staging" for call in calls)
-            assert any(call["tool"] == "spctl" and call["step"] == "destination" for call in calls)
+            for step in ("staging", "destination"):
+                assert [call["tool"] for call in calls if call["step"] == step and call["tool"] != "ditto"] == [
+                    "codesign", "xcrun", "spctl", "ffmpeg", "mediainfo",
+                ]
+                assert any(call["tool"] == "xcrun" and call["step"] == step
+                           and call["args"][:2] == ["stapler", "validate"] for call in calls)
             print("PASS:", name, "wirklicher Swift-Dateiaustausch, Staging geprüft, Backup entfernt")
 
         for name, existing, failure in [
@@ -224,6 +282,7 @@ def main():
             ("stage_rejected", True, "codesign:staging"),
             ("rollback_existing", True, "codesign:destination"),
             ("rollback_first", False, "codesign:destination"),
+            ("rollback_ticket", True, "stapler:destination"),
         ]:
             result, calls, version, _ = run_case(root, executable, name, existing=existing, failure=failure)
             assert result.returncode != 0 and "INSTALL OK:" not in result.stdout, name
@@ -235,7 +294,7 @@ def main():
         for name, arguments in [("no_install", ["--no-install"]), ("no_notarize", ["--no-notarize"])]:
             result, calls, version, alive = run_case(root, executable, name, arguments=arguments, processes=True)
             assert result.returncode == 0 and version == "1.0" and alive == [True, True], (name, result.stderr)
-            assert not any(call["tool"] == "pgrep" for call in calls)
+            assert not any(call["tool"] in ("pgrep", "swift") for call in calls)
             assert "INSTALL OK:" not in result.stdout
             print("PASS:", name, "fasst Ziel und laufende Prozesse nicht an")
 
@@ -247,14 +306,31 @@ def main():
         print("PASS: geänderte Prozessidentität vor TERM schützt die PID")
 
         for step, existing, backup in [("build", True, False), ("parent", True, False), ("staging", True, False),
-                                       ("destination", True, True), ("destination", False, False)]:
+                                       ("destination", True, True), ("destination", False, False),
+                                       ("destination_before_commit", True, True)]:
             name = "replacement_race_" + step + ("_existing" if existing else "_first")
             result, calls, version, _ = run_case(root, executable, name, existing=existing,
                                                 race=step, expected_backup=backup)
             assert result.returncode != 0 and version == "foreign", (name, version, result.stdout, result.stderr)
             if step in ("build", "parent"):
                 assert not any(call["tool"] == "pgrep" for call in calls)
+            if step == "destination" and not existing:
+                assert "Erstinstallation konnte nicht zurückgezogen werden" in result.stderr
+                assert "Voriges Bundle" not in result.stderr
             print("PASS:", name, "zwischenzeitlich fremdes Ziel erhalten; nötiges altes Backup behalten")
+        result, _, version, _ = run_case(root, executable, "destination_removed", race="destination_removed")
+        assert result.returncode != 0 and version == "1.0", (version, result.stderr)
+        assert "zurückgerollt" in result.stderr
+        assert (root / "destination_removed/target/InterferenceDisplaced.app/version.txt").read_text() == "2.0"
+        print("PASS: fehlendes Ziel aus eigenem Backup wiederhergestellt, verschobene Kopie erhalten")
+        result, calls, version, _ = run_case(root, executable, "after_installed_check",
+                                             race="after_installed_check", expected_backup=True)
+        assert result.returncode != 0 and version is None, (version, result.stderr)
+        assert [call["args"][1] for call in calls if call["tool"] == "install-bundle"][-2:] == [
+            "require-installed", "cleanup",
+        ]
+        assert (root / "after_installed_check/target/InterferenceDisplaced.app/version.txt").read_text() == "2.0"
+        print("PASS: Ziel nach Abschlussprüfung verschoben, kein Rückzug nach Freigabe der Bereinigung")
 
         for race in ["staging_parent", "staging_entry"]:
             result, _, version, _ = run_case(root, executable, race, race=race, preserved_staging=True)

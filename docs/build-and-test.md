@@ -142,16 +142,20 @@ Die Developer-ID-Flags werden geprüft, der kontrollierte Aufruf endet vor
 einer echten Signierung. Dafür werden macOS, Python, Clang und die Apple-
 Signierwerkzeuge benötigt; alle Test-Bundles bleiben außerhalb `/Applications`.
 `tests/verify_install_lifecycle.py` führt eine unveränderte Kopie von `install.sh`
-mit kontrollierten Build-/Signier-/Notary-Diensten aus. Das vorhandene
-`HOERBUCHKLOEPPLER_INSTALL_DEST` zeigt auf einen eigenen Temp-Ordner; `ditto`,
-der Swift-Dateiaustausch und Rollback laufen wirklich. Erstinstallation,
-Austausch, Quell-/Staging-/Laufzeitfehler, `--no-install`/`--no-notarize`,
-Prozessbesitz, simulierte PID-Änderung sowie ausgetauschte Ziele/Elternordner
-werden geprüft. Alle eigenen Helferprozesse werden beendet; im Konfliktfall
-muss das alte Backup erhalten bleiben. Auch diese Prüfung gehört zu
-`test_scripts.sh`. Sie ersetzt keine echte Apple-Notarisierung.
-Zusätzliche Gegenproben ersetzen Elternordner, Staging oder Backup während
-der späteren Prüfungen; die Bereinigung muss diese fremden Einträge erhalten.
+mit kontrollierten Build-, Signier- und Notary-Diensten aus.
+`HOERBUCHKLOEPPLER_INSTALL_DEST` zeigt auf einen eigenen Temp-Ordner.
+Das Skript baut den regulären Swift-Helfer und führt Kopie, Dateiaustausch
+und Rückzug mit echten Dateisystemoperationen aus. Die Prüfung umfasst
+Erstinstallation, Austausch, fehlgeschlagene Prüfungen vor und nach dem
+Austausch, beide Ausstiegsoptionen, Prozessbesitz und simulierte PID-Änderung.
+Sie prüft fremde Einträge am Ziel, Elternordner, Staging oder Backup,
+einschließlich Änderungen beim Kompilieren des Helfers und nach der
+Abschlussprüfung. Auch diese Prüfung gehört zu `test_scripts.sh`.
+`swift test --package-path tools/InstallBundle -Xswiftc -warnings-as-errors`
+prüft den Helfer zusätzlich auf exklusive Umbenennung, ausgetauschte Einträge
+zwischen Umbenennung und Identitätsprüfung, Backup-Kollision, Rückzug
+zwischen Austausch und Backup sowie das Löschen von Symlinks ohne Zugriff
+auf ihre Ziele.
 `tests/verify_release_lifecycle.py` führt eine unveränderte Kopie von
 `release.sh --no-finder-layout` mit kontrollierten Installations-, Image- und
 Apple-Diensten aus. Kopien, Links und die abschließende Umbenennung geschehen

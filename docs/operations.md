@@ -16,10 +16,9 @@ von wo das Package sie via `Bundle.module` einbettet. Zur Laufzeit fällt
 `FFmpegWrapper.getBinaryURL` andernfalls auf ein per Homebrew installiertes
 `ffmpeg`/`mediainfo` im `$PATH` zurück. Details: [dependencies.md](dependencies.md).
 
-Nur reguläre Dateien mit Ausführungsrecht gelten als Kandidaten. Ein defektes
-oder nicht ausführbares Bundle-Tool verdeckt deshalb keinen funktionierenden
-`$PATH`-Fallback; der System-Check meldet „OK“ nur bei Exit 0 und nichtleerer
-Versionsausgabe.
+Nur reguläre Dateien mit Ausführungsrecht gelten als Kandidaten. Fehlt ein
+ausführbares Bundle-Tool, sucht die App im `$PATH` und in den Standardpfaden.
+Der System-Check meldet „OK“ nur bei Exit 0 und nichtleerer Versionsausgabe.
 
 ## Schutzgrenze der temporären Bereinigung
 
@@ -58,17 +57,20 @@ unterstützt, sofern ihr Besitznachweis passt.
 `./install.sh` mutiert `/Applications` erst, nachdem Notarisierungs-Ticket,
 Signatur und Gatekeeper-Akzeptanz am Build-Artefakt erfolgreich geprüft wurden.
 Das Skript kopiert das Bundle zunächst neben das Ziel und wiederholt dort die
-Signatur-, Ticket-, Gatekeeper- und Laufzeitprogramm-Prüfungen. Beim Austausch
-behält es die vorige App bis zur erfolgreichen Prüfung des Installationsziels
-als Backup; schlägt ein nachgelagerter Test fehl, setzt der EXIT-Trap dieses
-Bundle atomar zurück, sofern Ziel und Backup noch die erwarteten Identitäten
-haben. Zielbundle und Elternordner werden bereits vor dem Build über Gerät und
-Inode erfasst und vor Beenden/Austausch erneut geprüft. Hat ein anderer Lauf
-inzwischen das Ziel ersetzt, wird dieser Konflikt gemeldet; ein Rückzug lässt
-das fremde Ziel und das nötige alte Backup erhalten.
-Auch die Bereinigung von Staging und Backup bindet den Elternordner und den
-Eintrag an ihre erfasste Identität. Sie verschiebt eigene Einträge zuerst
-atomar in Quarantäne und löscht relativ zu offenen Verzeichnis-Deskriptoren.
+Prüfungen für Signatur, Ticket, Gatekeeper und Laufzeitprogramme. Das Skript
+erfasst Elternordner und Zielbundle über Gerät und Inode, bevor es den
+Swift-Helfer unter `tools/InstallBundle` kompiliert. Der Helfer prüft diese
+Identitäten nach dem Kompilieren, vor dem Beenden der Ziel-App und vor dem
+Austausch erneut.
+Der Helfer tauscht ein vorhandenes Bundle atomar aus und verwahrt es als
+Backup. Bei einer Erstinstallation veröffentlicht er das neue Bundle nur bei
+freiem Zielpfad. Nach dem Austausch prüft das Skript Signatur, Ticket,
+Gatekeeper und Laufzeitprogramme erneut am Ziel. Erst dann darf der Helfer
+das Backup entfernen. Bei einer fehlgeschlagenen Prüfung stellt er das vorige
+Bundle wieder her, solange die beteiligten Einträge noch eindeutig
+zugeordnet sind. Ein zwischenzeitlich ausgetauschtes Ziel und das nötige
+Backup bleiben erhalten. Die Bereinigung verschiebt eigene Einträge atomar
+in Quarantäne und löscht relativ zu offenen Verzeichnis-Deskriptoren.
 Ausgetauschte Einträge bleiben mit Warnung erhalten.
 Eine laufende Ziel-App
 erhält zuerst SIGTERM und nach fünf

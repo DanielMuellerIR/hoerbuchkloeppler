@@ -17,11 +17,6 @@ hoerbuchkloeppler_read_version() {
   printf '%s\n' "$version"
 }
 
-hoerbuchkloeppler_directory_identity() {
-  [ -d "$1" ] && [ ! -L "$1" ] || return 1
-  stat -f '%d:%i' "$1"
-}
-
 hoerbuchkloeppler_mount_is_active() {
   local mount_dir="$1" mount_info entry
   # Rückgabe: 0 aktiv, 1 sicher inaktiv, 2 Status unbekannt. Ein fehlgeschlagener

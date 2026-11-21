@@ -39,9 +39,9 @@
 # Eigengebrauch bzw. die eigenen Macs gedacht — dieses Projekt verteilt bewusst
 # keine fertigen Binaries öffentlich (siehe README / THIRD-PARTY-NOTICES.md).
 #
-# AI-Agent/Headless: alle Schritte laufen ohne GUI; Exit-Code ≠ 0 bei Fehler.
-# (Ausnahme: fehlt ein Notary-Profil und läuft das Skript ohne TTY, bricht es
-# mit klarer Anleitung ab, statt zu blockieren.)
+# Die Installation läuft ohne GUI. Fehlt das Notary-Profil in einer
+# nichtinteraktiven Sitzung, endet das Skript mit einer Anleitung. Fehler
+# melden einen Exit-Code ungleich null.
 
 set -euo pipefail
 
@@ -89,20 +89,20 @@ if [ "$INSTALL" -eq 1 ] && [ "$NOTARIZE" -eq 1 ]; then
   # Normalisieren, damit spätere dirname-/basename-Aufrufe nicht erneut `..`
   # oder einen Symlink-Elternpfad interpretieren müssen.
   DEST="$DEST_PARENT/$DEST_BASENAME"
-  if [ -L "$DEST" ]; then
-    echo "✗ Installationsziel darf kein Symlink sein: $DEST" >&2
+  # Schon das Kompilieren des Helfers bietet Zeit für einen zweiten Installationslauf.
+  if ! INITIAL_PARENT="$(LC_ALL=C /usr/bin/stat -f '%HT:%d:%i' "$DEST_PARENT")" \
+    || [[ "$INITIAL_PARENT" != Directory:* ]]; then
+    echo "✗ Elternordner des Installationsziels ist nicht sicher erreichbar: $DEST_PARENT" >&2
     exit 1
   fi
-  if [ -e "$DEST" ] && [ ! -d "$DEST" ]; then
-    echo "✗ Installationsziel existiert, ist aber kein App-Bundle-Ordner: $DEST" >&2
+  if INITIAL_DEST="$(LC_ALL=C /usr/bin/stat -f '%HT:%d:%i' "$DEST" 2>/dev/null)"; then
+    [[ "$INITIAL_DEST" == Directory:* ]] \
+      || { echo "✗ Installationsziel muss ein unverlinkter App-Ordner sein: $DEST" >&2; exit 1; }
+  elif [ -e "$DEST" ] || [ -L "$DEST" ]; then
+    echo "✗ Installationsziel kann nicht eindeutig gelesen werden: $DEST" >&2
     exit 1
-  fi
-  # Build und Notarisierung können Minuten dauern. Eine inzwischen erneuerte
-  # Installation darf später weder beendet noch durch diesen Lauf ersetzt werden.
-  DEST_PARENT_IDENTITY="$(hoerbuchkloeppler_directory_identity "$DEST_PARENT")"
-  DEST_IDENTITY="missing"
-  if [ -d "$DEST" ]; then
-    DEST_IDENTITY="$(hoerbuchkloeppler_directory_identity "$DEST")"
+  else
+    INITIAL_DEST="missing"
   fi
 fi
 
@@ -126,6 +126,14 @@ if [ -z "$SIGN_IDENTITY" ]; then
   exit 1
 fi
 log "Signatur-Identität: $SIGN_IDENTITY"
+
+if [ "$INSTALL" -eq 1 ] && [ "$NOTARIZE" -eq 1 ]; then
+  INSTALL_PACKAGE="./tools/InstallBundle"
+  swift build --package-path "$INSTALL_PACKAGE" --product install-bundle >&2
+  INSTALL_TOOL="$(swift build --package-path "$INSTALL_PACKAGE" --show-bin-path)/install-bundle"
+  INSTALL_TARGET="$("$INSTALL_TOOL" snapshot "$DEST_PARENT" "$DEST_BASENAME" "$$" \
+    "${INITIAL_PARENT#Directory:}" "${INITIAL_DEST#Directory:}")"
+fi
 
 # ── 1. Release-Build (baut Core/CLI/App; App landet ad-hoc im Projekt-Root) ──
 ./build.sh
@@ -202,20 +210,10 @@ if [ "$INSTALL" -eq 0 ]; then
 fi
 
 # ── 4. Nach /Applications installieren (laufende Ziel-Instanz vorher beenden) ─
-verify_install_target() {
-  local current_parent current_destination="missing"
-  current_parent="$(hoerbuchkloeppler_directory_identity "$DEST_PARENT")" \
-    || { echo "✗ Elternordner des Installationsziels ist nicht mehr sicher erreichbar: $DEST_PARENT" >&2; return 1; }
-  if [ -e "$DEST" ] || [ -L "$DEST" ]; then
-    current_destination="$(hoerbuchkloeppler_directory_identity "$DEST")" \
-      || { echo "✗ Installationsziel ist kein unverlinkter App-Ordner mehr: $DEST" >&2; return 1; }
-  fi
-  if [ "$current_parent" != "$DEST_PARENT_IDENTITY" ] || [ "$current_destination" != "$DEST_IDENTITY" ]; then
-    echo "✗ Installationsziel oder Elternordner wurde während des Builds verändert: $DEST" >&2
-    return 1
-  fi
+install_target() {
+  "$INSTALL_TOOL" "$INSTALL_TARGET" "$@"
 }
-verify_install_target
+install_target require-original
 
 # Nur Prozesse des tatsächlich zu ersetzenden Bundles beenden. Ein pauschales
 # `pkill -x` träfe auch einen Test-Build aus diesem oder einem anderen Worktree.
@@ -284,173 +282,24 @@ if [ "${#destination_pids[@]}" -gt 0 ]; then
   [ "$still_running" -eq 0 ] \
     || { echo "✗ Laufende Ziel-App konnte nicht beendet werden: $DEST" >&2; exit 1; }
 fi
-verify_install_target
-# Atomar austauschen: erst neben das Ziel legen, dann in einem Schritt
-# eintauschen. Ein Abbruch mittendrin darf keine halb ersetzte App unter
-# /Applications hinterlassen — genau das konnte `rm -rf` + `cp -R` erzeugen.
-DEST_STEM="${DEST_BASENAME%.app}"
-STAGED="$DEST_PARENT/.${DEST_STEM}.install-$$.app"
-BACKUP_BASENAME=".${DEST_STEM}.backup-$$.app"
-BACKUP="$DEST_PARENT/$BACKUP_BASENAME"
-[ ! -e "$STAGED" ] && [ ! -L "$STAGED" ] \
-  || { echo "✗ Installations-Staging-Pfad ist bereits belegt: $STAGED" >&2; exit 1; }
-[ ! -e "$BACKUP" ] && [ ! -L "$BACKUP" ] \
-  || { echo "✗ Installations-Backup-Pfad ist bereits belegt: $BACKUP" >&2; exit 1; }
-DEST_EXISTED=0
-[ "$DEST_IDENTITY" = "missing" ] || DEST_EXISTED=1
-INSTALL_STATE="staged"
+STAGED="$(install_target staging-path)"
 STAGED_IDENTITY=""
+REPLACE_STARTED=0
 
-cleanup_install_entry() {
-  local path="$1" expected_identity="$2"
-  [ -e "$path" ] || [ -L "$path" ] || return 0
-  [ -n "$expected_identity" ] && [ "$expected_identity" != "missing" ] || return 1
-  /usr/bin/swift - "$DEST_PARENT" "$DEST_PARENT_IDENTITY" "$(basename "$path")" "$expected_identity" <<'SWIFT'
-import Foundation
-import Darwin
-
-func identity(_ information: stat) -> String {
-    "\(information.st_dev):\(information.st_ino)"
-}
-
-func contents(_ descriptor: Int32) -> [String]? {
-    let duplicate = dup(descriptor)
-    guard duplicate >= 0, let stream = fdopendir(duplicate) else {
-        if duplicate >= 0 { close(duplicate) }
-        return nil
-    }
-    defer { closedir(stream) }
-    var names: [String] = []
-    while true {
-        errno = 0
-        guard let entry = readdir(stream) else { return errno == 0 ? names : nil }
-        let name = withUnsafePointer(to: entry.pointee.d_name) {
-            $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) { String(cString: $0) }
-        }
-        if name != "." && name != ".." { names.append(name) }
-    }
-}
-
-func removeContents(_ descriptor: Int32, depth: Int = 0) -> Bool {
-    guard depth < 128, let names = contents(descriptor) else { return false }
-    for name in names {
-        var before = stat()
-        guard fstatat(descriptor, name, &before, AT_SYMLINK_NOFOLLOW) == 0 else { return false }
-        if before.st_mode & S_IFMT == S_IFDIR {
-            let child = openat(descriptor, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            guard child >= 0 else { return false }
-            var bound = stat()
-            let removed = fstat(child, &bound) == 0 && identity(before) == identity(bound)
-                && removeContents(child, depth: depth + 1)
-            close(child)
-            var after = stat()
-            guard removed, fstatat(descriptor, name, &after, AT_SYMLINK_NOFOLLOW) == 0,
-                  identity(after) == identity(before), unlinkat(descriptor, name, AT_REMOVEDIR) == 0 else { return false }
-        } else {
-            guard unlinkat(descriptor, name, 0) == 0 else { return false }
-        }
-    }
-    return true
-}
-
-let parent = open(CommandLine.arguments[1], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-guard parent >= 0 else { exit(1) }
-defer { close(parent) }
-var parentInformation = stat()
-guard fstat(parent, &parentInformation) == 0,
-      identity(parentInformation) == CommandLine.arguments[2] else { exit(1) }
-let name = CommandLine.arguments[3]
-guard !name.contains("/"), name != ".", name != ".." else { exit(1) }
-var before = stat()
-if fstatat(parent, name, &before, AT_SYMLINK_NOFOLLOW) != 0 { exit(errno == ENOENT ? 0 : 1) }
-guard before.st_mode & S_IFMT == S_IFDIR, identity(before) == CommandLine.arguments[4] else { exit(1) }
-let quarantine = ".hoerbuchkloeppler-cleanup-\(UUID().uuidString)"
-guard renameatx_np(parent, name, parent, quarantine, UInt32(RENAME_EXCL)) == 0 else { exit(1) }
-var moved = stat()
-guard fstatat(parent, quarantine, &moved, AT_SYMLINK_NOFOLLOW) == 0,
-      identity(moved) == identity(before) else {
-    _ = renameatx_np(parent, quarantine, parent, name, UInt32(RENAME_EXCL))
-    exit(1)
-}
-let directory = openat(parent, quarantine, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-guard directory >= 0 else { exit(1) }
-var bound = stat()
-let removed = fstat(directory, &bound) == 0 && identity(bound) == identity(before) && removeContents(directory)
-close(directory)
-var final = stat()
-guard removed, fstatat(parent, quarantine, &final, AT_SYMLINK_NOFOLLOW) == 0,
-      identity(final) == identity(before), unlinkat(parent, quarantine, AT_REMOVEDIR) == 0 else { exit(1) }
-SWIFT
-}
-
-# Der Rückzug darf nur die eigene neue Kopie entfernen. Hat ein anderer Lauf
-# das Ziel erneut ersetzt, bleiben dieses Bundle und das vorige Backup erhalten.
 rollback_install() {
-  local status="$?" rollback_ok=1
+  local status="$?"
   trap - EXIT
-  if [ "$status" -ne 0 ]; then
-    if [ "$DEST_EXISTED" -eq 1 ] && [ -e "$BACKUP" ]; then
-      if /usr/bin/swift - "$BACKUP" "$DEST" "$DEST_IDENTITY" "$STAGED_IDENTITY" "$DEST_PARENT_IDENTITY" <<'SWIFT'
-import Foundation
-import Darwin
-
-func directoryIdentity(_ url: URL) -> String? {
-    var information = stat()
-    guard lstat(url.path, &information) == 0 else { return errno == ENOENT ? "missing" : nil }
-    guard information.st_mode & S_IFMT == S_IFDIR else { return nil }
-    return "\(information.st_dev):\(information.st_ino)"
-}
-
-let fileManager = FileManager.default
-let backup = URL(fileURLWithPath: CommandLine.arguments[1])
-let destination = URL(fileURLWithPath: CommandLine.arguments[2])
-let destinationIdentity = directoryIdentity(destination)
-guard directoryIdentity(backup) == CommandLine.arguments[3],
-      directoryIdentity(destination.deletingLastPathComponent()) == CommandLine.arguments[5],
-      destinationIdentity == CommandLine.arguments[4] || destinationIdentity == "missing" else {
-    fputs("Rollback verweigert: Ziel, Elternordner oder Backup wurde inzwischen verändert.\n", stderr)
-    exit(1)
-}
-if fileManager.fileExists(atPath: destination.path) {
-    _ = try fileManager.replaceItemAt(
-        destination,
-        withItemAt: backup,
-        backupItemName: nil,
-        options: [.usingNewMetadataOnly]
-    )
-} else {
-    try fileManager.moveItem(at: backup, to: destination)
-}
-SWIFT
-      then
-        echo "⚠ Fehlgeschlagene Installation wurde auf das vorige Bundle zurückgerollt." >&2
-      else
-        rollback_ok=0
-        echo "✗ KRITISCH: Rollback fehlgeschlagen; vorige App liegt unter $BACKUP" >&2
-      fi
-    elif [ "$DEST_EXISTED" -eq 0 ] && [ "$INSTALL_STATE" = "replacing" ] && [ -e "$DEST" ]; then
-      if [ "$(hoerbuchkloeppler_directory_identity "$DEST_PARENT" || true)" = "$DEST_PARENT_IDENTITY" ] \
-        && [ "$(hoerbuchkloeppler_directory_identity "$DEST" || true)" = "$STAGED_IDENTITY" ] \
-        && mv "$DEST" "$STAGED"; then
-        echo "⚠ Fehlgeschlagene Erstinstallation wurde entfernt." >&2
-      else
-        rollback_ok=0
-        echo "✗ KRITISCH: Fehlgeschlagene Erstinstallation konnte nicht entfernt werden: $DEST" >&2
-      fi
+  if [ -n "$STAGED_IDENTITY" ]; then
+    if [ "$REPLACE_STARTED" -eq 1 ]; then
+      install_target rollback "$STAGED_IDENTITY" || true
     fi
+    install_target discard "$STAGED_IDENTITY" \
+      || echo "⚠ Staging konnte nicht eindeutig zugeordnet werden und bleibt erhalten: $STAGED" >&2
   fi
-  cleanup_install_entry "$STAGED" "$STAGED_IDENTITY" \
-    || echo "⚠ Staging konnte nicht eindeutig zugeordnet werden und bleibt erhalten: $STAGED" >&2
-  if [ "$status" -eq 0 ]; then
-    cleanup_install_entry "$BACKUP" "$DEST_IDENTITY" \
-      || echo "⚠ Backup konnte nicht eindeutig zugeordnet werden und bleibt erhalten: $BACKUP" >&2
-  fi
-  [ "$rollback_ok" -eq 1 ] || exit 1
   exit "$status"
 }
 trap rollback_install EXIT
-mkdir "$STAGED"
-STAGED_IDENTITY="$(hoerbuchkloeppler_directory_identity "$STAGED")"
+STAGED_IDENTITY="$(install_target stage)"
 ditto "$APP" "$STAGED"
 
 # Die tatsächlich kopierte Staging-App vollständig prüfen. Nur so kann ein
@@ -464,41 +313,12 @@ STAGED_RESOURCE_BIN="$STAGED/Contents/Resources/HoerbuchkloepplerCore_Hoerbuchkl
 "$STAGED_RESOURCE_BIN/mediainfo" --Version >/dev/null 2>&1 \
   || { echo "✗ Gebündeltes mediainfo startet im Staging-Bundle nicht." >&2; exit 1; }
 
-INSTALL_STATE="replacing"
-/usr/bin/swift - "$STAGED" "$DEST" "$BACKUP_BASENAME" "$DEST_IDENTITY" "$DEST_PARENT_IDENTITY" "$STAGED_IDENTITY" <<'SWIFT'
-import Foundation
-import Darwin
+REPLACE_STARTED=1
+install_target replace "$STAGED_IDENTITY"
 
-func directoryIdentity(_ url: URL) -> String? {
-    var information = stat()
-    guard lstat(url.path, &information) == 0 else { return errno == ENOENT ? "missing" : nil }
-    guard information.st_mode & S_IFMT == S_IFDIR else { return nil }
-    return "\(information.st_dev):\(information.st_ino)"
-}
-
-let fileManager = FileManager.default
-let source = URL(fileURLWithPath: CommandLine.arguments[1])
-let destination = URL(fileURLWithPath: CommandLine.arguments[2])
-guard directoryIdentity(destination) == CommandLine.arguments[4],
-      directoryIdentity(destination.deletingLastPathComponent()) == CommandLine.arguments[5],
-      directoryIdentity(source) == CommandLine.arguments[6] else {
-    fputs("Installation verweigert: Ziel, Elternordner oder Staging wurde inzwischen verändert.\n", stderr)
-    exit(1)
-}
-if fileManager.fileExists(atPath: destination.path) {
-    _ = try fileManager.replaceItemAt(
-        destination,
-        withItemAt: source,
-        backupItemName: CommandLine.arguments[3],
-        options: [.usingNewMetadataOnly, .withoutDeletingBackupItem]
-    )
-} else {
-    try fileManager.moveItem(at: source, to: destination)
-}
-SWIFT
-
-# ── 5. Verifizieren: Signatur, Gatekeeper und gebündeltes ffmpeg im DEST ─────
+# ── 5. Signatur, Ticket, Gatekeeper und Laufzeitprogramme am Ziel prüfen ────
 codesign --verify --deep --strict "$DEST"
+xcrun stapler validate "$DEST"
 # spctl bewertet zusätzlich die Gatekeeper-Freigabe der installierten Kopie.
 spctl --assess --type execute -vv "$DEST" 2>&1 | sed 's/^/    /'
 DEST_RESOURCE_BIN="$DEST/Contents/Resources/HoerbuchkloepplerCore_HoerbuchkloepplerCore.bundle/Contents/Resources/bin"
@@ -508,20 +328,10 @@ DEST_RESOURCE_BIN="$DEST/Contents/Resources/HoerbuchkloepplerCore_Hoerbuchkloepp
   || { echo "✗ Gebündeltes mediainfo startet nach der Installation nicht." >&2; exit 1; }
 log "Gebündelte Laufzeitprogramme im installierten Bundle sind ausführbar."
 
-[ "$(hoerbuchkloeppler_directory_identity "$DEST_PARENT" || true)" = "$DEST_PARENT_IDENTITY" ] \
-  && [ "$(hoerbuchkloeppler_directory_identity "$DEST" || true)" = "$STAGED_IDENTITY" ] \
-  || { echo "✗ Installiertes Ziel oder Elternordner wurde während der Abschlussprüfung verändert." >&2; exit 1; }
-
-# Erst nach allen Zielprüfungen ist das alte Bundle entbehrlich. Der EXIT-Trap
-# hält es bis hierhin als atomar einwechselbares Rollback bereit.
-INSTALL_STATE="verified"
+# Erst nach allen Zielprüfungen ist das alte Bundle entbehrlich.
+install_target require-installed "$STAGED_IDENTITY"
 trap - EXIT
-if ! cleanup_install_entry "$BACKUP" "$DEST_IDENTITY" \
-  || ! cleanup_install_entry "$STAGED" "$STAGED_IDENTITY"; then
-  echo "⚠ Die geprüfte neue App bleibt installiert; ein Backup-/Staging-Rest konnte nicht entfernt werden:" >&2
-  echo "  $BACKUP" >&2
-  echo "  $STAGED" >&2
-fi
+install_target cleanup "$STAGED_IDENTITY"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/Contents/Info.plist" 2>/dev/null || echo "?")"
 echo
