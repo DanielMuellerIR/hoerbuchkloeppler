@@ -1,144 +1,143 @@
-**🌐 Sprache / Language:** [English](README.md) · [Deutsch](README.de.md)
+[English](README.md) · [Deutsch](README.de.md)
 
-<h1 align="center">Hörbuchklöppler</h1>
+# Hörbuchklöppler
 
-<p align="center">
-  <strong>Turn a pile of loose audio files into a single, properly chaptered <code>.m4b</code> audiobook — with cover art, correct metadata, and remarkably small file sizes.</strong>
-</p>
+Hörbuchklöppler turns audio files into a chaptered `.m4b` audiobook with
+cover art and metadata. The macOS app and the `kloeppler` command-line tool
+share the same import and encoding code. Both accept MP3, M4A, WAV, FLAC,
+and existing M4B files.
 
-Hörbuchklöppler is a macOS tool that takes messy audio sources (`mp3`, `m4a`, `wav`, `flac`, or an existing `m4b`) and produces one clean `.m4b`: each input file becomes a chapter, cover art and tags are filled in, and the result is encoded with Apple's native AAC encoder. It ships in two forms on a shared core — a **SwiftUI app** and a **command-line tool `kloeppler`** for scripting and automation.
+## Audio quality and file size
 
----
+The default for narration is mono AAC at 48 kbit/s and 32 kHz. The
+49-second release sample is 299 KB at these settings and 772 KB at
+128 kbit/s, a reduction of about 61%. The recording is *Wunder über
+Wunder* from LibriVox's [Sammlung deutscher Gedichte 018](https://archive.org/details/sammlung_deutscher_gedichte_018_1506_librivox).
 
-## 💡 The secret to small audiobooks (why the default is 32 kHz / 48 kbit/s mono)
+For music or dramatized recordings, you can increase the bitrate and
+sample rate and use stereo.
 
-Hörbuchklöppler defaults to **mono, 48 kbit/s, 32 kHz** — deliberately. That looks extreme if you are used to music bitrates, but for **spoken word** it is the sweet spot:
+## Edit chapters and save a project
 
-- For plain narration, the difference to a high-bitrate encode is **practically inaudible**.
-- The files become **tiny** — a multi-hour book shrinks to a fraction of the usual size, which matters on phones, in the cloud, and for whole libraries.
+Import a folder or drop audio files into the app. Each file becomes a
+chapter by default, and existing chapter markers in M4B files are preserved
+as editable chapters. Edit titles, reorder chapters by dragging them, or
+select a group and number it with a common prefix.
 
-This is the tool's core idea, not an accident. Speech simply does not carry the high-frequency, wide-stereo content that would justify a large file. If you are unsure, **listen for yourself**:
+To split a chapter, play it from the chapter list and click **Teilen**
+(Split) at the desired position. **Zusammenführen** (Merge) joins the
+selected chapter to the next one when their ranges are adjacent in the
+same source file. Save your work with Cmd+S as a `.hkproject`. The project
+references the source audio and stores the chapter edits, metadata, cover,
+and conversion settings. You can reopen it or pass it to the CLI.
+[Projects and chapter editing](docs/projects.md)
 
-```bash
-# Take any public-domain narration (e.g. a LibriVox chapter, which is public domain)
-# and encode it with the default settings — then compare it to the original:
-kloeppler /path/to/folder-with-one-chapter --mono --bitrate 48k --samplerate 32000
-```
+The app reads artwork and tags from the source files. You can choose your
+own cover and edit the book metadata. Review the planned files in the
+output preview before encoding. The audio settings offer optional
+loudness analysis and a single gain adjustment for the whole book, aiming
+for −18 LUFS within the peak limit. A maximum duration can split long
+books into files numbered `-01`, `-02`, and so on.
+[Encoding and loudness](docs/encoding.md)
 
-> A ready-made A/B sample accompanies the releases: the same 49-second recording at 128 kbit/s (772 KB) vs. the Hörbuchklöppler default (299 KB — about **61 % smaller**). Play both — for narration the difference is barely audible. Source: *"Wunder über Wunder"* from [Sammlung deutscher Gedichte 018](https://archive.org/details/sammlung_deutscher_gedichte_018_1506_librivox) ([LibriVox](https://librivox.org/) — public domain).
+## Install or build
 
-You can of course raise the bitrate/sample rate (`--bitrate`, `--samplerate`, `--stereo`) for music or dramatized recordings.
-
----
-
-## Features
-
-- **Any input → one `.m4b`:** `mp3`, `m4a`, `wav`, `flac`, and existing `m4b` (chapters are re-extracted).
-- **Chapters:** one input file = one chapter; existing `m4b` chapter structure is read back in and stays editable.
-- **Cover art:** embedded artwork first, otherwise the largest image in the folder (`folder.jpg`), or drop your own.
-- **Metadata:** title, author and genre are read via MediaInfo and can be overridden.
-- **Auto-split:** optionally split long books into `-01`, `-02` … at a maximum duration (1–24 h).
-- **Two encoding modes** (see below): a safe sequential mode and a fast parallel mode.
-- **Scriptable:** the `kloeppler` CLI exposes every option as a flag, with honest exit codes.
-
----
-
-## Install / Build
-
-> **No ready-made download / Releases DMG — on purpose.** Unlike some other
-> projects, this repository does **not** offer a prebuilt `.app` or `.dmg` under
-> Releases. A bundled build would contain `ffmpeg`, which is licensed under the
-> **GPL**; distributing it would pull the corresponding GPL obligations (shipping
-> its source or a written offer) onto this project. To keep this project clear of
-> those obligations, `ffmpeg`/`mediainfo` are fetched from their official upstream
-> **at build time** instead. That means there is no one-click download — but
-> building is a single command.
-
-Requires macOS (Apple Silicon or Intel) and Xcode command-line tools.
+The app build requires macOS (Apple Silicon or Intel) and Xcode. The
+CLI-only build uses the Swift toolchain from the Xcode command-line tools.
+Build locally. The repository distributes source code, and `build.sh`
+fetches `ffmpeg` and `mediainfo` from their upstream projects. The
+resulting bundle contains GPL-licensed `ffmpeg`.
+[Dependencies and licenses](docs/dependencies.md)
 
 ```bash
 git clone https://github.com/DanielMuellerIR/hoerbuchkloeppler.git
 cd hoerbuchkloeppler
-./build.sh
+./build.sh              # ad-hoc-signed app in the project root, plus the CLI
+./build.sh --cli-only   # build only the command-line tool
+./build.sh --help
 ```
 
-`build.sh` downloads the external tools `ffmpeg` and `mediainfo` from their official upstream (they are **not** shipped in this repository — see [Dependencies](#dependencies)), builds the core, the CLI and the app, and places `Hörbuchklöppler.app` in the project root for easy testing.
+### Install a notarized build
+
+`install.sh` requires a Developer ID Application certificate and a
+`notarytool` keychain profile. Set the profile name with `NOTARY_PROFILE`
+or the clone's local Git setting `hoerbuchkloeppler.notaryProfile`.
+Use `build.sh` for ad-hoc signing.
 
 ```bash
-./build.sh --cli-only   # only the command-line tool
-./build.sh --help       # all options
-```
-
-### Install to /Applications (optional, signed & notarized)
-
-`build.sh` produces a quick, ad-hoc-signed **development build** in the project root — handy for testing the current state. If you want the app permanently in `/Applications` as a **deliberately installed, notarized version** — signed with a Developer ID and notarized by Apple, so it launches without Gatekeeper prompts (also on other Macs) — use `install.sh`:
-
-```bash
-./install.sh                 # build → sign → notarize → staple → /Applications
-./install.sh --no-notarize   # Developer-ID-signed test build in the project; never installs
-./install.sh --no-install    # build, sign and notarize, but leave /Applications untouched
+./install.sh                 # build, notarize, staple, verify and install in /Applications
+./install.sh --no-notarize   # Developer-ID-signed test build in the project
+./install.sh --no-install    # notarized app in the project
 ./install.sh --help
 ```
 
-This needs an Apple **Developer ID Application** certificate in your keychain and a `notarytool` keychain profile. The profile name comes from the `NOTARY_PROFILE` environment variable or a clone-local git config — it is never committed, and credentials stay in the keychain (never passed on the command line). `--no-notarize` still needs the Developer ID but exits after verifying the project-local test build; only a successfully notarized, stapled and Gatekeeper-accepted build may be copied to `/Applications`. Without a Developer ID, use `./build.sh`.
+### Create a disk image for another Mac you own
 
-Building locally and installing to your own `/Applications` is **not** redistribution, so it stays clear of the GPL obligations that the bundled `ffmpeg` would otherwise pull in (see [Install / Build](#install--build) above).
+`release.sh` uses the same certificate and profile. It packages the
+notarized app in a separately notarized DMG for use on your own Macs.
 
----
-
-## Command-line usage (`kloeppler`)
-
-The CLI is a first-class way to use Hörbuchklöppler — ideal for scripts and AI agents.
-
-```
-kloeppler <folder> [--mode parallel|standard] [--bitrate 48k] \
-          [--samplerate 32000] [--max-duration 0] [--mono|--stereo] \
-          [--title <title>] [--author <author>] [--genre <genre>] \
-          [--cover <image>|--no-cover] [--output <target>] \
-          [--verbose] [--force]
+```bash
+./release.sh                     # dist/Hörbuchklöppler-<version>.dmg
+./release.sh --no-finder-layout  # skip Finder window layout
 ```
 
-- `<folder>` — a folder of audio files (one file = one chapter). Cover = largest image / `folder.jpg`.
-- `--title` / `--author` override the tags detected from the files (`--title` also names the output file).
-- `--genre`, `--cover`, and `--no-cover` transfer the matching GUI metadata into the CLI run. Explicit cover files are limited to 32 MiB.
-- `--output` — a target folder or a full `.m4b` path. Without it the file lands next to the source.
-- `--max-duration <hours>` — split long books (`0` = unlimited).
-- **Exit codes:** `0` only on real success, `≠ 0` otherwise (SIGINT / Ctrl-C returns `130`, SIGTERM returns `143`) — safe for automation.
-- Inputs are validated up front (mode, bitrate, sample rate), so mistakes fail fast with a clear message.
+## Command-line usage
 
----
+From the project root, make the locally built CLI available in your shell.
 
-## How it works
+```bash
+export PATH="$PWD/HoerbuchkloepplerCore/.build/release:$PATH"
+kloeppler --help
+```
 
-Two encoding strategies, switchable per run:
+Choose a folder, a saved project, or an ordered list of audio files for
+each run.
 
-- **Standard (safe):** slice every chapter to uncompressed `.wav`, then do a **single** AAC encode straight into the final `.m4b`. No stream-copy of pre-encoded segments — best for continuous music across chapter boundaries.
-- **Performance (fast):** encode every chapter to AAC in parallel, then stream-copy-merge them without re-encoding. Faster, and for spoken word the boundaries stay clean (chapters begin and end in silence). See [docs/encoding.md](docs/encoding.md).
+```bash
+kloeppler "/path/to/chapters" --title "My book" --output "My book.m4b"
+kloeppler --project "My book.hkproject" --inspect --format json
+kloeppler --file 02.wav --file 01.wav --normalize-loudness --output "My book.m4b"
+```
 
-Both use Apple's `aac_at` (AudioToolbox) encoder in Constrained-VBR mode for quality above ffmpeg's native AAC.
+- Use `--project` for a saved project and repeat `--file` for each audio
+  file in the desired order. `--inspect` analyzes the sources and previews
+  the output paths without creating files. Use `--format json` for a JSON
+  inspection report or line-delimited JSON conversion events.
+- Set audio with `--mode`, `--bitrate`, `--samplerate`, `--mono`, or
+  `--stereo`. Use `--workers` to limit encoding processes and
+  `--import-workers` to limit concurrent source analysis.
+- Use `--analyze-loudness` to measure the book's loudness or
+  `--normalize-loudness` to measure it and apply a common gain.
+- Override tags with `--title`, `--author`, `--genre`, `--narrator`,
+  `--series`, `--volume-number`, and `--language`. Choose artwork with
+  `--cover` or omit it with `--no-cover`.
+- Use `--max-duration` to split by length and `--output` to set a
+  destination folder or full `.m4b` path. The default output directory
+  is the source's parent directory. `--verbose` adds diagnostic detail.
+  `--force` allows overwriting an existing output in scripts.
 
-**Which to pick — trade-offs:**
+Exit status is `0` on success, `64` for invalid arguments, `130` for an
+accepted Ctrl-C interruption, and `143` for an accepted SIGTERM.
+[CLI reference and verification](docs/build-and-test.md#cli-kloeppler)
 
-| | Performance (default) | Standard |
-|---|---|---|
-| **Speed** | Fastest | Slower |
-| **CPU** | Uses all cores — fans will spin up | Gentler (a single final encode) |
-| **Temp disk** | Small (only the compressed segments) | **Large** — writes uncompressed `.wav` for *all* chapters at once; merging several long books can mean **many GB** of temporary files until the run finishes |
-| **Best for** | Most audiobooks; limited disk space | Gapless music; when you'd rather keep CPU load low |
+## Encoding modes
 
-If you want the machine to stay quiet and responsive, use Standard — but make sure you have enough free disk space for the temporary WAVs. If disk space is tight, use Performance.
+- **Performance (default)** encodes chapters in parallel and joins the AAC
+  segments without re-encoding. It uses less temporary space. Priming and
+  padding on each segment can shift audio transitions near chapter marks.
+- **Standard** prepares WAV files, then encodes the book in one AAC pass.
+  Use it for continuous music across chapter boundaries. The WAV files can
+  take several GB for long books.
 
----
+Both modes use Apple's AudioToolbox AAC encoder with constrained variable
+bitrate. Optional loudness analysis uses temporary WAV files in either mode.
+[Encoding details](docs/encoding.md)
 
-## Dependencies
+## Development and licenses
 
-- [Swift Argument Parser](https://github.com/apple/swift-argument-parser) (fetched by SwiftPM).
-- **`ffmpeg`** and **`mediainfo`** at runtime — downloaded by `build.sh`, not committed to this repo. `ffmpeg` is licensed under the **GPL**; it is used here as a separate, unmodified subprocess (not linked in) and is fetched by the user from the official upstream, so it is not redistributed by this project. Details: [docs/dependencies.md](docs/dependencies.md).
+[Architecture](docs/architecture.md) · [Building and testing](docs/build-and-test.md) · [Dependencies](docs/dependencies.md)
 
-For a deeper map of the code, see [AGENTS.md](AGENTS.md) and the [`docs/`](docs/) folder.
-
----
-
-## License
-
-This project's own code is licensed under the [MIT License](LICENSE). The external `ffmpeg`/`mediainfo` binaries keep their respective upstream licenses (GPL-3.0 / BSD-2-Clause) — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for the full third-party license details.
+The app and CLI are available under the [MIT License](LICENSE).
+Swift Argument Parser is fetched by SwiftPM. The `ffmpeg` and `mediainfo`
+binaries retain their upstream licenses (GPL-3.0 and BSD-2-Clause).
+[Third-party notices](THIRD-PARTY-NOTICES.md)

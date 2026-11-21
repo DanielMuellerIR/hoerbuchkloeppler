@@ -32,6 +32,7 @@ build/
 
 # Scratch-/Testdateien
 test.txt
+/.codeqa/
 
 # Prozessweite Sperre des sicheren Commit-Workflows
 .commit-lock

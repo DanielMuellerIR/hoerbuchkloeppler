@@ -13,7 +13,7 @@
 #   ./build.sh --deps-only     # nur die Binaries herunterladen
 #   ./build.sh --force-deps    # Binaries neu laden, auch wenn schon vorhanden
 #
-# AI-Agent/Headless: alle Schritte laufen ohne GUI; Exit-Code ≠ 0 bei Fehler.
+# Läuft ohne GUI. Ein Fehler ergibt einen Exit-Code ungleich null.
 
 set -euo pipefail
 cd "$(dirname "$0")"

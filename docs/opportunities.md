@@ -1,103 +1,24 @@
-# Ausbau- und Performance-Möglichkeiten
+# Technische Grenzen und mögliche Folgearbeiten
 
-Stand: 2026-10-07. Die Funktionen der früheren Ideenliste wurden umgesetzt und
-in die Fachdokumentation übernommen:
-
-- Importauswahl, Fortschritt und Abbruch: [build-and-test.md](build-and-test.md).
-- Projektformat, Kapitelbearbeitung und JSON-CLI: [projects.md](projects.md).
-- Ausgabevorschau, Qualitätsprofile und begrenzte Prozesse: [settings.md](settings.md).
-- Metadaten, Buchlautheit und AAC-Übergangsgrenzen: [encoding.md](encoding.md).
-- Importmessungen und Experiment ohne WAV: [performance-measurements.md](performance-measurements.md).
-
-GUI-Drops bündeln die Cover-Suche bereits; `LogTranscriptView` vermeidet den
-Textneubau bei bloßen Fortschrittsupdates. Beides ist keine offene Optimierung.
-
-## Verbleibende Grenzen und mögliche Folgearbeiten
-
-- Der Performance-Modus verbindet getrennte AAC-Encodes. Priming und Padding
-  verschieben Audioübergänge gegenüber geplanten Kapitelmarken; Standard bleibt
-  die Wahl für durchgehende Musik und genaue Übergänge. Eine lückenlose Verbindung
-  ohne erneutes Encoding ist gesondert zu untersuchen.
-- Ein einzelner Filtergraph ohne WAV wurde wegen wachsender Speicherbelegung und
-  gleichzeitig offener Quellen nicht übernommen. Ein begrenztes Streamingverfahren
-  wäre ein eigenes Experiment.
+- Der Performance-Modus verbindet getrennte AAC-Segmente. Die vom Encoder
+  an den Segmenträndern hinzugefügten Samples (Priming und Padding) können
+  Audioübergänge gegenüber geplanten Kapitelmarken verschieben. Standard
+  eignet sich für durchgehende Musik und genaue Übergänge. Eine lückenlose
+  Verbindung ohne erneute Kodierung bleibt zu untersuchen.
+- Im Versuch mit einem gemeinsamen Filtergraphen ohne WAV wuchs die
+  Speicherbelegung mit der Zahl gleichzeitig offener Quellen. Ein begrenztes
+  Streamingverfahren wäre ein eigenes Experiment.
 - Die synchrone Übernahme vieler importierter Einträge benötigt bei 1.000 kurzen
   Quellen noch rund 300 ms. Analyse und Artwork sind bereits begrenzt parallel.
-- Die bisherigen Messungen verwenden lokale, warme Testdateien. Langbücher,
-  langsame externe Datenträger und thermische Drosselung bleiben gesonderte
-  Messreihen; die Ergebnisse erlauben keine entsprechende Leistungszusage.
-  Die [begrenzte Langbuchmessung](long-book-measurement.md) ergänzt nun zwölf
-  synthetische Stunden lokal und einen abgegrenzten Streaming-Versuch als Plan;
-  sie rechtfertigt noch keine Änderung der Kodierpipeline.
-- Lautheitsangleichung verwendet einen gemeinsamen linearen Pegel. Die
-  Spitzenbegrenzung kann das Ziel −18 LUFS verhindern; Dynamik wird erhalten.
-- Undo/Redo laufen seit 1.4.19 über einen fensterbezogenen Router und eine
-  gemeinsame Menügruppe. Editierbare Textfelder verwenden ihren Text-Undo,
-  sonst greift die Kapitelhistorie. AppKit-Prüfung und echte Bedienung über
-  Menü, Tastatur und Toolbar sind seit 2026-10-07 geprüft.
-- Die geprüften GUI-Abläufe und vollständiges Dekodieren ersetzen keine
-  subjektive Hörprüfung. Details zum Prüfumfang: [build-and-test.md](build-and-test.md).
-
-### Aus der CodeQA-Kampagne 2026-09-10 bewusst offen gelassen
-
-Jeder Punkt ist am Code belegt, aber keiner ließ sich ohne eigenen Auftrag oder
-ohne unverhältnismäßiges Risiko im Rahmen der Kampagne erledigen.
-
-- **Terminal-Neuzeichnung korrigiert (2026-10-07):** `TerminalRenderer` bricht
-  Statuszeilen anhand der Terminalbreite und Unicode-Anzeigebreite um; Höhe und
-  Größenwechsel werden berücksichtigt. Echte PTY-Gegenproben belegen den
-  früheren Statusrest bei zwölf Spalten und dessen Korrektur. Logzeilen bleiben
-  bei 12/24/40/80 Spalten erhalten. Nach Resize bleibt der alte Status bewusst
-  einmal stehen. Details und Reproduktion: [build-and-test.md](build-and-test.md).
-- **Laufbericht-Schema 2 (2026-10-07):** typisierte, sprachunabhängige Phasen
-  und Ereignisse; `success` ist auch während des Laufs vorhanden (`null`). Bei
-  Fehlern bleibt der letzte Arbeitsschritt erhalten. Projekt- und Inspect-
-  Formate bleiben unabhängig bei Version 1. Vertrag: [projects.md](projects.md).
-- **Dokumentöffnung seit 1.4.31 über den Systemweg geprüft.**
-  Projekt- und Audio-Dokumenttypen sowie Desktop-/Wechselmedien-Beschreibungen
-  sind ergänzt. Der AppKit-Delegate übernimmt vollständige Dateilisten;
-  Audioereignisse werden gemeinsam importiert. Projekte ersetzen vorhandene
-  Daten erst nach Bestätigung. Appstart, mehrere Audiodateien, Bestätigen und
-  Abbrechen, Wiederöffnen nach Schließen und zwei Projektfenster sind geprüft.
-- **Provider-Zeitlimit seit 1.4.28 umgesetzt und mit 1.4.31 sichtbar geprüft.**
-  Die Sammlung von Datei-Adressen endet nach 60 Sekunden. Ein unvollständiger
-  Batch wird vollständig verworfen; vorhandene Daten bleiben erhalten. Der
-  Dialog bietet Wiederholen/Abbrechen. Die Frist gilt vor der Audioanalyse;
-  verspätete Antworten und Timer abgebrochener/ersetzter Imports sind entwertet.
-  Automatische Provider-Prüfungen und beide Dialogaktionen nach der echten
-  60-Sekunden-Frist sind grün; Kapitelbearbeitung bleibt während des Imports gesperrt.
-- **Erledigt in 1.4.22: Kapitelanalyse auf eigener Queue.** Prozessstart,
-  Pipe-Lesen, Warten, Parsing und Kapitelaufbau laufen auf einer eigenen
-  parallelen Utility-Queue. Der Import begrenzt weiterhin die Workerzahl;
-  Task-Abbruch bleibt über einen gesperrten Abbruchzustand erreichbar.
-  Die Probe mit 12.000 Kapiteln bestätigt unveränderte Werte und die Ausführung
-  außerhalb des aufrufenden Tasks. Sie belegt keine allgemeine Beschleunigung.
-- **Erledigt in 1.4.29: Cover-Extraktion und Vorschau begrenzt.** Eingebettete
-  Bildpakete kommen unverändert über eine 32-MiB-Pipe aus ffmpeg; die Extraktion
-  läuft auf der Utility-Queue, mit Abbruch und insgesamt 15 Sekunden pro Quelle.
-  Höchstens 64 Cover-Streams werden versucht. Einzelne ffmpeg-Allokationen sind
-  ebenfalls auf 32 MiB begrenzt; das ist keine Obergrenze für den gesamten
-  Prozessspeicher. Manuelle Cover werden weiterhin vor dem Lesen begrenzt.
-  ImageIO erzeugt direkt eine Vorschau mit höchstens 2.000 Pixeln pro Achse,
-  auch beim Öffnen von Projekten und beim Undo. Export und Projekte behalten
-  die unveränderten Originalbytes. AVFoundation kann bei der allgemeinen
-  Metadatenanalyse weiterhin eigene Containerpuffer anlegen; die Pipe-Grenze
-  begrenzt die Cover-Übernahme, nicht sämtliche internen Framework-Allokationen.
-- **Signierung, Installation, DMG-Release und Build-Lifecycle geprüft.**
-  `test_scripts.sh` führt `sign-bundle.sh` seit 1.4.23 mit echten Ad-hoc-Bundles
-  und kontrollierten Werkzeugfehlern aus. Seit 1.4.24 prüft es außerdem den
-  wirklichen Installationsaustausch/Rollback mit kontrollierten Diensten und
-  eigenem Testziel. Ziel-/Elternordnerwechsel sowie geänderte Prozessidentitäten
-  werden erkannt; ein fremdes Ziel wird beim Rückzug erhalten.
-  Seit 1.4.25 prüfen kontrollierte Release-Fixtures zusätzlich die DMG-/Notary-
-  Reihenfolge, Lizenzhinweise, den Erhalt früherer guter Images und die
-  Bereinigung. Ein unbekannter Mount-Status erhält nun temporäre Daten und
-  verhindert die Konvertierung. Seit 1.4.26 prüft es auch Build-Optionen,
-  Abhängigkeiten/Downloads, Fehler von CLI-/App-Build sowie den Ad-hoc-Vertrag.
-  Beim MediaInfo-Download bleiben aktive oder unbekannte Mounts samt Daten
-  erhalten. Download-, Compiler- und Apple-Dienste sind dabei kontrolliert;
-  wirkliche positive Builds und Dependency-Prüfungen ergänzen diese Tests.
-
-Die historische CodeQA-Abdeckung in `.codeqa/coverage.json` wird nicht als Prüfung
-der neuen Funktionen ausgegeben. Neue/erweiterte Bereiche stehen dort zur
-nächsten unabhängigen Prüfung an.
+- Die bisherigen Messungen verwenden lokale Testdateien im warmen Cache.
+  Die [Langbuchmessung](long-book-measurement.md) ergänzt eine lokale Probe
+  mit zwölf synthetischen Stunden und beschreibt einen geplanten
+  Streaming-Versuch. Langbücher auf langsamen externen Datenträgern und
+  thermische Drosselung brauchen eigene Messreihen.
+- Die Lautheitsangleichung ändert den Pegel des gesamten Buchs um denselben
+  Wert. Die Dynamik bleibt erhalten. Die Spitzenbegrenzung kann das Ziel
+  von −18 LUFS verhindern.
+- Die Übernahme eingebetteter Cover ist auf 32 MiB pro Bildpaket begrenzt.
+  AVFoundation kann bei der Metadatenanalyse eigene Containerpuffer anlegen.
+- Die subjektive Hörprüfung steht aus. Die bisherigen GUI- und Dekodiertests
+  sind unter [Bauen und Testen](build-and-test.md) dokumentiert.

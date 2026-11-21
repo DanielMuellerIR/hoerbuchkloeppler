@@ -3,14 +3,14 @@
 ## Alles bauen (empfohlen)
 
 ```bash
-./build.sh            # lädt ffmpeg/mediainfo vom Upstream + baut CLI + App
-                      #   -> ./Hörbuchklöppler.app (zum Testen), CLI in .build/release/
-./build.sh --cli-only # nur Binaries + Core/CLI (kein Xcode-App-Build)
-./build.sh --help     # alle Optionen
+./build.sh              # lädt ffmpeg/mediainfo und baut CLI und App
+./build.sh --cli-only   # baut Core und CLI ohne Xcode-App-Build
+./build.sh --help
 ```
 
-Das Skript lädt die externen Binaries (nicht im Repo — siehe
-[dependencies.md](dependencies.md)) und legt die fertige App im Repo-Root ab.
+Das Skript legt `Hörbuchklöppler.app` im Projektordner und die CLI unter
+`HoerbuchkloepplerCore/.build/release/kloeppler` ab. Die Herkunft der
+Laufzeitwerkzeuge ist unter [Abhängigkeiten](dependencies.md) dokumentiert.
 
 ## Nur Core/CLI von Hand
 
@@ -33,55 +33,62 @@ vorhandenem Swift/ffmpeg/ffprobe, kein erfolgreicher Build der vollständigen CL
 
 ## CLI `kloeppler`
 
-```
-kloeppler <ordner> [--mode parallel|standard] [--bitrate 48k] \
-          [--samplerate 32000] [--max-duration 0] [--mono|--stereo] \
-          [--title <titel>] [--author <autor>] [--genre <genre>] \
-          [--cover <bild>|--no-cover] [--output <ziel>] \
-          [--verbose] [--force]
-```
-
-- `<ordner>` = absoluter Pfad zu einem Ordner mit Audiodateien (1 Datei = 1
-  Kapitel). Cover = größte Bilddatei / `folder.jpg` im Ordner.
-- `--max-duration <std>` teilt lange Bücher auf `-01`, `-02` … auf (0 =
-  unbegrenzt). Pendant zur GUI-Einstellung „Maximale Dauer".
-- `--title` / `--author` setzen Buchtitel/Autor explizit und gewinnen gegen die
-  aus den Datei-Tags erkannten Kandidaten (`--title` bestimmt auch den Dateinamen).
-  Ohne diese Optionen entscheidet die CLI bei mehrdeutigen Tag-Kandidaten selbst
-  nach fester Priorität: Album vor Title bzw. Performer vor Album_Performer
-  (die GUI öffnet in diesem Fall stattdessen die manuelle Auswahl).
-- `--genre`, `--cover` und `--no-cover` bilden die entsprechenden GUI-Werte im
-  kopierten CLI-Handoff vollständig ab. Eine explizite Cover-Datei muss regulär,
-  lesbar und höchstens 32 MiB groß sein.
-- `--output <ziel>` = Zielordner (Datei heißt dann `<Titel>.m4b`) **oder** voller
-  `.m4b`-Pfad. Ohne Angabe landet die `.m4b` im **Eltern**-Ordner der Quelle,
-  benannt nach Titel-Tag bzw. Ordnername (sanitisiert) — `--output` ist nötig,
-  wenn die Quelle auf einem vollen/schreibgeschützten Datenträger liegt.
-- **Eingabe-Validierung:** `--mode` (nur `parallel`/`standard`), `--bitrate`
-  (8–320 kbit/s als `<zahl>[k]`) und `--samplerate` (8000–48000) werden vorab
-  geprüft; ungültige
-  Werte brechen mit Usage-Fehler (Exit 64) ab, statt erst später in ffmpeg.
-- Existiert die Zieldatei: ohne `--force` interaktive Nachfrage, aber nur wenn
-  stdin und stdout Terminals sind. Bei Umleitung oder Pipe bricht die CLI mit
-  Fehlercode ab und verweist auf `--force`.
-- **Exit-Code:** 0 nur bei echtem Erfolg, sonst ≠ 0; SIGINT liefert 130 und
-  SIGTERM 143 (skript-/agent-tauglich).
-
-## Demo-/Verifikations-Rezept (2026-06-03 erprobt)
+Nach dem Build liefert die CLI die vollständige Hilfe. Die folgenden
+Befehle starten im Projektordner.
 
 ```bash
-# Kleiner Subset-Ordner (z.B. 3 Kapitel + folder.jpg) genügt für End-to-End.
-.build/release/kloeppler "/pfad/zum/ordner" --mode standard --mono \
-    --bitrate 48k --samplerate 32000 --verbose
+export PATH="$PWD/HoerbuchkloepplerCore/.build/release:$PATH"
+kloeppler --help
+```
+
+Jeder Aufruf verarbeitet genau eine Eingabeform. Ein Ordner wird nach den
+Importregeln der App sortiert, `--file` übernimmt die angegebene Reihenfolge
+und `--project` öffnet ein bearbeitetes `.hkproject`. Explizite Optionen
+überschreiben die im Projekt gespeicherten Werte.
+
+```bash
+kloeppler "/pfad/zum/ordner" --output Buch.m4b
+kloeppler --file 02.wav --file 01.wav --inspect --format json
+kloeppler --project Buch.hkproject --format json --output Buch.m4b
+```
+
+| Aufgabe | Optionen |
+| --- | --- |
+| Quellen und geplante Ausgabe ansehen | `--inspect` analysiert und plant, ohne Ausgabedateien oder -ordner anzulegen. |
+| Strukturierte Ausgabe | `--format text\|json` liefert mit `json` einen einzelnen Inspect-Bericht oder JSON Lines während einer Konvertierung. |
+| Kodierung | `--mode parallel\|standard`, `--bitrate` (8–320 kbit/s, z. B. `48k` oder `64000`), `--samplerate` (8000–48000 Hz), `--mono` oder `--stereo`. |
+| Gleichzeitige Prozesse begrenzen | `--workers` für Kodierung (1–32, automatisch höchstens 4), `--import-workers` für Quellanalysen (1–8, standardmäßig 4). |
+| Lautheit | `--analyze-loudness` misst das Buch. `--normalize-loudness` schließt die Messung ein und passt den Pegel für das ganze Buch an. |
+| Buchmetadaten | `--title`, `--author`, `--genre`, `--narrator`, `--series`, `--volume-number` (1–65535) und `--language` (ISO-639-Code, z. B. `deu`). |
+| Cover | `--cover` verlangt eine reguläre, lesbare Bilddatei mit höchstens 32 MiB. `--no-cover` schaltet die Cover-Übernahme aus. |
+| Ausgabe und Protokoll | `--output` akzeptiert einen Zielordner oder einen vollständigen `.m4b`-Pfad. `--max-duration` teilt nach Dauer in Stunden (`0` für unbegrenzt). `--verbose` protokolliert Pfade und Arbeitsschritte. `--force` erlaubt Überschreiben ohne Nachfrage. |
+
+`--title` bestimmt den Dateinamen, sofern `--output` keinen vollständigen
+Dateipfad vorgibt. Standardmäßig landet die Datei im Elternordner der
+Quelle. Ohne explizite Metadaten wählt die CLI aus mehrdeutigen Tags nach
+fester Priorität (Album vor Title, Performer vor Album_Performer).
+Bei bereits vorhandenem Ziel fragt sie ohne `--force` nur nach, wenn
+stdin und stdout Terminals sind.
+
+Die CLI meldet auf stderr, warum ein Lauf fehlschlägt. Exit `0` bedeutet
+Erfolg, Exit `64` ungültige Argumente. Ein angenommener Abbruch durch
+SIGINT ergibt `130`, durch SIGTERM `143`.
+[Projektformat und JSON-CLI](projects.md#cli)
+
+## Ausgabe mit einer kleinen Quelle prüfen
+
+```bash
+# Im Projektordner starten. Für die Probe genügen drei Kapitel und folder.jpg.
+HoerbuchkloepplerCore/.build/release/kloeppler "/pfad/zum/ordner" --mode standard --mono \
+    --bitrate 48k --samplerate 32000 --output out.m4b --verbose
 
 # Output mit den gebündelten Binaries prüfen:
-BIN=Sources/HoerbuchkloepplerCore/Resources/bin
+BIN=HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/Resources/bin
 "$BIN/ffmpeg" -i "out.m4b" -hide_banner 2>&1 | grep -E 'Chapter|Stream|title'
 "$BIN/mediainfo" "out.m4b"
 ```
 
-Beobachtetes Verhalten verifizieren (Kapitel, Cover, Metadaten, Sample-Rate) —
-nicht nur „Build grün".
+Prüfe Kapitel, Cover, Metadaten und Abtastrate in der erzeugten Datei.
 
 ## Unit-Tests (Core)
 
@@ -98,7 +105,7 @@ python3 tests/verify_audio_transitions.py     # Kapiteleinsätze im erzeugten m4
 und druckt, sichert aber nichts zu. Nicht in einen Gate-Lauf aufnehmen.
 
 Deckt die reine Kernlogik ab: FFMETADATA-Escaping/Parsing, Kapitel-Arithmetik
-(`buildChapterMetadata`), Auto-Split, Ausgabe-Dateinamen, Zeit-Parsing,
+(`FFMetadata`), Auto-Split, Ausgabe-Dateinamen, Zeit-Parsing,
 NaN/Infinity-Härtung sowie Ausgabeplan/atomare Übernahme, Tool-Auflösung,
 laufbezogenen Abbruch, Metadatenentscheidung, echte asynchrone
 AVFoundation-Analyse einer WAV-Datei, Symlink-Deduplizierung, Unterordner-
