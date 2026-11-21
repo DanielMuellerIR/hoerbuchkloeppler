@@ -1,17 +1,26 @@
 import Foundation
 import AppKit
 
-struct ChapterEditSnapshot {
-    var files: [AudioFile]
-    var metadata: BookMetadata
-    var coverData: Data?
-    var coverPath: String?
-    var coverSuppressed: Bool
-}
-
 private let projectWriteQueue = DispatchQueue(label: "de.hoerbuchkloeppler.projects.write")
 
-private func performProjectIO<Result: Sendable>(_ work: @escaping @Sendable () throws -> Result) async throws -> Result {
+struct ProjectSourceBinding: Equatable, Sendable {
+    struct Content: Hashable, Sendable {
+        let visibleURL: URL
+        let readURL: URL
+        let sha256: String
+    }
+
+    let id: UUID
+    let content: Content
+
+    init(source: ProjectSource, projectURL: URL) {
+        id = source.id
+        content = Content(visibleURL: source.location.resolve(from: projectURL),
+                          readURL: source.readLocation.resolve(from: projectURL), sha256: source.sha256)
+    }
+}
+
+func performFileIO<Result: Sendable>(_ work: @escaping @Sendable () throws -> Result) async throws -> Result {
     let task = Task.detached(priority: Task.currentPriority) {
         try Task.checkCancellation()
         let result = try work()
@@ -43,8 +52,9 @@ extension ConversionSession {
     }
 
     public func makeProject(at url: URL) throws -> AudiobookProject {
-        let chapters = try Self.projectChapters(files: audioFiles, priorSources: projectSources,
-            priorURL: loadedProjectURL, destination: url, fingerprints: projectFingerprints)
+        let bindings = try projectBindings(for: audioFiles)
+        let chapters = try Self.projectChapters(files: audioFiles, priorBindings: bindings,
+            destination: url, fingerprints: projectFingerprints)
         return project(with: chapters)
     }
 
@@ -55,28 +65,36 @@ extension ConversionSession {
     }
 
     private nonisolated static func projectChapters(
-        files: [AudioFile], priorSources: [ProjectSource], priorURL: URL?, destination: URL,
+        files: [AudioFile], priorBindings: [UUID: ProjectSourceBinding], destination: URL,
         fingerprints: ProjectFingerprintStore
     ) throws -> (sources: [ProjectSource], sections: [ProjectSection]) {
-        var priorHashes: [URL: String] = [:]
-        if let priorURL {
-            priorHashes = Dictionary(priorSources.map { ($0.location.resolve(from: priorURL), $0.sha256) },
-                uniquingKeysWith: { first, _ in first })
-        }
         var sources: [ProjectSource] = []
         var sections: [ProjectSection] = []
-        var ids: [URL: UUID] = [:]
+        var ids: [ProjectSourceBinding.Content: UUID] = [:]
+        var newHashes: [URL: String] = [:]
         for file in files {
             try Task.checkCancellation()
+            let prior = priorBindings[file.id]
+            let content: ProjectSourceBinding.Content
+            if let prior {
+                content = prior.content
+            } else {
+                let readURL = file.url.standardizedFileURL
+                let sha256 = try newHashes[readURL] ?? fingerprints.fingerprint(readURL)
+                newHashes[readURL] = sha256
+                content = ProjectSourceBinding.Content(visibleURL: file.sourceURL.standardizedFileURL,
+                    readURL: readURL, sha256: sha256)
+            }
             let id: UUID
-            if let existing = ids[file.sourceURL] { id = existing }
-            else {
-                id = UUID(); ids[file.sourceURL] = id
-                let prior = priorHashes[file.sourceURL.standardizedFileURL]
+            if let existing = ids[content] {
+                id = existing
+            } else {
+                id = prior?.id ?? UUID()
+                ids[content] = id
                 sources.append(ProjectSource(id: id,
-                    location: ProjectLocation(url: file.sourceURL, projectURL: destination),
-                    readLocation: ProjectLocation(url: file.url, projectURL: destination),
-                    sha256: try prior ?? fingerprints.fingerprint(file.url)))
+                    location: ProjectLocation(url: content.visibleURL, projectURL: destination),
+                    readLocation: ProjectLocation(url: content.readURL, projectURL: destination),
+                    sha256: content.sha256))
             }
             sections.append(ProjectSection(id: file.id, sourceID: id, start: file.startTime, duration: file.duration, title: file.chapterTitle))
         }
@@ -88,7 +106,7 @@ extension ConversionSession {
         refreshProjectSourceIssues()
         let project = try makeProject(at: url)
         try projectWriteQueue.sync { try project.write(to: url) }
-        projectSources = project.sources; loadedProjectURL = url
+        rememberProjectBindings(Self.projectBindings(in: project, at: url), at: url)
         refreshProjectSourceIssues()
     }
 
@@ -96,22 +114,34 @@ extension ConversionSession {
         guard !isConverting else { throw ProjectError.invalid("Während einer Konvertierung kann kein Projekt geöffnet werden.") }
         projectOperation = UUID()
         let project = try AudiobookProject.read(from: url)
-        let files = Self.audioFiles(in: project, at: url)
-        let issues = try Self.sourceIssues(project.sources, at: url, files: files, fingerprints: projectFingerprints)
-        try applyProject(project, from: url, files: files, issues: issues)
+        let bindings = Self.projectBindings(in: project, at: url)
+        let files = Self.audioFiles(in: project, bindings: bindings)
+        let issues = try Self.sourceIssues(bindings, files: files, fingerprints: projectFingerprints)
+        try applyProject(project, from: url, files: files, bindings: bindings, issues: issues,
+            artwork: Self.projectArtwork(project))
     }
 
-    private nonisolated static func audioFiles(in project: AudiobookProject, at url: URL) -> [AudioFile] {
-        let sources = Dictionary(uniqueKeysWithValues: project.sources.map { ($0.id, $0) })
+    private nonisolated static func audioFiles(
+        in project: AudiobookProject, bindings: [UUID: ProjectSourceBinding]
+    ) -> [AudioFile] {
         return project.sections.compactMap { section -> AudioFile? in
-            guard let source = sources[section.sourceID] else { return nil }
-            var file = AudioFile(foundFile: FoundFile(source: source.location.resolve(from: url), resolved: source.readLocation.resolve(from: url)), startTime: section.start, duration: section.duration, chapterTitle: section.title)
+            guard let source = bindings[section.id]?.content else { return nil }
+            var file = AudioFile(foundFile: FoundFile(source: source.visibleURL, resolved: source.readURL),
+                startTime: section.start, duration: section.duration, chapterTitle: section.title)
             file.id = section.id
             return file
         }
     }
 
-    private func applyProject(_ project: AudiobookProject, from url: URL, files: [AudioFile], issues: [ProjectSourceIssue]) throws {
+    private nonisolated static func projectArtwork(_ project: AudiobookProject) -> PreparedEmbeddedArtwork? {
+        project.coverSuppressed ? nil : project.coverData.flatMap(PreparedEmbeddedArtwork.init)
+    }
+
+    private func applyProject(
+        _ project: AudiobookProject, from url: URL, files: [AudioFile],
+        bindings: [UUID: ProjectSourceBinding], issues: [ProjectSourceIssue],
+        artwork: PreparedEmbeddedArtwork?
+    ) throws {
         guard !isConverting else { throw ProjectError.invalid("Während einer Konvertierung kann kein Projekt geöffnet werden.") }
         // Erst vollständig dekodieren, danach bestehenden Zustand ersetzen.
         resetSession()
@@ -119,10 +149,9 @@ extension ConversionSession {
         bookMetadata = project.metadata
         settings = project.settings.normalized()
         if project.coverSuppressed { removeCover() }
-        else { embeddedCoverData = project.coverData; coverImage = project.coverData.flatMap(CoverArtwork.preview(from:)) }
-        projectSources = project.sources; loadedProjectURL = url
-        undoChapters = []; redoChapters = []; updateHistoryAvailability()
-        projectSourceIssues = issues
+        else { embeddedCoverData = project.coverData; coverImage = artwork?.image }
+        rememberProjectBindings(bindings, at: url)
+        recordProjectSourceIssues(issues, for: bindings)
     }
 
     public func openProjectAsync(from url: URL) async throws {
@@ -130,11 +159,12 @@ extension ConversionSession {
         guard !isConverting else { throw ProjectError.invalid("Während einer Konvertierung kann kein Projekt geöffnet werden.") }
         let operation = UUID(); projectOperation = operation
         let fingerprints = projectFingerprints
-        let (project, files, issues) = try await performProjectIO {
+        let (project, files, bindings, issues, artwork) = try await performFileIO {
             let project = try AudiobookProject.read(from: url)
-            let files = Self.audioFiles(in: project, at: url)
-            let issues = try Self.sourceIssues(project.sources, at: url, files: files, fingerprints: fingerprints)
-            return (project, files, issues)
+            let bindings = Self.projectBindings(in: project, at: url)
+            let files = Self.audioFiles(in: project, bindings: bindings)
+            let issues = try Self.sourceIssues(bindings, files: files, fingerprints: fingerprints)
+            return (project, files, bindings, issues, Self.projectArtwork(project))
         }
         try Task.checkCancellation()
         // Ein zwischenzeitlicher Import oder ein neueres Öffnen hat diesen
@@ -143,7 +173,7 @@ extension ConversionSession {
         guard projectOperation == operation else {
             throw ProjectError.invalid("Das Öffnen wurde durch eine andere Aktion unterbrochen; bitte erneut öffnen.")
         }
-        try applyProject(project, from: url, files: files, issues: issues)
+        try applyProject(project, from: url, files: files, bindings: bindings, issues: issues, artwork: artwork)
     }
 
     public func saveProjectAsync(to url: URL) async throws {
@@ -164,14 +194,14 @@ extension ConversionSession {
         try Task.checkCancellation()
         let operation = UUID(); projectOperation = operation
         let files = audioFiles
-        let priorSources = projectSources
-        let priorURL = loadedProjectURL
+        let priorBindings = try projectBindings(for: files)
         let fingerprints = projectFingerprints
-        let (chapters, issues) = try await performProjectIO {
-            let chapters = try Self.projectChapters(files: files, priorSources: priorSources, priorURL: priorURL,
+        let (chapters, bindings, issues) = try await performFileIO {
+            let chapters = try Self.projectChapters(files: files, priorBindings: priorBindings,
                 destination: url, fingerprints: fingerprints)
-            let issues = try Self.sourceIssues(chapters.sources, at: url, files: files, fingerprints: fingerprints)
-            return (chapters, issues)
+            let bindings = Self.projectBindings(sources: chapters.sources, sections: chapters.sections, at: url)
+            let issues = try Self.sourceIssues(bindings, files: files, fingerprints: fingerprints)
+            return (chapters, bindings, issues)
         }
         try Task.checkCancellation()
         // Sonst hielte der Nutzer das Projekt für gespeichert, obwohl nichts
@@ -184,20 +214,28 @@ extension ConversionSession {
         let savedCoverImage = coverImage
         let savedCoverData = embeddedCoverData
         let project = project(with: chapters)
+        // Kapitel können während des Schreibens zusammengeführt werden. Dabei
+        // muss auch die Bindung des Schreibstands vererbbar sein.
+        let bindingsByOrigin = projectBindingsByOrigin(bindings)
+        projectSourcesBeingWritten = (operation, Set(bindings.keys), bindingsByOrigin)
+        defer {
+            if projectSourcesBeingWritten?.operation == operation { projectSourcesBeingWritten = nil }
+        }
         try await writeProject(project, url)
         // Ein Import oder Öffnen darf den bereits geschriebenen Stand nicht an
         // seinen eigenen, inzwischen aktiven Zustand binden.
         guard projectOperation == operation else {
             throw ProjectError.invalid("Die Projektdatei wurde geschrieben. Eine andere Aktion hat inzwischen das aktive Projekt verändert.")
         }
-        projectSources = project.sources; loadedProjectURL = url
+        rememberProjectSourceOrigins(bindingsByOrigin)
+        loadedProjectURL = url
+        recordProjectSourceIssues(issues, for: bindings)
         guard files == audioFiles, project.metadata == bookMetadata, project.settings == settings,
               savedCoverImage === coverImage, savedCoverData == embeddedCoverData,
               project.coverSuppressed == isCoverSuppressed else {
             try? refreshProjectSourceIssues(policy: .cachedOnly)
             throw ProjectError.invalid("Die Projektdatei enthält den Stand vor den letzten Änderungen. Bitte erneut speichern.")
         }
-        projectSourceIssues = issues
     }
 
     public func refreshProjectSourceIssues() {
@@ -205,194 +243,222 @@ extension ConversionSession {
     }
 
     public func verifyProjectSources() async throws {
-        guard let url = loadedProjectURL else { projectSourceIssues = []; return }
+        try await verifyProjectSources(policy: .verifyCurrent)
+    }
+
+    func verifyProjectSources(policy: ProjectFingerprintStore.ReadPolicy, plan: ConversionPlan? = nil) async throws {
         let operation = projectOperation
         let files = audioFiles
-        let sources = projectSources
+        let bindings = try projectBindings(for: files)
+        guard !bindings.isEmpty else {
+            updateActiveProjectSourceIssues()
+            return
+        }
         let fingerprints = projectFingerprints
-        let issues = try await performProjectIO {
-            try Self.sourceIssues(sources, at: url, files: files, fingerprints: fingerprints)
+        let issues = try await performFileIO {
+            try Self.sourceIssues(bindings, files: files, fingerprints: fingerprints,
+                policy: policy, plannedInputs: plan?.inputSnapshots)
         }
         try Task.checkCancellation()
-        guard projectOperation == operation, files == audioFiles, url == loadedProjectURL else {
+        guard projectOperation == operation, files == audioFiles,
+              bindings == (try? projectBindings(for: files)) else {
             throw ProjectError.invalid("Das Projekt wurde während der Prüfung verändert; bitte erneut starten.")
         }
-        projectSourceIssues = issues
+        recordProjectSourceIssues(issues, for: bindings)
     }
 
     func refreshProjectSourceIssues(
         policy: ProjectFingerprintStore.ReadPolicy, plan: ConversionPlan? = nil
     ) throws {
-        projectSourceIssues = try Self.sourceIssues(projectSources, at: loadedProjectURL,
-            files: plan?.groups.flatMap { $0 } ?? audioFiles,
+        let files = plan?.groups.flatMap { $0 } ?? audioFiles
+        let bindings = try projectBindings(for: files)
+        let issues = try Self.sourceIssues(bindings, files: files,
             fingerprints: projectFingerprints, policy: policy, plannedInputs: plan?.inputSnapshots)
+        recordProjectSourceIssues(issues, for: bindings)
+    }
+
+    private nonisolated static func projectBindings(in project: AudiobookProject, at url: URL) -> [UUID: ProjectSourceBinding] {
+        projectBindings(sources: project.sources, sections: project.sections, at: url)
+    }
+
+    private nonisolated static func projectBindings(
+        sources: [ProjectSource], sections: [ProjectSection], at url: URL
+    ) -> [UUID: ProjectSourceBinding] {
+        let bySourceID = Dictionary(uniqueKeysWithValues: sources.map {
+            ($0.id, ProjectSourceBinding(source: $0, projectURL: url))
+        })
+        var bindings: [UUID: ProjectSourceBinding] = [:]
+        for section in sections {
+            bindings[section.id] = bySourceID[section.sourceID]
+        }
+        return bindings
+    }
+
+    private func projectSourceOrigins(of chapterID: UUID) -> [UUID] {
+        projectSourceOrigins[chapterID] ?? [chapterID]
+    }
+
+    private func projectSourceBinding(
+        for chapterID: UUID, pending: [UUID: ProjectSourceBinding]? = nil
+    ) -> (binding: ProjectSourceBinding?, conflict: Bool) {
+        guard let origins = projectSourceOrigins[chapterID] else {
+            return (projectSourcesByOrigin[chapterID] ?? pending?[chapterID], false)
+        }
+        var previous: ProjectSourceBinding?
+        for origin in origins {
+            guard let source = projectSourcesByOrigin[origin] ?? pending?[origin] else { continue }
+            if let previous, previous.content != source.content { return (nil, true) }
+            if previous == nil { previous = source }
+        }
+        return (previous, false)
+    }
+
+    func projectSourceOriginsForMerge(_ first: UUID, _ second: UUID) -> [UUID]? {
+        let pending = projectSourcesBeingWritten?.operation == projectOperation
+            ? projectSourcesBeingWritten?.byOrigin : nil
+        let (firstBinding, firstConflict) = projectSourceBinding(for: first, pending: pending)
+        let (secondBinding, secondConflict) = projectSourceBinding(for: second, pending: pending)
+        guard !firstConflict && !secondConflict else { return nil }
+        if let firstBinding, let secondBinding, firstBinding.content != secondBinding.content { return nil }
+        let firstOrigins = projectSourceOrigins(of: first)
+        let secondOrigins = projectSourceOrigins(of: second)
+        // Bereits gebundene Abschnitte schützen den Merge. Ein unabhängig
+        // neu importierter Abschnitt behält beim Undo seinen eigenen Ursprung.
+        if projectSourceBinding(for: first).binding != nil { return firstOrigins }
+        if projectSourceBinding(for: second).binding != nil { return secondOrigins }
+        // Ein später erstmals gespeicherter Merge bindet beide Ausgangskapitel.
+        let firstOriginIDs = Set(firstOrigins)
+        return firstOrigins + secondOrigins.filter { !firstOriginIDs.contains($0) }
+    }
+
+    func inheritProjectSource(from chapterID: UUID, to derivedChapterID: UUID) {
+        projectSourceOrigins[derivedChapterID] = projectSourceOrigins(of: chapterID)
+    }
+
+    private static let conflictingProjectSources = "Zusammengeführtes Kapitel hat unterschiedliche Quellfingerprints. Bitte die Zusammenführung rückgängig machen."
+
+    private func projectBindings(for files: [AudioFile]) throws -> [UUID: ProjectSourceBinding] {
+        guard !projectSourcesByOrigin.isEmpty else { return [:] }
+        var bindings: [UUID: ProjectSourceBinding] = [:]
+        for file in files {
+            let (binding, conflict) = projectSourceBinding(for: file.id)
+            if conflict { throw ProjectError.invalid(Self.conflictingProjectSources) }
+            bindings[file.id] = binding
+        }
+        return bindings
+    }
+
+    private func rememberProjectBindings(_ bindings: [UUID: ProjectSourceBinding], at url: URL) {
+        rememberProjectSourceOrigins(projectBindingsByOrigin(bindings))
+        loadedProjectURL = url
+    }
+
+    private func rememberProjectSourceOrigins(_ bindings: [UUID: ProjectSourceBinding]) {
+        projectSourcesByOrigin.merge(bindings) { previous, saved in
+            previous.content == saved.content ? saved : previous
+        }
+    }
+
+    private func projectBindingsByOrigin(_ bindings: [UUID: ProjectSourceBinding]) -> [UUID: ProjectSourceBinding] {
+        var byOrigin: [UUID: ProjectSourceBinding] = [:]
+        for (chapterID, binding) in bindings {
+            for origin in projectSourceOrigins(of: chapterID) { byOrigin[origin] = binding }
+        }
+        return byOrigin
+    }
+
+    func compactProjectSourceHistoryIfNeeded() {
+        guard !projectSourceOrigins.isEmpty || !projectSourcesByOrigin.isEmpty else { return }
+        projectSourceRetentionEdits += 1
+        // Unverzweigte Bearbeitungen sollen die Historie nicht pro Klick lesen.
+        guard projectSourceRetentionEdits == ChapterHistory.maximumUndoSteps else { return }
+        projectSourceRetentionEdits = 0
+        var chapterIDs = Set(audioFiles.map(\.id))
+        chapterHistory.collectChapterIDs(into: &chapterIDs)
+        if let writing = projectSourcesBeingWritten, writing.operation == projectOperation {
+            chapterIDs.formUnion(writing.chapterIDs)
+        }
+        projectSourceOrigins = projectSourceOrigins.filter { chapterIDs.contains($0.key) }
+        var originIDs = chapterIDs
+        for origins in projectSourceOrigins.values { originIDs.formUnion(origins) }
+        projectSourcesByOrigin = projectSourcesByOrigin.filter { originIDs.contains($0.key) }
+        let sourceIDs = Set(projectSourcesByOrigin.values.map(\.id))
+        projectSourceIssuesByID = projectSourceIssuesByID.filter { sourceIDs.contains($0.key) }
+    }
+
+    private func recordProjectSourceIssues(_ issues: [ProjectSourceIssue], for bindings: [UUID: ProjectSourceBinding]) {
+        for binding in bindings.values {
+            projectSourceIssuesByID.removeValue(forKey: binding.id)
+        }
+        for issue in issues {
+            projectSourceIssuesByID[issue.id] = issue
+        }
+        updateActiveProjectSourceIssues()
+    }
+
+    func updateActiveProjectSourceIssues() {
+        guard !projectSourceIssuesByID.isEmpty
+                || (!projectSourcesByOrigin.isEmpty && !projectSourceOrigins.isEmpty) else {
+            if !projectSourceIssues.isEmpty { projectSourceIssues = [] }
+            return
+        }
+        var activeIDs = Set<UUID>()
+        let issues = audioFiles.compactMap { file -> ProjectSourceIssue? in
+            let (binding, conflict) = projectSourceBinding(for: file.id)
+            if conflict {
+                return ProjectSourceIssue(id: file.id, path: file.sourceURL.path,
+                    reason: Self.conflictingProjectSources)
+            }
+            guard let id = binding?.id,
+                  activeIDs.insert(id).inserted else { return nil }
+            return projectSourceIssuesByID[id]
+        }
+        if projectSourceIssues != issues { projectSourceIssues = issues }
     }
 
     private nonisolated static func sourceIssues(
-        _ sources: [ProjectSource], at url: URL?, files: [AudioFile],
+        _ bindings: [UUID: ProjectSourceBinding], files: [AudioFile],
         fingerprints: ProjectFingerprintStore, policy: ProjectFingerprintStore.ReadPolicy = .verifyCurrent,
         plannedInputs: [String: OutputDestinationSnapshot]? = nil
     ) throws -> [ProjectSourceIssue] {
         try Task.checkCancellation()
-        guard let url else { return [] }
-        var activeReadURLs: [URL: Set<URL>] = [:]
+        guard !bindings.isEmpty else { return [] }
+        var checked = Set<UUID>()
+        var changedPaths = Set<UUID>()
         for file in files {
-            activeReadURLs[file.sourceURL.standardizedFileURL, default: []].insert(file.url)
-        }
-        let issues = try sources.compactMap { source -> ProjectSourceIssue? in
             try Task.checkCancellation()
-            let visible = source.location.resolve(from: url)
-            guard let readURLs = activeReadURLs[visible] else { return nil }
-            let readURL = source.readLocation.resolve(from: url)
-            let reason: String
-            guard visible.resolvingSymlinksInPath() == readURL.resolvingSymlinksInPath() else {
-                return ProjectSourceIssue(id: source.id, path: visible.path, reason: "Verknüpfung wurde verändert")
+            guard let binding = bindings[file.id] else { continue }
+            if file.sourceURL.standardizedFileURL != binding.content.visibleURL
+                || file.url.standardizedFileURL != binding.content.readURL {
+                changedPaths.insert(binding.id)
             }
-            switch fingerprints.verify(readURL, expectedSHA256: source.sha256, policy: policy) {
+        }
+        let issues = try files.compactMap { file -> ProjectSourceIssue? in
+            try Task.checkCancellation()
+            guard let binding = bindings[file.id], checked.insert(binding.id).inserted else { return nil }
+            let visible = binding.content.visibleURL
+            let readURL = binding.content.readURL
+            let reason: String
+            guard !changedPaths.contains(binding.id),
+                  visible.resolvingSymlinksInPath() == readURL.resolvingSymlinksInPath() else {
+                return ProjectSourceIssue(id: binding.id, path: visible.path, reason: "Verknüpfung wurde verändert")
+            }
+            switch fingerprints.verify(readURL, expectedSHA256: binding.content.sha256, policy: policy) {
             case .unchanged(let identity):
                 // Der Export muss denselben Snapshot lesen, der den Projekt-Hash
                 // geliefert hat. Pfad und Session allein binden den Plan nicht daran.
                 let matchesPlan = plannedInputs.map { inputs in
-                    readURLs.allSatisfy { url in
-                        guard case .existing(let planned) = inputs[FFmpegWrapper.canonicalPath(url)] else { return false }
-                        return planned.matchesContentSnapshot(identity)
-                    }
+                    guard case .existing(let planned) = inputs[FileSystemEntry.canonicalPath(readURL)] else { return false }
+                    return planned.matchesContentSnapshot(identity)
                 } ?? true
                 guard !matchesPlan else { return nil }
                 reason = "Quelle wurde verändert"
             case .changed: reason = "Quelle wurde verändert"
             case .unreadable: reason = "Quelle fehlt oder ist nicht lesbar"
             }
-            return ProjectSourceIssue(id: source.id, path: visible.path, reason: reason)
+            return ProjectSourceIssue(id: binding.id, path: visible.path, reason: reason)
         }
         try Task.checkCancellation()
         return issues
-    }
-
-    func recordChapterEdit(previous: [AudioFile]) {
-        guard !restoringChapters, previous != audioFiles else { return }
-        // Das Kapiteltitel-Feld schreibt bei jedem Tastendruck in `audioFiles`.
-        // Folgt eine Titeländerung desselben Kapitels direkt auf eine weitere
-        // Titeländerung desselben Kapitels, bleibt der ältere Undo-Eintrag
-        // stehen: Ein Undo nimmt dann den ganzen getippten Titel zurück statt
-        // ein einzelnes Zeichen, und die Historie füllt sich nicht mit Zeichen.
-        if let last = undoChapters.last,
-           let edited = Self.singleTitleEdit(from: previous, to: audioFiles),
-           Self.singleTitleEdit(from: last.files, to: previous) == edited {
-            redoChapters.removeAll()
-            updateHistoryAvailability()
-            return
-        }
-        undoChapters.append(chapterSnapshot(files: previous))
-        if undoChapters.count > 100 { undoChapters.removeFirst() }
-        redoChapters.removeAll()
-        updateHistoryAvailability()
-    }
-
-    func updateHistoryAvailability() {
-        canUndoChapters = !undoChapters.isEmpty; canRedoChapters = !redoChapters.isEmpty
-    }
-
-    /// Liefert die Kapitel-ID, wenn sich beide Listen ausschließlich im Titel
-    /// genau eines Kapitels unterscheiden; sonst `nil`.
-    static func singleTitleEdit(from old: [AudioFile], to new: [AudioFile]) -> UUID? {
-        guard old.count == new.count else { return nil }
-        var changed: UUID?
-        for (before, after) in zip(old, new) where before != after {
-            var retitled = before
-            retitled.chapterTitle = after.chapterTitle
-            guard retitled == after, changed == nil else { return nil }
-            changed = before.id
-        }
-        return changed
-    }
-
-    private func chapterSnapshot(files: [AudioFile]? = nil) -> ChapterEditSnapshot {
-        ChapterEditSnapshot(files: files ?? audioFiles, metadata: bookMetadata,
-            coverData: embeddedCoverData ?? coverImage?.tiffRepresentation,
-            coverPath: coverPath, coverSuppressed: isCoverSuppressed)
-    }
-
-    private func restoreChapterSnapshot(_ snapshot: ChapterEditSnapshot) {
-        restoringChapters = true
-        // Gegenstand von Undo/Redo ist nur die Kapitelliste. Buchmetadaten und
-        // Cover kommen ausschließlich dann aus dem Snapshot zurück, wenn die
-        // Liste gerade leer war: `clearMetadata` hat sie beim Entfernen des
-        // letzten Kapitels gelöscht (und die Cover-Suche beendet). In jedem
-        // anderen Fall bleiben zwischenzeitlich eingetippte Metadaten und ein
-        // gewähltes Cover erhalten, statt still zurückgesetzt zu werden.
-        let wasCleared = audioFiles.isEmpty
-        audioFiles = snapshot.files
-        if wasCleared {
-            bookMetadata = snapshot.metadata
-            if snapshot.coverSuppressed { removeCover() }
-            else {
-                embeddedCoverData = snapshot.coverData
-                coverImage = snapshot.coverData.flatMap(CoverArtwork.preview(from:))
-                coverPath = snapshot.coverPath
-                isCoverSuppressed = false
-                notifyCoverSelectionChange()
-            }
-        }
-        restoringChapters = false
-        updateHistoryAvailability()
-        if wasCleared, embeddedCoverData == nil { startArtworkSearch() }
-    }
-
-    public func undoChapterEdit() {
-        guard let snapshot = undoChapters.popLast() else { return }
-        redoChapters.append(chapterSnapshot())
-        restoreChapterSnapshot(snapshot)
-    }
-
-    public func redoChapterEdit() {
-        guard let snapshot = redoChapters.popLast() else { return }
-        undoChapters.append(chapterSnapshot())
-        restoreChapterSnapshot(snapshot)
-    }
-
-    public func moveChapters(from offsets: IndexSet, to destination: Int) {
-        guard offsets.allSatisfy({ audioFiles.indices.contains($0) }), (0...audioFiles.count).contains(destination) else { return }
-        var files = audioFiles
-        let moved = offsets.sorted().map { files[$0] }
-        for index in offsets.sorted(by: >) { files.remove(at: index) }
-        let insertion = min(files.count, max(0, destination - offsets.filter { $0 < destination }.count))
-        files.insert(contentsOf: moved, at: insertion); audioFiles = files
-    }
-
-    public func renameChapters(ids: Set<UUID>, prefix: String, startingAt: Int = 1) {
-        var files = audioFiles; var number = startingAt
-        for index in files.indices where ids.contains(files[index].id) {
-            files[index].chapterTitle = "\(prefix) \(number)"; number += 1
-        }
-        audioFiles = files
-    }
-
-    public func splitChapter(id: UUID, at absoluteTime: Double) {
-        guard let index = audioFiles.firstIndex(where: { $0.id == id }) else { return }
-        let original = audioFiles[index]
-        let offset = absoluteTime - original.startTime
-        guard offset.isFinite, offset > 0.01, original.duration - offset > 0.01 else { return }
-        let found = FoundFile(source: original.sourceURL, resolved: original.url)
-        let first = AudioFile(foundFile: found, startTime: original.startTime, duration: offset, chapterTitle: original.chapterTitle)
-        let second = AudioFile(foundFile: found, startTime: absoluteTime, duration: original.duration - offset, chapterTitle: original.chapterTitle + " (2)")
-        var files = audioFiles; files.replaceSubrange(index...index, with: [first, second]); audioFiles = files
-    }
-
-    public func canMergeChapterWithNext(id: UUID) -> Bool {
-        guard let index = audioFiles.firstIndex(where: { $0.id == id }),
-              index + 1 < audioFiles.count else { return false }
-        let first = audioFiles[index], second = audioFiles[index + 1]
-        return first.url == second.url
-            && first.sourceURL == second.sourceURL
-            && abs(first.startTime + first.duration - second.startTime) < 0.001
-    }
-
-    public func mergeChapterWithNext(id: UUID) {
-        guard canMergeChapterWithNext(id: id),
-              let index = audioFiles.firstIndex(where: { $0.id == id }) else { return }
-        let first = audioFiles[index], second = audioFiles[index + 1]
-        let merged = AudioFile(foundFile: FoundFile(source: first.sourceURL, resolved: first.url), startTime: first.startTime, duration: first.duration + second.duration, chapterTitle: first.chapterTitle)
-        var files = audioFiles; files.replaceSubrange(index...(index + 1), with: [merged]); audioFiles = files
     }
 }

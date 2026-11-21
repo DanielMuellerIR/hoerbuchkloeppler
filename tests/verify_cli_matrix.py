@@ -100,6 +100,7 @@ def verify(root):
         ["--samplerate", "7999"],
         ["--samplerate", "48001"],
         ["--mode", "bogus"],
+        ["--format", "JSON"],
         ["--max-duration", "-1"],
         ["--workers", "0"],
         ["--import-workers", "0"],
@@ -119,6 +120,8 @@ def verify(root):
         ["--bitrate", "320k"],
         ["--samplerate", "8000"],
         ["--samplerate", "48000"],
+        ["--mode", "StAnDaRd"],
+        ["--mode", "bogus", "--mode", "PARALLEL"],
     ]:
         run([root / "leer", *good], 1)
     # Der GUI-Handoff (CLIInvocation) gibt Freitext als `--option=wert`. Genau das
@@ -127,6 +130,8 @@ def verify(root):
     # den echten Parser, deshalb steht die Probe hier.
     run([root / "leer", "--title=-Aufzeichnungen"], 1)
     run([root / "leer", "--title", "-Aufzeichnungen"], 64)
+    help_text = run(["--help"]).stdout
+    assert run(["--mode", "bogus", "--format", "bogus", "--help"]).stdout == help_text
     print("usage exits OK", flush=True)
     for index in [1, 2]:
         tool(
@@ -276,6 +281,7 @@ def verify(root):
     def abort(sig, analyze=False):
         observed = set()
         target = root / ("cancel-analysis.m4b" if analyze else "cancel-encoding.m4b")
+        previous_output = b"Ausgabe vor der Lautheitsanalyse"
         args = [
             str(CLI),
             *map(str, files),
@@ -290,7 +296,8 @@ def verify(root):
             str(target),
         ]
         if analyze:
-            args += ["--analyze-loudness"]
+            target.write_bytes(previous_output)
+            args += ["--analyze-loudness", "--force"]
         p = subprocess.Popen(
             args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment
         )
@@ -311,9 +318,33 @@ def verify(root):
             marker = b"Lautheitsanalyse:" if analyze else b'"event":"started"'
             combined = buffers["err"] if analyze else buffers["out"]
             if sent is None and marker in combined and observed:
-                if not analyze:
+                if analyze:
+                    p.send_signal(signal.SIGSTOP)
+                    try:
+                        competitor = run(
+                            [
+                                "--file",
+                                root / "1.flac",
+                                "--no-cover",
+                                "--force",
+                                "--format",
+                                "json",
+                                "--output",
+                                target,
+                            ],
+                            1,
+                        )
+                        assert (
+                            "verwendet bereits dieses Ziel"
+                            in competitor.stderr.decode()
+                        ), competitor.stderr
+                        assert target.read_bytes() == previous_output
+                    finally:
+                        p.send_signal(sig)
+                        p.send_signal(signal.SIGCONT)
+                else:
                     time.sleep(0.15)
-                p.send_signal(sig)
+                    p.send_signal(sig)
                 sent = time.monotonic()
         if p.poll() is None:
             p.terminate()
@@ -334,7 +365,10 @@ def verify(root):
         events = [json.loads(line) for line in buffers["out"].splitlines()]
         assert events[-1]["event"] == "cancelled", events
         assert observed, "Kein echter Core-Arbeitsordner beobachtet"
-        assert not target.exists()
+        if analyze:
+            assert target.read_bytes() == previous_output
+        else:
+            assert not target.exists()
         assert not owned_temp_directories(system_tmp, p.pid)
         assert not any(path.exists() for path in observed), observed
         assert not list(root.rglob("*.partial*"))
@@ -348,6 +382,11 @@ def verify(root):
             )
         )
         print("cancel", sig, "analysis", analyze, report[-1], flush=True)
+        if analyze:
+            run(
+                ["--file", root / "1.flac", "--no-cover", "--force", "--output", target]
+            )
+            assert decoded(target) > 0
 
     abort(signal.SIGINT)
     abort(signal.SIGTERM, True)

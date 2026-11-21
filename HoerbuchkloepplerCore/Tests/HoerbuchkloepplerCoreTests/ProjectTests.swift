@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 import Darwin
+import AppKit
 @testable import HoerbuchkloepplerCore
 
 @Suite("Projektformat und Kapitelbearbeitung")
@@ -51,7 +52,7 @@ struct ProjectTests {
         try Data([3, 2, 1]).write(to: source)
         try session.openProject(from: url)
         #expect(session.projectSourceIssues.first?.reason == "Quelle wurde verändert")
-        session.audioFiles[0].chapterTitle = "Bearbeitet"
+        session.renameChapter(id: session.audioFiles[0].id, title: "Bearbeitet")
         try session.saveProject(to: url)
         try session.openProject(from: url)
         #expect(session.audioFiles[0].chapterTitle == "Bearbeitet")
@@ -62,6 +63,173 @@ struct ProjectTests {
         try session.saveProject(to: url)
         try session.openProject(from: url)
         #expect(session.projectSourceIssues.count == 1)
+    }
+
+    @Test("Neuimport am selben Pfad verwendet die aktuelle Quelle, Undo erhält die alte Bindung",
+          arguments: [false, true])
+    func reimportAtSamePathKeepsUndoProtection(symlink: Bool) async throws {
+        let root = try directory().resolvingSymlinksInPath()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let visible = root.appendingPathComponent("01.wav")
+        let original = symlink ? root.appendingPathComponent("Original.wav") : visible
+        let replacement = symlink ? root.appendingPathComponent("Ersatz.wav") : visible
+        let other = root.appendingPathComponent("02.wav")
+        let projectURL = root.appendingPathComponent("Buch.hkproject")
+        let subdirectory = root.appendingPathComponent("Export")
+        let saveAsURL = subdirectory.appendingPathComponent("Kopie.hkproject")
+        let manager = FileManager.default
+        try manager.createDirectory(at: subdirectory, withIntermediateDirectories: false)
+        try writeSilentWAV(to: original)
+        try writeSilentWAV(to: other)
+        if symlink { try manager.createSymbolicLink(at: visible, withDestinationURL: original) }
+        let session = ConversionSession(settings: AudioSettings())
+        await session.importFiles([visible, other], analyzeArtwork: false)
+        try #require(session.audioFiles.count == 2)
+        try await session.saveProjectAsync(to: projectURL)
+        try await session.openProjectAsync(from: projectURL)
+        let oldID = session.audioFiles[0].id
+
+        try writeSilentWAV(to: replacement, duration: 0.5)
+        if symlink {
+            try manager.removeItem(at: visible)
+            try manager.createSymbolicLink(at: visible, withDestinationURL: replacement)
+        }
+        let reason = symlink ? "Verknüpfung wurde verändert" : "Quelle wurde verändert"
+        try await session.verifyProjectSources()
+        #expect(session.projectSourceIssues.map(\.reason) == [reason])
+        session.removeChapter(id: oldID)
+        #expect(session.projectSourceIssues.isEmpty)
+        await session.importURLs([visible])
+        let newChapter = try #require(session.audioFiles.last)
+        #expect(newChapter.id != oldID && newChapter.sourceURL == visible && newChapter.duration == 0.5)
+        try await session.verifyProjectSources()
+        #expect(session.projectSourceIssues.isEmpty)
+
+        try await session.saveProjectAsync(to: saveAsURL)
+        let saved = try AudiobookProject.read(from: saveAsURL)
+        let importedSection = try #require(saved.sections.first { $0.id == newChapter.id })
+        let importedSource = try #require(saved.sources.first { $0.id == importedSection.sourceID })
+        #expect(importedSource.location.resolve(from: saveAsURL) == visible)
+        #expect(importedSource.readLocation.resolve(from: saveAsURL) == replacement)
+        #expect(importedSource.sha256 == (try ProjectSource.fingerprint(replacement)))
+        let reopened = ConversionSession(settings: AudioSettings())
+        try await reopened.openProjectAsync(from: saveAsURL)
+        #expect(reopened.projectSourceIssues.isEmpty)
+
+        session.undoChapterEdit()
+        session.undoChapterEdit()
+        #expect(session.audioFiles.first?.id == oldID)
+        #expect(session.projectSourceIssues.map(\.reason) == [reason])
+        try await session.verifyProjectSources()
+        #expect(session.projectSourceIssues.map(\.reason) == [reason])
+        session.redoChapterEdit()
+        session.redoChapterEdit()
+        #expect(session.audioFiles.last?.id == newChapter.id)
+        try await session.verifyProjectSources()
+        #expect(session.projectSourceIssues.isEmpty)
+    }
+
+    @Test("Bei teilweise neu importierten Containerkapiteln behalten die alten Kapitel ihre Prüfsumme")
+    func partialReimportKeepsOriginalChapterBinding() async throws {
+        let root = try directory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Quelle.m4b")
+        let url = root.appendingPathComponent("Buch.hkproject")
+        try Data([1, 2, 3]).write(to: source)
+        let originalSHA = try ProjectSource.fingerprint(source)
+        let originalFirst = AudioFile(url: source, startTime: 0, duration: 2, chapterTitle: "Eins")
+        let originalSecond = AudioFile(url: source, startTime: 2, duration: 2, chapterTitle: "Zwei")
+        let session = ConversionSession(settings: AudioSettings())
+        session.title = "Buch"
+        session.author = "Autor"
+        session.audioFiles = [originalFirst, originalSecond]
+        try session.saveProject(to: url)
+        try Data([3, 2, 1]).write(to: source, options: .atomic)
+        let replacementSHA = try ProjectSource.fingerprint(source)
+        session.removeChapter(id: originalFirst.id)
+        let newFirst = AudioFile(url: source, startTime: 0, duration: 2, chapterTitle: "Neues erstes Kapitel")
+        let newSecond = AudioFile(url: source, startTime: 2, duration: 2, chapterTitle: "Neues zweites Kapitel")
+        await session.processIncomingFiles([newFirst, newSecond], skipCoverExtraction: true)
+        #expect(session.audioFiles.map(\.id) == [originalSecond.id, newFirst.id])
+        try await session.verifyProjectSources()
+        #expect(session.projectSourceIssues.map(\.reason) == ["Quelle wurde verändert"])
+
+        session.moveChapters(from: IndexSet(integer: 1), to: 0)
+        session.mergeChapterWithNext(id: newFirst.id)
+        let merged = try #require(session.audioFiles.first)
+        #expect(session.audioFiles.count == 1)
+        try session.saveProject(to: url)
+        session.splitChapter(id: merged.id, at: 2)
+        #expect(session.audioFiles.count == 2)
+        try await session.verifyProjectSources()
+        #expect(session.projectSourceIssues.map(\.reason) == ["Quelle wurde verändert"])
+        session.undoChapterEdit()
+        session.undoChapterEdit()
+        try session.saveProject(to: url)
+        #expect(!session.canMergeChapterWithNext(id: newFirst.id))
+        let saved = try AudiobookProject.read(from: url)
+        let hashes = Dictionary(uniqueKeysWithValues: saved.sources.map { ($0.id, $0.sha256) })
+        #expect(saved.sections.map { hashes[$0.sourceID] } == [replacementSHA, originalSHA])
+        try session.openProject(from: url)
+        #expect(session.projectSourceIssues.map(\.reason) == ["Quelle wurde verändert"])
+        session.removeChapter(id: originalSecond.id)
+        try await session.verifyProjectSources()
+        #expect(session.projectSourceIssues.isEmpty)
+    }
+
+    @Test("Ein gespeicherter Merge bindet beide Kapitel, die Undo wiederherstellt", arguments: [false, true])
+    func savedMergeProtectsBothOriginalChapters(split: Bool) async throws {
+        let root = try directory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Kapitel.m4b")
+        let url = root.appendingPathComponent("Buch.hkproject")
+        try Data([1, 2, 3]).write(to: source)
+        let originalSHA = try ProjectSource.fingerprint(source)
+        let first = AudioFile(url: source, startTime: 0, duration: 2, chapterTitle: "Eins")
+        let second = AudioFile(url: source, startTime: 2, duration: 2, chapterTitle: "Zwei")
+        let session = ConversionSession(settings: AudioSettings())
+        session.audioFiles = [first, second]
+
+        session.mergeChapterWithNext(id: first.id)
+        if split {
+            let merged = try #require(session.audioFiles.first)
+            session.splitChapter(id: merged.id, at: 1)
+        }
+        try await session.saveProjectAsync(to: url)
+        if split { session.undoChapterEdit() }
+        session.undoChapterEdit()
+        #expect(session.audioFiles == [first, second])
+        try Data([3, 2, 1]).write(to: source, options: .atomic)
+        session.removeChapter(id: second.id)
+        try await session.verifyProjectSources()
+        #expect(session.projectSourceIssues.map(\.reason) == ["Quelle wurde verändert"])
+        #expect(try session.makeProject(at: url).sources.map(\.sha256) == [originalSHA])
+    }
+
+    @Test("Herkunftszuordnungen halten die begrenzte Kapitelhistorie auch nach vielen Ableitungen ein")
+    func chapterSourceRetentionFollowsHistory() async throws {
+        let root = try directory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Kapitel.wav")
+        let url = root.appendingPathComponent("Buch.hkproject")
+        try Data([1, 2, 3]).write(to: source)
+        let session = ConversionSession(settings: AudioSettings())
+        session.audioFiles = [AudioFile(url: source, startTime: 0, duration: 2, chapterTitle: "Kapitel")]
+        try session.saveProject(to: url)
+
+        for _ in 0..<200 {
+            let original = try #require(session.audioFiles.first)
+            session.splitChapter(id: original.id, at: 1)
+            let first = try #require(session.audioFiles.first)
+            session.mergeChapterWithNext(id: first.id)
+        }
+        #expect(session.projectSourceOrigins.count <= 2 * ChapterHistory.maximumUndoSteps)
+        #expect(session.projectSourcesByOrigin.count == 1)
+        for _ in 0..<ChapterHistory.maximumUndoSteps { session.undoChapterEdit() }
+        #expect(!session.canUndoChapters)
+        try Data([3, 2, 1]).write(to: source, options: .atomic)
+        try await session.verifyProjectSources()
+        #expect(session.projectSourceIssues.map(\.reason) == ["Quelle wurde verändert"])
     }
 
     @Test("Asynchrones Speichern/Öffnen hält Hashes an die Dateiidentität gebunden")
@@ -152,7 +320,7 @@ struct ProjectTests {
         let source = URL(fileURLWithPath: "/tmp/kloeppler-alte-quelle.wav")
         session.audioFiles = [AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Alt")]
         let plan = FFmpegWrapper.makeConversionPlan(files: session.audioFiles, outputURL: source, maxDurationHours: nil)
-        session.audioFiles[0].chapterTitle = "Neu"
+        session.renameChapter(id: session.audioFiles[0].id, title: "Neu")
         #expect(FFmpegWrapper.startVerifiedConversion(session: session, plan: plan) == .rejected("Das Hörbuch wurde geändert oder wird bereits bearbeitet. Bitte erneut starten."))
         #expect(FFmpegWrapper.convert(session: session, plan: plan) == .rejected("Das Hörbuch wurde geändert oder wird bereits bearbeitet. Bitte erneut starten."))
         _ = session.beginImport()
@@ -219,7 +387,7 @@ struct ProjectTests {
         #expect(session.audioFiles[0].chapterTitle == "Teil 5")
         session.undoChapterEdit()
         #expect(session.audioFiles[0].chapterTitle == "Kapitel")
-        session.audioFiles = []
+        session.removeAllChapters()
         session.undoChapterEdit()
         #expect(session.title == "Buch")
         #expect(session.audioFiles.count == 1)
@@ -259,7 +427,7 @@ struct ProjectTests {
         #expect(session.title == "Nachträglich")
         // Das Entfernen des letzten Kapitels löscht die Metadaten; hier stellt
         // Undo sie weiterhin aus dem Snapshot wieder her.
-        session.audioFiles = []
+        session.removeAllChapters()
         #expect(session.title.isEmpty)
         session.undoChapterEdit()
         #expect(session.audioFiles.count == 2)
@@ -271,14 +439,38 @@ struct ProjectTests {
         let source = URL(fileURLWithPath: "/tmp/source.wav")
         let session = ConversionSession(settings: AudioSettings())
         let first = AudioFile(url: source, startTime: 0, duration: 10, chapterTitle: "Kapitel")
-        session.audioFiles = [first]
-        for typed in ["N", "Ne", "Neu"] { session.audioFiles[0].chapterTitle = typed }
+        session.editChapters([first])
+        for typed in ["N", "Ne", "Neu"] { session.renameChapter(id: session.audioFiles[0].id, title: typed) }
         session.undoChapterEdit()
         #expect(session.audioFiles[0].chapterTitle == "Kapitel")
         // Danach liegt nur noch der Eintrag der leeren Ausgangsliste vor.
         session.undoChapterEdit()
         #expect(session.audioFiles.isEmpty)
         #expect(!session.canUndoChapters)
+    }
+
+    @Test("Das Löschen des letzten Kapitels sichert das gewählte Cover unverändert")
+    func deleteUndoKeepsOriginalCover() throws {
+        let directory = try directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = try onePixelPNGData()
+        let cover = directory.appendingPathComponent("Cover.png")
+        try original.write(to: cover)
+        let session = ConversionSession(settings: AudioSettings())
+        session.editChapters([testAudioFile(directory.appendingPathComponent("Kapitel.wav"))])
+        #expect(session.selectCover(url: cover))
+        let preview = try #require(session.coverImage)
+        session.removeAllChapters()
+        #expect(session.coverImage == nil)
+
+        session.undoChapterEdit()
+        #expect(session.coverImage === preview)
+        #expect(session.embeddedCoverData == original)
+        #expect(session.coverPath == cover.path)
+
+        session.redoChapterEdit()
+        #expect(session.coverImage == nil)
+        #expect(session.audioFiles.isEmpty)
     }
 
     @Test("Ältere Projektdateien ohne neue Felder werden tolerant gelesen")
@@ -519,7 +711,7 @@ struct ProjectTests {
                 try project.write(to: destination)
                 await MainActor.run {
                     if reset { session.resetSession() }
-                    else { session.audioFiles[0].chapterTitle = "Neu" }
+                    else { session.renameChapter(id: session.audioFiles[0].id, title: "Neu") }
                 }
             }
         } throws: { error in
@@ -534,6 +726,54 @@ struct ProjectTests {
             let output = root.appendingPathComponent("Ausgabe.m4b")
             let plan = FFmpegWrapper.makeConversionPlan(files: session.audioFiles, outputURL: output, maxDurationHours: nil)
             #expect(FFmpegWrapper.startVerifiedConversion(session: session, plan: plan) == .rejected("Projektquellen fehlen oder wurden verändert."))
+        }
+    }
+
+    @Test("Während des Schreibens abgeleitete Kapitel behalten den gespeicherten Fingerprint",
+          arguments: [false, true])
+    func lateDerivedChapterKeepsFingerprint(merge: Bool) async throws {
+        let root = try directory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Quelle.wav")
+        let url = root.appendingPathComponent("Buch.hkproject")
+        try Data([1, 2, 3]).write(to: source)
+        let session = ConversionSession(settings: AudioSettings())
+        let first = AudioFile(url: source, startTime: 0, duration: 2, chapterTitle: "Erstes")
+        let second = AudioFile(url: source, startTime: 2, duration: 2, chapterTitle: "Zweites")
+        session.audioFiles = [first, second]
+        session.removeChapter(id: second.id)
+        await #expect {
+            try await session.saveProjectAsync(to: url) { project, destination in
+                try project.write(to: destination)
+                await MainActor.run {
+                    if merge {
+                        session.undoChapterEdit()
+                        session.mergeChapterWithNext(id: first.id)
+                    } else {
+                        session.splitChapter(id: first.id, at: 1)
+                    }
+                }
+            }
+        } throws: { error in
+            error.localizedDescription
+                == "Die Projektdatei enthält den Stand vor den letzten Änderungen. Bitte erneut speichern."
+        }
+        #expect(try AudiobookProject.read(from: url).sections.map(\.id) == [first.id])
+        #expect(!session.audioFiles.contains { $0.id == first.id })
+        try Data([3, 2, 1]).write(to: source, options: .atomic)
+        try await session.verifyProjectSources()
+        #expect(session.projectSourceIssues.map(\.reason) == ["Quelle wurde verändert"])
+        if merge {
+            session.undoChapterEdit()
+            try await session.saveProjectAsync(to: url)
+            session.redoChapterEdit()
+            #expect(session.projectSourceIssues.count == 1)
+            await #expect(throws: ProjectError.self) { try await session.verifyProjectSources() }
+            #expect(throws: ProjectError.self) { _ = try session.makeProject(at: url) }
+            session.undoChapterEdit()
+            session.removeChapter(id: first.id)
+            try await session.verifyProjectSources()
+            #expect(session.projectSourceIssues.isEmpty)
         }
     }
 }

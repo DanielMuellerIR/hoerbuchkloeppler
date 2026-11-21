@@ -457,7 +457,7 @@ struct ImportLifecycleTests {
         await session.processIncomingFiles([file], skipCoverExtraction: true, importToken: token)
         #expect(session.isImporting)
 
-        session.audioFiles.removeAll()
+        session.removeAllChapters()
         await session.applyScannedFolder(.init(
             folderURL: URL(fileURLWithPath: "/tmp/veraltet"),
             audioFiles: [file],

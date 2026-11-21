@@ -25,7 +25,7 @@ struct CLIInvocationTests {
         ))
         #expect(session.cliFolderIfRepresentable == source)
 
-        session.audioFiles[0].chapterTitle = "Manuell geändert"
+        session.renameChapter(id: session.audioFiles[0].id, title: "Manuell geändert")
         #expect(session.cliFolderIfRepresentable == nil)
     }
 

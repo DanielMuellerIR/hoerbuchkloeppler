@@ -63,7 +63,7 @@ struct LoudnessTests {
     }
 
     @Test(arguments: [false, true]) @MainActor func realBookAnalysisInBothModes(split: Bool) async throws {
-        guard let ffmpeg = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else {
+        guard let ffmpeg = ToolLocator.binaryURL(name: "ffmpeg") else {
             // Ohne Meldung verschwände hier die gesamte Abdeckung des echten
             // Encodings spurlos: `Resources/bin/ffmpeg` ist nicht eingecheckt
             // und entsteht erst durch `./build.sh --deps-only`.
@@ -74,7 +74,7 @@ struct LoudnessTests {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: folder) }
         let input = folder.appendingPathComponent("input.wav")
-        let generated = FFmpegWrapper.runCapturedProcess(executableURL: ffmpeg, arguments: ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-af", "volume=0.3", input.path], timeout: 10)
+        let generated = ProcessRunner.capture(executableURL: ffmpeg, arguments: ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=4", "-af", "volume=0.3", input.path], timeout: 10)
         guard case .completed(let status, _) = generated, status == 0 else { Issue.record("Fixture-Erzeugung fehlgeschlagen"); return }
         let imageData = NSMutableData()
         let color = CGColorSpaceCreateDeviceRGB()
@@ -98,7 +98,7 @@ struct LoudnessTests {
             #expect(session.lastConversionSucceeded == true)
             #expect(FileManager.default.fileExists(atPath: output.path))
             if split { #expect(FileManager.default.fileExists(atPath: secondPlan.outputURLs[0].path)) }
-            let decoded = FFmpegWrapper.runCapturedProcess(executableURL: ffmpeg, arguments: ["-nostdin", "-hide_banner", "-nostats", "-i", output.path, "-af", "loudnorm=I=-18:TP=-1:LRA=50:print_format=json", "-f", "null", "-"], timeout: 10)
+            let decoded = ProcessRunner.capture(executableURL: ffmpeg, arguments: ["-nostdin", "-hide_banner", "-nostats", "-i", output.path, "-af", "loudnorm=I=-18:TP=-1:LRA=50:print_format=json", "-f", "null", "-"], timeout: 10)
             if case .completed(let exit, let data) = decoded {
                 #expect(exit == 0)
                 let measurement = try LoudnessMeasurement.parse(data)
@@ -149,7 +149,7 @@ struct LoudnessTests {
     }
 
     @Test @MainActor func analysisOnlyKeepsLevelAndSurvivesFailure() async throws {
-        guard let ffmpeg = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else {
+        guard let ffmpeg = ToolLocator.binaryURL(name: "ffmpeg") else {
             Issue.record("ffmpeg fehlt — vorher ./build.sh --deps-only ausführen")
             return
         }
@@ -158,7 +158,7 @@ struct LoudnessTests {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: folder) }
         let input = folder.appendingPathComponent("input.wav")
-        let generated = FFmpegWrapper.runCapturedProcess(
+        let generated = ProcessRunner.capture(
             executableURL: ffmpeg,
             arguments: [
                 "-nostdin", "-v", "error", "-f", "lavfi",

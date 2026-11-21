@@ -70,3 +70,13 @@ extension FFmpegWrapper {
         gainDB == 0 ? [] : ["-af", "volume=\(gainDB)dB"]
     }
 }
+
+extension FFmpegWrapper {
+    static func writeConcatList(_ segments: [URL], to destination: URL) throws {
+        let entries = segments.map { segment in
+            let escaped = segment.path.replacingOccurrences(of: "'", with: "'\\''")
+            return "file '\(escaped)'"
+        }
+        try entries.joined(separator: "\n").write(to: destination, atomically: true, encoding: .utf8)
+    }
+}

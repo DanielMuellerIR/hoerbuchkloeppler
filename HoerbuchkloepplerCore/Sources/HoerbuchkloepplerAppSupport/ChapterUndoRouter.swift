@@ -1,14 +1,13 @@
 import AppKit
 import Combine
 import HoerbuchkloepplerCore
-import SwiftUI
 
 /// Textfelder behalten ihren eigenen Verlauf; Kapitelbefehle gehören zum
 /// aktiven Projektfenster und dürfen nicht durch ein offenes Sheet wirken.
 @MainActor
-final class ChapterUndoRouter: ObservableObject {
-    @Published private(set) var canUndo = false
-    @Published private(set) var canRedo = false
+public final class ChapterUndoRouter: ObservableObject {
+    @Published public private(set) var canUndo = false
+    @Published public private(set) var canRedo = false
     private weak var window: NSWindow?
     private weak var session: ConversionSession?
     private var beforeChapterEdit: (() -> Void)?
@@ -16,7 +15,7 @@ final class ChapterUndoRouter: ObservableObject {
     private var sessionSubscription: AnyCancellable?
     private let activeWindow: () -> NSWindow?
 
-    init(activeWindow: @escaping () -> NSWindow? = { NSApp.keyWindow }) {
+    public init(activeWindow: @escaping () -> NSWindow? = { NSApp.keyWindow }) {
         self.activeWindow = activeWindow
         let names: [Notification.Name] = [
             NSWindow.didUpdateNotification,
@@ -30,7 +29,7 @@ final class ChapterUndoRouter: ObservableObject {
             .store(in: &subscriptions)
     }
 
-    func configure(session: ConversionSession, beforeChapterEdit: @escaping () -> Void) {
+    public func configure(session: ConversionSession, beforeChapterEdit: @escaping () -> Void) {
         self.session = session
         self.beforeChapterEdit = beforeChapterEdit
         sessionSubscription = session.objectWillChange
@@ -39,7 +38,7 @@ final class ChapterUndoRouter: ObservableObject {
         refresh()
     }
 
-    func attach(to window: NSWindow?) {
+    public func attach(to window: NSWindow?) {
         self.window = window
         refresh()
     }
@@ -56,7 +55,7 @@ final class ChapterUndoRouter: ObservableObject {
         return !session.isConverting && !session.isImporting
     }
 
-    func refresh() {
+    public func refresh() {
         let undo: Bool
         let redo: Bool
         if let editor = textEditor {
@@ -70,7 +69,7 @@ final class ChapterUndoRouter: ObservableObject {
         if canRedo != redo { canRedo = redo }
     }
 
-    func undo() {
+    public func undo() {
         if let editor = textEditor {
             editor.undoManager?.undo()
         } else if allowsChapterEdit, session?.canUndoChapters == true {
@@ -80,7 +79,7 @@ final class ChapterUndoRouter: ObservableObject {
         refresh()
     }
 
-    func redo() {
+    public func redo() {
         if let editor = textEditor {
             editor.undoManager?.redo()
         } else if allowsChapterEdit, session?.canRedoChapters == true {
@@ -88,54 +87,5 @@ final class ChapterUndoRouter: ObservableObject {
             session?.redoChapterEdit()
         }
         refresh()
-    }
-}
-
-struct ChapterUndoCommands: Commands {
-    @FocusedObject private var router: ChapterUndoRouter?
-
-    var body: some Commands {
-        CommandGroup(replacing: .undoRedo) {
-            Button("Rückgängig") { router?.undo() }
-                .keyboardShortcut("z", modifiers: .command)
-                .disabled(router?.canUndo != true)
-            Button("Wiederholen") { router?.redo() }
-                .keyboardShortcut("z", modifiers: [.command, .shift])
-                .disabled(router?.canRedo != true)
-        }
-    }
-}
-
-struct ProjectWindowReader: NSViewRepresentable {
-    let router: ChapterUndoRouter
-    let onWindowChange: @MainActor (NSWindow?) -> Void
-
-    func makeNSView(context: Context) -> WindowReader {
-        WindowReader(router: router, onWindowChange: onWindowChange)
-    }
-
-    func updateNSView(_ nsView: WindowReader, context: Context) {}
-
-    final class WindowReader: NSView {
-        let router: ChapterUndoRouter
-        let onWindowChange: @MainActor (NSWindow?) -> Void
-
-        init(router: ChapterUndoRouter, onWindowChange: @escaping @MainActor (NSWindow?) -> Void) {
-            self.router = router
-            self.onWindowChange = onWindowChange
-            super.init(frame: .zero)
-        }
-
-        required init?(coder: NSCoder) { nil }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            // Zustandsänderungen außerhalb des SwiftUI-View-Updates zustellen.
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                router.attach(to: window)
-                onWindowChange(window)
-            }
-        }
     }
 }

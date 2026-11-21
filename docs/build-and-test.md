@@ -90,16 +90,24 @@ BIN=HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/Resources/bin
 
 Prüfe Kapitel, Cover, Metadaten und Abtastrate in der erzeugten Datei.
 
-## Unit-Tests (Core)
+## Tests ausführen
 
 ```bash
-cd HoerbuchkloepplerCore && swift test        # vollständige Core-/CLI-Suite
-cd .. && ./test_scripts.sh                    # Build-/Install-/Release-Wächter
-python3 test_project_cli.py                   # Projekt-CLI von Ende zu Ende
-python3 tests/verify_cli_matrix.py            # CLI-Abnahme: Optionen, Exit-Codes, Signale
-python3 tests/verify_cli_terminal.py          # ANSI-Endbild der CLI
-python3 tests/verify_audio_transitions.py     # Kapiteleinsätze im erzeugten m4b nachmessen
+./tests/run.sh                 # Swift, Integration und Lifecycle
+./tests/run.sh --swift         # Swift-Suiten mit -warnings-as-errors
+./tests/run.sh --integration   # echte CLI-Aufrufe und AppKit-Koordinatoren
+./tests/run.sh --lifecycle     # Build, Signatur, Installation und Release
 ```
+
+Die App und die Swift-Tests importieren dieselben Koordinatoren aus
+`HoerbuchkloepplerAppSupport`. Die AppKit-Fälle laufen ohne Fokusübernahme.
+Die vollständige Prüfung und `--integration` durchlaufen die echte
+60-Sekunden-Frist des Datei-Providers.
+
+Der Runner stellt die gebündelten Werkzeuge bereit und verwendet den Debug-Build
+der CLI für die Integrationstests. Projekt-, Matrix- und Übergangstest entfernen
+ihre Testdaten nach Erfolg. Bei Fehlern bleibt der Diagnosepfad erhalten.
+Mit `--keep-temp` bleibt er auch nach einem erfolgreichen Einzelaufruf erhalten.
 
 `tests/experiments/encoding_without_wav.py` ist bewusst **kein** Test: Es misst
 und druckt, sichert aber nichts zu. Nicht in einen Gate-Lauf aufnehmen.
@@ -132,7 +140,7 @@ Startprüfung und Prozessstart. Die Prozessgruppen-Suite prüft weiterhin den
 Abbruch eines laufenden Kapitelwerkzeugs einschließlich seiner Nachkommen.
 Die gemessene Laufzeit dieser Probe ist kein Leistungsvergleich für Hörbücher.
 
-`test_scripts.sh` prüft die Syntax (`bash -n`) aller Root-Shell-Skripte,
+`tests/verify_scripts.sh` prüft die Syntax (`bash -n`) der Shell-Skripte im Projekt- und Testordner,
 die Versions-Syntaxtabelle, den Abgleich von `VERSION` mit `MARKETING_VERSION`
 und die Ein-Snapshot-Identität aus `script-helpers.sh`. Es führt außerdem
 `tests/verify_sign_bundle.py` aus: echte kleine Ad-hoc-App-/Tool-/Framework-
@@ -150,7 +158,7 @@ Erstinstallation, Austausch, fehlgeschlagene Prüfungen vor und nach dem
 Austausch, beide Ausstiegsoptionen, Prozessbesitz und simulierte PID-Änderung.
 Sie prüft fremde Einträge am Ziel, Elternordner, Staging oder Backup,
 einschließlich Änderungen beim Kompilieren des Helfers und nach der
-Abschlussprüfung. Auch diese Prüfung gehört zu `test_scripts.sh`.
+Abschlussprüfung. Auch diese Prüfung gehört zu `tests/verify_scripts.sh`.
 `swift test --package-path tools/InstallBundle -Xswiftc -warnings-as-errors`
 prüft den Helfer zusätzlich auf exklusive Umbenennung, ausgetauschte Einträge
 zwischen Umbenennung und Identitätsprüfung, Backup-Kollision, Rückzug
@@ -164,7 +172,7 @@ Applications-Link im Image-Inhalt, Fehler bis zur Gatekeeper-Prüfung und der
 Erhalt eines früheren guten Images. Aktive oder unbekannte Mounts müssen samt
 RW-Image erhalten bleiben; ein fehlgeschlagener Statusabruf darf keine
 Bereinigung erlauben. Der Test verwendet keine echten Mounts, keine
-Apple-Dienste und keinen Finder. Er gehört ebenfalls zu `test_scripts.sh`.
+Apple-Dienste und keinen Finder. Er gehört ebenfalls zu `tests/verify_scripts.sh`.
 Ein Wiederholungslauf nach gescheitertem Aushängen prüft ausdrücklich den
 Erhalt des vorherigen RW-Images und seiner Identität.
 Ein ergänzender echter, unsichtbarer HFS+-DMG-Probelauf am 2026-10-07 belegte
@@ -178,7 +186,7 @@ kryptografische Prüfung der Upstream-Binaries. Ein ergänzender realer
 `build.sh --deps-only`-Lauf am 2026-10-07 bestätigte deren Prüfsummen und Start.
 Die MediaInfo-Mounts sind im Fixture ebenfalls kontrolliert: Nach teilweise
 erfolgreichem Attach wird aufgeräumt; aktive oder unbekannte Mounts bleiben mit
-ihren Daten erhalten. Der Test gehört zu `test_scripts.sh` und arbeitet ohne
+ihren Daten erhalten. Der Test gehört zu `tests/verify_scripts.sh` und arbeitet ohne
 Netzwerk, reale Mounts oder Installationen.
 
 Die geprüften Funktionen sind `internal` statt `private`, damit `@testable
@@ -290,7 +298,7 @@ und Kapitel-Undo/Redo einschließlich Entfernen des letzten Kapitels.
 
 ```sh
 swift build --package-path HoerbuchkloepplerCore
-python3 test_project_cli.py
+python3 tests/verify_cli_project.py
 ```
 
 Das Skript erzeugt zwei reale WAVs und ein Projekt, prüft explizite Dateifolge,
@@ -319,11 +327,12 @@ Skripte brechen mit klarer Meldung ab, wenn etwas fehlt. Danach, nach
 `swift test` im Core:
 
 ```sh
-python3 test_project_cli.py
+python3 tests/verify_cli_project.py
 python3 tests/verify_audio_transitions.py
 python3 tests/verify_cli_matrix.py
-bash tests/verify_gui_import.sh
-bash tests/verify_gui_import.sh --default-timeout  # zusätzlich echte 60 Sekunden
+swift test --package-path HoerbuchkloepplerCore --filter AppSupportTests
+HOERBUCHKLOEPPLER_VERIFY_PROVIDER_TIMEOUT=1 swift test --package-path HoerbuchkloepplerCore \
+  --filter providerImportAndCoverDrop
 ```
 
 Die GUI-Importprüfung verwendet echte NSItemProvider ohne Fenster/Fokus und
@@ -333,12 +342,12 @@ einen neuen Import vor Ablauf des alten Timers. Die schnellen Fälle verwenden
 eine verkürzte Frist; `--default-timeout` misst zusätzlich die echte
 Standardfrist. Der sichtbare Timeoutdialog und beide Aktionen wurden zusätzlich
 im laufenden Test-Bundle mit derselben Importlogik geprüft.
-`bash tests/verify_gui_undo.sh` prüft echtes AppKit-Text-Undo und Kapitel-Undo
+`chapterAndTextUndo` in `AppSupportTests` prüft echtes AppKit-Text-Undo und Kapitel-Undo
 ohne sichtbare Fenster, einschließlich leerem Textverlauf, anderem aktivem
 Fenster und Sperren während Import/Konvertierung. Menüeinbindung, Toolbar und
 Tastenkürzel sind zusätzlich im laufenden App-Bundle geprüft.
 
-`bash tests/verify_document_open.sh` prüft den System-URL-Koordinator mit
+`systemDocumentOpening` in `AppSupportTests` prüft den System-URL-Koordinator mit
 unsichtbaren AppKit-Fenstern: die vollständige Delegate-Dateiliste vor der
 ersten Fensterregistrierung, das Abmelden eines noch gehaltenen geschlossenen
 Fensters, mehrere Audioereignisse als ein vollständiger Import, Projektöffnung
@@ -359,13 +368,10 @@ AAC-Toleranzen und gemessene Performance-Kapitelversätze stehen in encoding.md.
 
 ### Cover-Grenzen
 
-`tests/verify_artwork.sh` erzeugt eigene MP3-/M4A- und PNG-Fixtures: 96 Millionen
-Pixel, ein gültiges PNG mit 33 MiB Zusatzdaten, ungültige Bilder und ein späteres
-gültiges Cover. Es prüft begrenzte Vorschau, unveränderte Exportbytes und den
-Erhalt einer bestehenden Auswahl bei Fehlern.
-Auch ein übergroßes erstes APIC-Bild mit anschließendem gültigem Cover wird
-mit der echten ffmpeg-Extraktion geprüft. Getrennte Prozesse vergleichen
-maximales RSS des alten NSImage-Skalierablaufs und der Thumbnail-Übernahme;
-die Baseline lädt absichtlich das große Original. Der Vergleich misst weder
-allgemeine Importleistung noch eine feste RSS-Obergrenze. Temporäre Fixtures
-werden nach dem Lauf entfernt. Die gebündelte ffmpeg-Version muss vorhanden sein.
+Die Swift-Suite `ArtworkResourceTests` erzeugt eigene MP3-, M4A- und PNG-Dateien.
+Sie prüft eine begrenzte Vorschau für ein Bild mit 96 Millionen Pixeln,
+die unveränderten Coverbytes und den Erhalt der bisherigen Auswahl bei
+ungültigen Bildern oder einem gültigen PNG mit 33 MiB Zusatzdaten. Die
+echte ffmpeg-Extraktion findet auch nach einem ungültigen oder zu großen
+ersten APIC-Bild das nachfolgende gültige Cover. Für die Suite werden
+Python 3 und das gebündelte FFmpeg benötigt.

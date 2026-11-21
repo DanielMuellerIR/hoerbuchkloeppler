@@ -16,7 +16,7 @@ struct ToolResolutionTests {
         try "kaputt".write(to: bundled, atomically: true, encoding: .utf8)
         try writeExecutable(pathTool, "#!/bin/sh\nexit 0\n")
 
-        let resolved = FFmpegWrapper.resolveBinaryURL(
+        let resolved = ToolLocator.resolveBinaryURL(
             name: "ffmpeg",
             bundledURL: bundled,
             pathEnvironment: pathDirectory.path,
@@ -29,7 +29,7 @@ struct ToolResolutionTests {
     func rejectsDirectory() throws {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        #expect(!FFmpegWrapper.isUsableExecutable(directory))
+        #expect(!ToolLocator.isUsableExecutable(directory))
     }
 
     @Test("Symlink auf ein ausführbares Ziel gilt als brauchbares Tool (Homebrew-Fall)")
@@ -49,10 +49,10 @@ struct ToolResolutionTests {
             withDestinationPath: "../Cellar/ffmpeg"
         )
 
-        #expect(FFmpegWrapper.isUsableExecutable(link))
+        #expect(ToolLocator.isUsableExecutable(link))
         // Die PATH-Auflösung akzeptiert den Kandidaten, friert aber das geprüfte
         // Ziel ein; eine spätere Umlenkung des Symlinks darf nichts ändern.
-        let resolved = FFmpegWrapper.resolveBinaryURL(
+        let resolved = ToolLocator.resolveBinaryURL(
             name: "ffmpeg",
             bundledURL: nil,
             pathEnvironment: binDirectory.path,
@@ -71,7 +71,7 @@ struct ToolResolutionTests {
             withDestinationPath: "gibt-es-nicht"
         )
 
-        #expect(!FFmpegWrapper.isUsableExecutable(link))
+        #expect(!ToolLocator.isUsableExecutable(link))
     }
 
     @Test("Version gilt nur bei Exit 0 und nichtleerer Ausgabe")
@@ -82,8 +82,26 @@ struct ToolResolutionTests {
         let bad = directory.appendingPathComponent("bad")
         try writeExecutable(good, "#!/bin/sh\necho 'ffmpeg version 7.1'\n")
         try writeExecutable(bad, "#!/bin/sh\necho 'ffmpeg version kaputt'\nexit 3\n")
-        #expect(FFmpegWrapper.toolVersion(at: good, name: "ffmpeg") == "7.1")
-        #expect(FFmpegWrapper.toolVersion(at: bad, name: "ffmpeg") == nil)
+        #expect(ToolLocator.toolVersion(at: good, name: "ffmpeg") == "7.1")
+        #expect(ToolLocator.toolVersion(at: bad, name: "ffmpeg") == nil)
+    }
+
+    @Test("Ein vorübergehender Werkzeugfehler sperrt den Export nicht dauerhaft")
+    func retriesTransientVersionFailure() throws {
+        let directory = try makeTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let tool = directory.appendingPathComponent("ffmpeg")
+        try writeExecutable(tool, """
+            #!/bin/sh
+            marker="${0}.attempted"
+            if [ ! -f "$marker" ]; then
+                : > "$marker"
+                exit 3
+            fi
+            printf 'ffmpeg version 7.1\\n'
+            """)
+
+        #expect(ToolLocator.toolVersion(at: tool, name: "ffmpeg") == "7.1")
     }
 
     @Test("Große Versionsausgabe blockiert nicht am Pipe-Puffer")
@@ -99,6 +117,6 @@ struct ToolResolutionTests {
             """
         )
 
-        #expect(FFmpegWrapper.toolVersion(at: tool, name: "ffmpeg") == "7.1")
+        #expect(ToolLocator.toolVersion(at: tool, name: "ffmpeg") == "7.1")
     }
 }

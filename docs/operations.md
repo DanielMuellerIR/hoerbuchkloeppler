@@ -19,16 +19,65 @@ von wo das Package sie via `Bundle.module` einbettet. Zur Laufzeit fällt
 Nur reguläre Dateien mit Ausführungsrecht gelten als Kandidaten. Fehlt ein
 ausführbares Bundle-Tool, sucht die App im `$PATH` und in den Standardpfaden.
 Der System-Check meldet „OK“ nur bei Exit 0 und nichtleerer Versionsausgabe.
+Ein fehlgeschlagener Start eines ausführbaren Kandidaten wird einmal wiederholt.
 
-## Schutzgrenze der temporären Bereinigung
+## Ausgabe und Wiederanlauf
 
-Der Core löscht temporäre Ordner, Staging-Dateien und verdrängte alte Ausgaben
-nur mit einem zuvor erfassten Besitznachweis. Dazu gehören ein exklusiver
-0700-Ordner, Besitzer-Marker sowie Volume und Inode. Vor einer rekursiven
-Bereinigung verschiebt der Core den geprüften Ordner unter einen zufälligen
-Quarantänenamen, öffnet genau diesen Ordner und entfernt seine Einträge relativ
-zum offenen Verzeichnis-Deskriptor. Einzeldateien werden ebenfalls zuerst
-atomar quarantänisiert und danach erneut gegen den erwarteten Inode geprüft.
+App und CLI reservieren jedes Ziel bis zum Ende des Laufs über eine
+gemeinsame `fcntl`-Sperre im Ausgabeordner. Die versteckte Sperrdatei bleibt
+bestehen, damit alle Läufe denselben Inode sperren. Ein vorhandener Zielsymlink
+belegt den bisherigen, aufgelösten Schlüssel und den stabilen Schlüssel des
+Verzeichniseintrags, damit ein Austausch des Links dieselbe Ziel-URL gesperrt
+hält. Eine bereits laufende ältere Version kann nur ihren ursprünglichen
+Schlüssel halten, bis ihr Lauf beendet ist.
+
+Der Core legt pro Ausgabe einen exklusiven 0700-Arbeitsordner auf dem
+Zielvolume an. Er hält den Deskriptor der Zwischendatei offen und reicht ihn
+FFmpeg als FD 0 weiter. FFmpeg schreibt über `/dev/fd/0` in die geöffnete Datei,
+auch wenn der sichtbare Pfad inzwischen ausgetauscht wurde. `-nostdin`
+deaktiviert interaktive Befehle. MediaInfo prüft die fertige Datei im
+Arbeitsordner vor der Übernahme.
+
+Ein freies Ziel erscheint atomar per `RENAME_EXCL`. Bei einem bestätigten
+vorhandenen Ziel übernimmt `RENAME_SWAP` die neue Datei und legt die bisherige
+Ausgabe am Staging-Pfad ab. Der Core prüft anschließend beide Einträge.
+Für ein bestätigtes Ziel zählen Gerät, Inode, Dateityp, Größe und
+Änderungszeit. Für einen noch beschriebenen Staging-Inode oder -Ordner
+genügen Gerät, Inode und Dateityp zur Identifikation. Ein vorhandenes
+Staging-xattr liefert einen zusätzlichen Besitznachweis. Bei Abweichung
+versucht der Core den Rücktausch oder sichert den Eintrag zur manuellen
+Wiederherstellung.
+
+Die Bereinigung unterscheidet Arbeitsordner und Ausgabe-Quarantänen. Vor
+rekursiver Löschung verschiebt der Core den geprüften Arbeitsordner atomar in
+Quarantäne und löscht relativ zu dessen geöffnetem Verzeichnisdeskriptor.
+Ausgabe-Quarantänen führen mit `.owner-pid` und `.entry-identity.json` den
+Besitzer und den löschbaren Eintrag. Vor einem Swap bezeichnet der Datensatz
+die neue Datei. Erst wenn beide Einträge nach dem Austausch geprüft sind,
+darf der Wiederanlauf anhand eines aktualisierten Datensatzes die Altdatei
+entfernen. Bis diese Bestätigung gespeichert ist, bleibt die Altdatei bei
+einem Absturz oder fehlgeschlagenen Rücktausch im Staging-Ordner erhalten.
+Ältere Datensätze werden für ihren Primäreintrag weiterhin gelesen. Eine vor
+dem Swap eingetragene Alternatividentität berechtigt nicht zum Löschen.
+Ein ggf. liegengebliebener Eintrag unter `.HB_EntryCleanup` wird erneut am
+Deskriptor geprüft. Zusätzliche Dateien oder abweichende Identitäten verhindern
+die automatische Bereinigung.
+
+Der Wiederanlauf prüft für benannte Quarantänen zusätzlich die darin
+angegebene PID gegen die Besitzerdatei. Er löscht Ausgabe-Quarantänen nur
+nach einem nachweislich beendeten Besitzerprozess. Ältere `.partial`-Dateien
+direkt neben dem Ziel brauchen dazu ihren zum Namen passenden PID-Marker
+als xattr am Inode. Im System-Tempordner können ältere `.HB_Cleanup_`-Ordner
+mit fehlendem Datensatz zu einer Ausgabe oder zu einer Konvertierung gehören.
+Der Sweep entfernt aus solchen Ordnern ausschließlich bekannte reguläre
+Arbeitsdateien. Unbekannte Nutzdaten bleiben am bisherigen Pfad erhalten.
+Verwaiste `HB_Loudness_`-Ordner älterer Versionen bleiben mit passendem
+Besitznachweis in der Bereinigung.
+
+Fehlgeschlagene Rücktausche und fremde Einträge können unter einem
+`.recovery-`-Namen oder in `.HB_RecoveryCleanup_` verbleiben. Der Sweep nimmt
+diese Namen von der automatischen Bereinigung aus. Die Meldung beim Fehler
+nennt den verbleibenden Pfad.
 
 Diese Prüfungen schützen gegen parallele Klöppler-Läufe, Dateisynchronisierer
 und versehentliche Pfadwechsel. Ein absichtlich eingreifender Prozess unter
@@ -39,18 +88,6 @@ letzten Identitätsprüfung denselben Namen austauschen. `NSFileCoordinator` wü
 das nicht schließen, weil es nur kooperierende Teilnehmer koordiniert und rohe
 POSIX-Zugriffe nicht erzwingt. Eine harte Grenze bräuchte getrennte
 Systemkonten oder Rechte und passt nicht zum lokalen Ein-Benutzer-Werkzeug.
-
-Bei jeder erkennbaren Abweichung handelt der Core deshalb rest-erhaltend: Er
-lässt den Eintrag unangetastet, versucht einen atomaren Rollback oder bewahrt
-ihn unter einem Namen mit dem Präfix `.HB_RecoveryCleanup_` auf und schreibt
-eine Warnung ins Log. Der automatische Sweep entfernt einen solchen Rest erst,
-wenn Name, Besitzer-Marker und aufgezeichnete Identität wieder eindeutig
-zusammenpassen.
-Ein separater Eintragsmarker eines solchen Recovery-Ordners wird auch bei
-späteren Temp-Sweeps geprüft; ein fremder Rest bleibt dadurch erhalten.
-Lautheitsanalysen verwenden dieselben `HB_Temp_`-Ordner wie Konvertierungen.
-Verwaiste `HB_Loudness_`-Ordner älterer Versionen bleiben in der Bereinigung
-unterstützt, sofern ihr Besitznachweis passt.
 
 ## Installation
 

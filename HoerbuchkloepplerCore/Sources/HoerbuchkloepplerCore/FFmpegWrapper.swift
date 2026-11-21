@@ -1,11 +1,6 @@
 import Foundation
-import Darwin
-import os
 
-// Kodierpipeline und Laufsteuerung: Ausgabeplan, laufbezogener Besitz von
-// Prozessen und Zwischendateien, Segment- und Muxing-Schritte. Die
-// Prozessmechanik steht in ProcessTermination.swift, die Dateisystemgrenze in
-// OutputStaging.swift.
+// Einstieg in die Konvertierung und laufbezogener Besitz von Prozessen und Ausgaben.
 
 public enum ConversionCancellationOutcome: Sendable {
     case noActiveConversion
@@ -73,21 +68,27 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
         }
     }
 
-    var hasSegmentFailure: Bool {
+    var canRunSegments: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return segmentFailure
+        return !cancelled && !segmentFailure
     }
 
     /// Stoppt nach einem fatalen Fehler alle besessenen Prozesse, ohne einen
     /// Benutzerabbruch vorzutäuschen. Neue Starts prüfen dieselbe Sperre.
-    func failSegments() {
+    @discardableResult
+    func failSegments(onAccepted: () -> Void = {}) -> Bool {
         lock.lock()
-        guard !segmentFailure else { lock.unlock(); return }
+        guard !cancelled, !segmentFailure else {
+            lock.unlock()
+            return false
+        }
         segmentFailure = true
-        let running = Array(processes)
+        let request = ProcessTerminator.makeTerminationRequest(for: Array(processes))
         lock.unlock()
-        ProcessTerminator.terminateAndWait(running)
+        onAccepted()
+        ProcessTerminator.terminateAndWait(request)
+        return true
     }
 
     /// Hebt das Fehler-Latch eines abgeschlossenen Teilschritts wieder auf.
@@ -108,14 +109,14 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
     }
 
     func registerTempDirectory(_ url: URL) {
-        guard let identity = FFmpegWrapper.fileSystemIdentity(at: url, followSymlink: false),
+        guard let identity = FileSystemEntry.identity(at: url, followSymlink: false),
               identity.mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else { return }
         lock.lock()
         tempDirectories[url] = identity
         let shouldRemove = cancelled
         lock.unlock()
         if shouldRemove {
-            FFmpegWrapper.removeOwnedTempDirectory(url, expectedIdentity: identity)
+            OwnedTemporaryDirectory.remove(url, expectedIdentity: identity)
         }
     }
 
@@ -124,7 +125,7 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
         let identity = tempDirectories.removeValue(forKey: url)
         lock.unlock()
         if let identity {
-            FFmpegWrapper.removeOwnedTempDirectory(url, expectedIdentity: identity)
+            OwnedTemporaryDirectory.remove(url, expectedIdentity: identity)
         }
     }
 
@@ -136,13 +137,13 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
     ) -> Bool {
         if let expectedOwnership,
            expectedOwnership.protectedDirectory != nil {
-            return FFmpegWrapper.removeProtectedStagingOutput(
+            return OutputCleanup.removeProtectedOutput(
                 url,
                 ownership: expectedOwnership,
                 log: log
             )
         }
-        return FFmpegWrapper.removeOwnedStagedOutput(
+        return OutputCleanup.removeLegacyOutput(
             url,
             expectedOwnership: expectedOwnership,
             log: log
@@ -154,7 +155,7 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
         ownership suppliedOwnership: StagingOwnership? = nil
     ) {
         guard let ownership = suppliedOwnership
-            ?? FFmpegWrapper.currentStagingOwnership(at: url) else { return }
+            ?? OutputStaging.currentOwnership(at: url) else { return }
         lock.lock()
         stagedOutputs[url] = ownership
         let shouldRemove = cancelled
@@ -194,7 +195,7 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
         _ url: URL,
         ownership: StagingOwnership
     ) {
-        guard !FFmpegWrapper.removeEmptyProtectedStagingDirectory(
+        guard !OutputCleanup.removeProtectedContainer(
             ownership: ownership
         ) else { return }
         lock.lock()
@@ -254,7 +255,7 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
         let shouldRemove = cancelled
         lock.unlock()
         if shouldRemove {
-            let removed = FFmpegWrapper.removeDisplacedOutput(
+            let removed = OutputCleanup.removeDisplacedOutput(
                 url,
                 expectedIdentity: expectedIdentity,
                 cleanupParent: stagingOwnership?.protectedDirectory?
@@ -299,7 +300,7 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
             }
         }
         for (url, resource) in residuals {
-            let removed = FFmpegWrapper.removeDisplacedOutput(
+            let removed = OutputCleanup.removeDisplacedOutput(
                 url,
                 expectedIdentity: resource.identity,
                 cleanupParent: resource.stagingOwnership?.protectedDirectory?
@@ -371,7 +372,7 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
 
         let finishCleanup: @Sendable () -> Void = { [self] in
             for (directory, identity) in ownedDirectories {
-                FFmpegWrapper.removeOwnedTempDirectory(
+                OwnedTemporaryDirectory.remove(
                     directory,
                     expectedIdentity: identity
                 )
@@ -390,7 +391,7 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
                 }
             }
             for (output, resource) in ownedDisplacedOutputs {
-                let removed = FFmpegWrapper.removeDisplacedOutput(
+                let removed = OutputCleanup.removeDisplacedOutput(
                     output,
                     expectedIdentity: resource.identity,
                     cleanupParent: resource.stagingOwnership?
@@ -472,26 +473,6 @@ final class ConversionContext: ToolProcessContext, @unchecked Sendable {
     #endif
 }
 
-/// Unveränderlicher Laufzeit-Snapshot für den ffmpeg-Worker. Der Worker liest
-/// dadurch nie nebenläufig aus dem Main-Actor-Modell `ConversionSession`.
-private struct ConversionJob: Sendable {
-    let plan: ConversionPlan
-    // Der Worker muss die Sperren bis zum letzten Commit beziehungsweise bis
-    // zum vollständigen Abbruch halten. Die Eigenschaft wird nur zur Lebensdauer
-    // genutzt; die Deskriptoren selbst bleiben im `OutputLeaseSet` gekapselt.
-    let outputLeases: OutputLeaseSet
-    let settings: AudioSettings
-    let title: String
-    let author: String
-    let genre: String
-    let narrator: String
-    let series: String
-    let volumeNumber: String
-    let language: String
-    let coverData: Data?
-    var loudnessGain: Double = 0
-}
-
 /// Behält genug Byte-Kontext, um einen ffmpeg-Zeitwert auch dann zu erkennen,
 /// wenn die Pipe ihn zwischen zwei Chunks trennt. Bei mehreren Statuszeilen
 /// gewinnt der neueste statt des ersten Werts.
@@ -509,108 +490,11 @@ struct FFmpegProgressParser: Sendable {
     }
 }
 
-final class ParallelProgressTracker: Sendable {
-    private let progressByIndex = OSAllocatedUnfairLock(initialState: [Int: Double]())
-    private let durations: [Double]
-    private let totalDuration: Double
-
-    init(durations: [Double]) {
-        self.durations = durations
-        totalDuration = durations.reduce(0, +)
-    }
-
-    /// Der Fortschritt eines langen Kapitels trägt mehr zum Buchfortschritt bei.
-    func update(index: Int, progress: Double) -> Double {
-        guard totalDuration > 0 else { return 0 }
-        return progressByIndex.withLock { progresses in
-            progresses[index] = max(progresses[index] ?? 0, min(1, max(0, progress)))
-            return progresses.reduce(0.0) { sum, item in
-                sum + item.value * durations[item.key] / totalDuration
-            }
-        }
-    }
-}
-
-private final class ParallelResults: Sendable {
-    private let paths: OSAllocatedUnfairLock<[String]>
-
-    init(count: Int) {
-        paths = OSAllocatedUnfairLock(initialState: Array(repeating: "", count: count))
-    }
-
-    func store(_ path: String, at index: Int) -> Int {
-        paths.withLock {
-            $0[index] = path
-            return $0.lazy.filter { !$0.isEmpty }.count
-        }
-    }
-
-    func completedPaths() -> [String]? {
-        paths.withLock { $0.allSatisfy { !$0.isEmpty } ? $0 : nil }
-    }
-}
-
-public struct FFmpegWrapper {
-    static let maximumCoverByteCount = 32 * 1024 * 1024
-
-    /// Liest nur einen bereits geöffneten regulären Eintrag, begrenzt die
-    /// Eingabegröße und prüft danach einen kleinen ImageIO-Decode. `O_NONBLOCK`
-    /// verhindert, dass eine nach der Auswahl eingesetzte FIFO den Start hält.
-    static func loadCoverSnapshot(
-        at url: URL,
-        expectedIdentity: FileSystemIdentity? = nil,
-        isCancelled: () -> Bool = { false }
-    ) -> Data? {
-        guard !isCancelled() else { return nil }
-        let resolved = url.resolvingSymlinksInPath()
-        guard !isCancelled() else { return nil }
-        let descriptor = resolved.withUnsafeFileSystemRepresentation { path -> Int32 in
-            guard let path else { return -1 }
-            return Darwin.open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
-        }
-        guard descriptor >= 0 else { return nil }
-        defer { _ = Darwin.close(descriptor) }
-
-        var before = stat()
-        guard Darwin.fstat(descriptor, &before) == 0,
-              before.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
-              before.st_size > 0,
-              before.st_size <= off_t(maximumCoverByteCount) else { return nil }
-        let openedIdentity = FileSystemIdentity(stat: before)
-        if let expectedIdentity, expectedIdentity != openedIdentity { return nil }
-
-        var data = Data()
-        data.reserveCapacity(Int(before.st_size))
-        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        while data.count <= maximumCoverByteCount {
-            guard !isCancelled() else { return nil }
-            let remaining = maximumCoverByteCount + 1 - data.count
-            let count = buffer.withUnsafeMutableBytes { storage in
-                Darwin.read(
-                    descriptor,
-                    storage.baseAddress,
-                    min(storage.count, remaining)
-                )
-            }
-            if count == 0 { break }
-            if count < 0 {
-                if errno == EINTR { continue }
-                return nil
-            }
-            data.append(contentsOf: buffer.prefix(count))
-        }
-
-        var after = stat()
-        // Gemeinsames Inhaltsprädikat statt eines eigenen Feldvergleichs; die
-        // gelesene Bytezahl gegen `st_size` bleibt als eigene Zusicherung daneben.
-        guard data.count <= maximumCoverByteCount,
-              data.count == Int(before.st_size),
-              Darwin.fstat(descriptor, &after) == 0,
-              FileSystemIdentity(stat: before).matchesContentSnapshot(FileSystemIdentity(stat: after)),
-              !isCancelled(),
-              CoverArtwork.thumbnail(from: data, maximumDimension: 32) != nil,
-              !isCancelled() else { return nil }
-        return data
+public enum FFmpegWrapper {
+    public static func makeConversionPlan(
+        files: [AudioFile], outputURL: URL, maxDurationHours: Int?
+    ) -> ConversionPlan {
+        ConversionPlanner.makePlan(files: files, outputURL: outputURL, maxDurationHours: maxDurationHours)
     }
 
     @MainActor
@@ -654,7 +538,7 @@ public struct FFmpegWrapper {
         guard settings == session.settings else {
             return .rejected("Das Hörbuch wurde während der Prüfung verändert. Bitte erneut starten.")
         }
-        return startVerifiedConversion(session: session, plan: plan)
+        return await startVerifiedConversionAsync(session: session, plan: plan)
     }
 
     /// Startet nach `verifyProjectSources()` oder ohne Projektquellen.
@@ -666,10 +550,58 @@ public struct FFmpegWrapper {
     }
 
     @MainActor
+    public static func startVerifiedConversionAsync(
+        session: ConversionSession, plan: ConversionPlan, confirmCurrent: () -> Bool = { true }
+    ) async -> ConversionStartResult {
+        let changed = "Das Hörbuch wurde geändert oder wird bereits bearbeitet. Bitte erneut starten."
+        let projectRevision = session.projectRevision
+        let settings = session.settings
+        let metadata = session.bookMetadata
+        let cover = session.embeddedCoverData
+        func isCurrent() -> Bool {
+            !session.isConverting && planMatchesSession(plan, session: session, requireCurrentGrouping: true)
+                && projectRevision == session.projectRevision && settings == session.settings
+                && metadata == session.bookMetadata && cover == session.embeddedCoverData && confirmCurrent()
+        }
+
+        guard isCurrent() else { return .rejected(changed) }
+        let outputLanguage: String
+        do { outputLanguage = try validatedOutputLanguage(session) }
+        catch { return .rejected(error.localizedDescription) }
+        do { try await session.verifyProjectSources(policy: .cachedOnly, plan: plan) }
+        catch { return .rejected(error.localizedDescription) }
+        guard isCurrent() else { return .rejected(changed) }
+        guard session.projectSourceIssues.isEmpty else { return .rejected("Projektquellen fehlen oder wurden verändert.") }
+        guard validGrouping(plan) else { return rejectEmpty(session) }
+
+        let leases: OutputLeaseSet
+        do {
+            leases = try await performFileIO { try acquireOutputLeases(for: plan) }
+        } catch is CancellationError {
+            return .rejected("Der Start wurde abgebrochen.")
+        } catch {
+            guard isCurrent() else { return .rejected(changed) }
+            return reject(session: session, status: "Ausgabe nicht sicher verfügbar", message: error.localizedDescription)
+        }
+        guard !Task.isCancelled else { return .rejected("Der Start wurde abgebrochen.") }
+        if session.loadedProjectURL != nil {
+            // Die Zielreservierung wartet auf Dateisystemzugriffe. Ein in
+            // dieser Zeit umgelegter Quelllink darf selbst dann nicht in den
+            // Lauf gelangen, wenn die geplante physische Datei noch existiert.
+            do { try await session.verifyProjectSources(policy: .cachedOnly, plan: plan) }
+            catch { return .rejected(error.localizedDescription) }
+            guard session.projectSourceIssues.isEmpty else { return .rejected("Projektquellen fehlen oder wurden verändert.") }
+        }
+        guard isCurrent() else { return .rejected(changed) }
+        return launch(session: session, plan: plan, outputLeases: leases, outputLanguage: outputLanguage,
+                      measureBookLoudness: nil)
+    }
+
+    @MainActor
     private static func planMatchesSession(_ plan: ConversionPlan, session: ConversionSession, requireCurrentGrouping: Bool) -> Bool {
         guard !session.isImporting else { return false }
         if requireCurrentGrouping {
-            return plan.groups == splitAudioFilesIfNeeded(session.audioFiles, maxDurationHours: session.settings.maxDurationHours)
+            return plan.groups == ConversionPlanner.splitAudioFilesIfNeeded(session.audioFiles, maxDurationHours: session.settings.maxDurationHours)
         }
         return plan.groups.flatMap { $0 } == session.audioFiles
     }
@@ -683,7 +615,8 @@ public struct FFmpegWrapper {
         session: ConversionSession,
         plan: ConversionPlan,
         measureBookLoudness: (@Sendable () throws -> LoudnessMeasurement)?,
-        cachedProjectSourcesOnly: Bool = false
+        cachedProjectSourcesOnly: Bool = false,
+        reserveOutputs: (ConversionPlan) throws -> OutputLeaseSet = acquireOutputLeases
     ) -> ConversionStartResult {
         guard !Task.isCancelled else { return .rejected("Der Start wurde abgebrochen.") }
         guard !session.isConverting else { return .rejected("Es läuft bereits eine Konvertierung.") }
@@ -691,31 +624,19 @@ public struct FFmpegWrapper {
             return .rejected("Das Hörbuch wurde geändert oder wird bereits bearbeitet. Bitte erneut starten.")
         }
         let outputLanguage: String
-        do {
-            outputLanguage = try BookMetadata.outputLanguage(session.language)
-            try BookMetadata.validateVolumeNumber(session.volumeNumber)
-        } catch { return .rejected(error.localizedDescription) }
+        do { outputLanguage = try validatedOutputLanguage(session) }
+        catch { return .rejected(error.localizedDescription) }
         do {
             try session.refreshProjectSourceIssues(policy: cachedProjectSourcesOnly ? .cachedOnly : .synchronous, plan: plan)
-        } catch { return .rejected("Der Start wurde abgebrochen.") }
+        } catch is CancellationError { return .rejected("Der Start wurde abgebrochen.") }
+        catch { return .rejected(error.localizedDescription) }
         guard session.projectSourceIssues.isEmpty else {
             return .rejected("Projektquellen fehlen oder wurden verändert.")
         }
-        // Ohne Eingabedateien gar nicht erst starten — sonst leere ffmpeg-Liste
-        // und Division durch die Gruppengröße bei der Fortschrittsberechnung.
-        guard !plan.groups.isEmpty,
-              plan.groups.allSatisfy({ !$0.isEmpty }),
-              plan.groups.count == plan.outputURLs.count else {
-            return reject(
-                session: session,
-                status: "Keine Dateien",
-                message: "Keine Audiodateien zum Konvertieren vorhanden."
-            )
-        }
+        guard validGrouping(plan) else { return rejectEmpty(session) }
         let outputLeases: OutputLeaseSet
         do {
-            try validateConversionPlan(plan)
-            outputLeases = try OutputLeases.acquire(for: plan.outputURLs)
+            outputLeases = try reserveOutputs(plan)
         } catch {
             return reject(
                 session: session,
@@ -723,8 +644,45 @@ public struct FFmpegWrapper {
                 message: error.localizedDescription
             )
         }
-        let plannedFiles = plan.groups.flatMap { $0 }
         guard !Task.isCancelled else { return .rejected("Der Start wurde abgebrochen.") }
+        if session.loadedProjectURL != nil {
+            do { try session.refreshProjectSourceIssues(policy: .cachedOnly, plan: plan) }
+            catch is CancellationError { return .rejected("Der Start wurde abgebrochen.") }
+            catch { return .rejected(error.localizedDescription) }
+            guard session.projectSourceIssues.isEmpty else { return .rejected("Projektquellen fehlen oder wurden verändert.") }
+        }
+        return launch(session: session, plan: plan, outputLeases: outputLeases, outputLanguage: outputLanguage,
+                      measureBookLoudness: measureBookLoudness)
+    }
+
+    private static func validGrouping(_ plan: ConversionPlan) -> Bool {
+        !plan.groups.isEmpty && plan.groups.allSatisfy { !$0.isEmpty } && plan.groups.count == plan.outputURLs.count
+    }
+
+    @MainActor
+    private static func rejectEmpty(_ session: ConversionSession) -> ConversionStartResult {
+        reject(session: session, status: "Keine Dateien", message: "Keine Audiodateien zum Konvertieren vorhanden.")
+    }
+
+    @MainActor
+    private static func validatedOutputLanguage(_ session: ConversionSession) throws -> String {
+        let language = try BookMetadata.outputLanguage(session.language)
+        try BookMetadata.validateVolumeNumber(session.volumeNumber)
+        return language
+    }
+
+    private static func acquireOutputLeases(for plan: ConversionPlan) throws -> OutputLeaseSet {
+        try ConversionPlanner.validateConversionPlan(plan)
+        try Task.checkCancellation()
+        return try OutputLeases.acquire(for: plan.outputURLs)
+    }
+
+    @MainActor
+    private static func launch(
+        session: ConversionSession, plan: ConversionPlan, outputLeases: OutputLeaseSet, outputLanguage: String,
+        measureBookLoudness: (@Sendable () throws -> LoudnessMeasurement)?
+    ) -> ConversionStartResult {
+        let plannedFiles = plan.groups.flatMap { $0 }
         let context = session.beginConversionRun()
         let job = ConversionJob(
             plan: plan,
@@ -741,10 +699,6 @@ public struct FFmpegWrapper {
             coverData: coverSnapshotForConversion(session)
         )
         let plannedTotalDuration = plannedFiles.reduce(0) { $0 + $1.duration }
-        // Zwischen `beginConversionRun()` und hier liegt kein Suspendierungspunkt
-        // — `convert` ist Main-Actor-isoliert und nicht `async`. Der Kontext ist
-        // deshalb zwangsläufig der aktuelle; eine Prüfung wäre toter Code, der
-        // Sperren und Kontext ungeschlossen zurückließe.
         session.runState = ConversionRunState(startingWith: "Konvertierung läuft")
         session.eventLogs = []
         session.logString = ""
@@ -753,12 +707,11 @@ public struct FFmpegWrapper {
         let durationStr = String(format: "%02d:%02dh", totalHours, totalMinutes)
         let channels = job.settings.isMono ? "Mono" : "Stereo"
 
-        let physicalInputURLs = Set(plannedFiles.map { $0.url.standardizedFileURL })
         var totalSize: Int64 = 0
-        for url in physicalInputURLs {
-            if let attr = try? FileManager.default.attributesOfItem(atPath: url.path),
-               let size = attr[.size] as? Int64 {
-                totalSize += size
+        for snapshot in plan.inputSnapshots.values {
+            if case .existing(let identity) = snapshot {
+                let (sum, overflow) = totalSize.addingReportingOverflow(identity.size)
+                totalSize = overflow ? Int64.max : sum
             }
         }
         let sizeStr = formatFileSize(totalSize)
@@ -774,886 +727,11 @@ public struct FFmpegWrapper {
         let codecInfo = "Apple AudioToolbox / Constrained Variable Bitrate"
         session.addLog("Technik: \(modeName) via \(codecInfo)", type: .info)
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            var job = job
-            let heldOutputLeases = job.outputLeases
-            defer { withExtendedLifetime(heldOutputLeases) {} }
-            // Verfolgt, ob ALLE Gruppen erfolgreich waren -- nur dann ist der Lauf
-            // wirklich erfolgreich (für CLI-Exit-Code + ehrliche Statusmeldung).
-            var overallSuccess = true
-            var completedDuration: TimeInterval = 0
-            // Erfolgreich übernommene Ziel-URLs hier im Worker sammeln und erst
-            // mit der EINEN Abschlussnachricht übergeben — separate Tasks pro
-            // Datei hätten keine garantierte Reihenfolge gegenüber dem Abschluss.
-            var committedOutputs: [URL] = []
-
-            if job.settings.analyzeLoudness || job.settings.normalizeLoudness {
-                do {
-                    let measurement = try measureBookLoudness?()
-                        ?? analyzeBookLoudness(job: job, session: session, context: context)
-                    job.loudnessGain = job.settings.normalizeLoudness ? measurement.gainDB : 0
-                    session.enqueueLog(measurement.description + (job.settings.normalizeLoudness ? "; gemeinsamer Gain: \(job.loudnessGain) dB" : "; Analyse ohne Pegeländerung"), type: .info, runID: context.id)
-                } catch {
-                    if context.isCancelled || job.settings.normalizeLoudness {
-                        // Wer „Lautheit angleichen" gewählt hat, will die
-                        // Pegeländerung. Ein Buch ohne sie still auszuliefern
-                        // wäre etwas anderes als das Bestellte.
-                        overallSuccess = false
-                        if !context.isCancelled { session.enqueueLog("Lautheitsanalyse fehlgeschlagen: \(error.localizedDescription)", type: .highlight, runID: context.id) }
-                    } else {
-                        // Die reine Analyse ist eine Auskunft. Sie darf die
-                        // Konvertierung nicht kosten — auch nicht über das
-                        // Fehler-Latch, das ihr eigener Dekodierpass gesetzt
-                        // haben kann und das sonst jeden weiteren Prozessstart
-                        // dieses Laufs stumm ablehnte.
-                        context.clearSegmentFailure()
-                        session.enqueueLog("Lautheitsanalyse fehlgeschlagen, die Konvertierung läuft ohne Messwert weiter: \(error.localizedDescription)", type: .highlight, runID: context.id)
-                    }
-                }
-            }
-            for (groupIndex, fileGroup) in (overallSuccess ? job.plan.groups : []).enumerated() {
-                if context.isCancelled {
-                    overallSuccess = false
-                    break
-                }
-                do {
-                    try validateInputSnapshots(
-                        for: fileGroup,
-                        expected: job.plan.inputSnapshots
-                    )
-                } catch {
-                    session.enqueueLog(
-                        "❌ \(error.localizedDescription)",
-                        type: .highlight,
-                        runID: context.id
-                    )
-                    overallSuccess = false
-                    break
-                }
-                let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("HB_Temp_\(UUID().uuidString)")
-                do {
-                    try createOwnedTempDirectory(tempDir)
-                } catch {
-                    session.enqueueLog(
-                        "❌ Temporäres Arbeitsverzeichnis konnte nicht erstellt werden: \(error.localizedDescription)",
-                        type: .highlight,
-                        runID: context.id
-                    )
-                    overallSuccess = false
-                    break
-                }
-                context.registerTempDirectory(tempDir)
-
-                let finalURL = job.plan.outputURLs[groupIndex]
-                do {
-                    try validateOutputDirectorySnapshot(
-                        for: finalURL,
-                        expected: job.plan.outputDirectorySnapshots[groupIndex]
-                    )
-                } catch {
-                    session.enqueueLog(
-                        "❌ \(error.localizedDescription)",
-                        type: .highlight,
-                        runID: context.id
-                    )
-                    context.removeTempDirectory(tempDir)
-                    overallSuccess = false
-                    break
-                }
-                // Leichen abgestürzter früherer Läufe (SIGKILL/Stromausfall)
-                // für dieses Ziel zuerst wegräumen — sie sind versteckt, oft
-                // mehrere GB groß und sonst für immer unsichtbar.
-                removeOrphanedStagedOutputs(for: finalURL, log: { message in
-                    session.enqueueLog(message, type: .highlight, runID: context.id)
-                })
-                let stagingHandle: StagingOutputHandle
-                do {
-                    stagingHandle = try createProtectedStagingOutput(for: finalURL)
-                } catch {
-                    session.enqueueLog(
-                        "❌ Temporäre Ausgabedatei konnte nicht exklusiv angelegt werden: \(error.localizedDescription)",
-                        type: .highlight,
-                        runID: context.id
-                    )
-                    context.removeTempDirectory(tempDir)
-                    overallSuccess = false
-                    break
-                }
-                let stagedURL = stagingHandle.url
-                let stagingOwnership = stagingHandle.ownership
-                context.registerStagedOutput(
-                    stagedURL,
-                    ownership: stagingOwnership
-                )
-                var success = false
-                let groupDuration = fileGroup.reduce(0) { $0 + $1.duration }
-                let progressBase = plannedTotalDuration > 0
-                    ? completedDuration / plannedTotalDuration
-                    : 0
-                let progressScale = plannedTotalDuration > 0
-                    ? groupDuration / plannedTotalDuration
-                    : 1
-
-                if job.settings.useParallelEncoding {
-                    success = performParallelConversion(
-                        session: session,
-                        job: job,
-                        context: context,
-                        group: fileGroup,
-                        tempDir: tempDir,
-                        finalURL: stagedURL,
-                        stagingOwnership: stagingOwnership,
-                        stagingHandle: stagingHandle,
-                        progressBase: progressBase,
-                        progressScale: progressScale
-                    )
-                } else {
-                    success = performSequentialConversion(
-                        session: session,
-                        job: job,
-                        context: context,
-                        group: fileGroup,
-                        tempDir: tempDir,
-                        finalURL: stagedURL,
-                        stagingOwnership: stagingOwnership,
-                        stagingHandle: stagingHandle,
-                        progressBase: progressBase,
-                        progressScale: progressScale
-                    )
-                }
-
-                guard success, !context.isCancelled, let size = regularFileSize(stagedURL) else {
-                    context.discardStagedOutput(stagedURL)
-                    if !context.isCancelled {
-                        session.enqueueLog(
-                            "❌ KRITISCHER FEHLER beim Erstellen von \(finalURL.lastPathComponent). Vorgang abgebrochen.",
-                            type: .highlight,
-                            runID: context.id
-                        )
-                    }
-                    context.removeTempDirectory(tempDir)
-                    overallSuccess = false
-                    break
-                }
-
-                // Die rein informative Analyse läuft auf der Staging-Datei. Der
-                // atomare Rename bleibt damit der letzte relevante Dateischritt.
-                if let miPath = getBinaryURL(name: "mediainfo"), !context.isCancelled {
-                    let result = runCapturedProcess(
-                        executableURL: miPath,
-                        arguments: [stagedURL.path],
-                        context: context,
-                        timeout: 10
-                    )
-                    switch result {
-                    case .completed(let status, let data) where status == 0:
-                        if let output = String(data: data, encoding: .utf8)?
-                            .trimmingCharacters(in: .whitespacesAndNewlines),
-                           !output.isEmpty, !context.isCancelled {
-                            session.enqueueLog(
-                                "--- MediaInfo Eigenschaften ---\n" + output,
-                                type: .dim,
-                                runID: context.id
-                            )
-                            // Gilt in BEIDEN Modi: aac_at/CVBR wird von ffmpeg+mediainfo
-                            // immer als 'Constant' gelabelt (verifiziert), nicht nur beim
-                            // Stream-Copy. Der Audio-Stream bleibt dennoch Constrained VBR.
-                            session.enqueueLog(
-                                "Hinweis: MediaInfo labelt aac_at/CVBR fälschlicherweise als 'Bitrate-Modus: Constant'. Die Audiodaten sind dennoch durchgehend variables Apple CVBR.",
-                                type: .dim,
-                                runID: context.id
-                            )
-                        }
-                    case .cancelled:
-                        break
-                    case .timedOut:
-                        session.enqueueVerboseLog(
-                            "MediaInfo-Nachanalyse nach 10 Sekunden beendet; die fertige Ausgabe wird trotzdem übernommen.",
-                            runID: context.id
-                        )
-                    case .completed(let status, _):
-                        session.enqueueVerboseLog(
-                            "MediaInfo-Nachanalyse mit Exit-Code \(status) übersprungen; die fertige Ausgabe wird trotzdem übernommen.",
-                            runID: context.id
-                        )
-                    case .failed(let reason):
-                        session.enqueueVerboseLog(
-                            "MediaInfo-Nachanalyse übersprungen: \(reason)",
-                            runID: context.id
-                        )
-                    }
-                }
-
-                do {
-                    var displacedOutputRemoved = true
-                    let committed = try context.performCommit(
-                        isLastOutput: groupIndex == job.plan.groups.count - 1
-                    ) {
-                        displacedOutputRemoved = try commitStagedOutput(
-                            stagedURL,
-                            to: finalURL,
-                            expectedDestination: job.plan.outputSnapshots[groupIndex],
-                            expectedDestinationDirectory:
-                                job.plan.outputDirectorySnapshots[groupIndex],
-                            expectedStagingOwnership: stagingOwnership
-                        )
-                    }
-                    guard committed else {
-                        context.discardStagedOutput(stagedURL)
-                        context.removeTempDirectory(tempDir)
-                        overallSuccess = false
-                        break
-                    }
-                    if displacedOutputRemoved {
-                        // Der Staging-Eintrag ist verschoben oder die verdrängte
-                        // Altdatei wurde bestätigt gelöscht.
-                        context.completeStagedOutput(stagedURL)
-                    } else {
-                        if case .existing(let displacedIdentity) =
-                            job.plan.outputSnapshots[groupIndex] {
-                            context.registerDisplacedOutput(
-                                stagedURL,
-                                expectedIdentity: displacedIdentity,
-                                stagingOwnership: stagingOwnership
-                            )
-                        }
-                        session.enqueueLog(
-                            "⚠️ Die frühere Ausgabe bleibt vorläufig als versteckte Sicherungsdatei liegen: \(stagedURL.path)",
-                            type: .highlight,
-                            runID: context.id
-                        )
-                    }
-                    clearStagingOwnershipMarker(finalURL)
-                    committedOutputs.append(finalURL)
-                } catch {
-                    context.handleCommitFailure(error, stagedURL: stagedURL)
-                    session.enqueueLog(
-                        "❌ Ausgabe konnte nicht atomar übernommen werden: \(error.localizedDescription)",
-                        type: .highlight,
-                        runID: context.id
-                    )
-                    context.removeTempDirectory(tempDir)
-                    overallSuccess = false
-                    break
-                }
-
-                session.enqueueLog("✅ Datei erfolgreich erstellt!", type: .highlight, runID: context.id)
-                session.enqueueLog("Name: \(finalURL.lastPathComponent)", type: .info, runID: context.id)
-                session.enqueueLog("Pfad: \(finalURL.path)", type: .info, runID: context.id)
-                session.enqueueLog("Größe: \(formatFileSize(size))", type: .info, runID: context.id)
-                context.removeTempDirectory(tempDir)
-                completedDuration += groupDuration
-            }
-
-            let succeeded = overallSuccess
-            let outputs = committedOutputs
-            context.finishAfterCancellationCleanup { cancelled in
-                // Erst nach einer parallel laufenden Abbruchbereinigung erneut
-                // versuchen: Diese kann gerade erst einen Rest registriert haben.
-                context.cleanupResidualStagedOutputs()
-                session.enqueueConversionFinished(
-                    success: succeeded,
-                    cancelled: cancelled,
-                    completedOutputs: outputs,
-                    runID: context.id
-                )
-            }
-        }
+        ConversionPipeline(job: job, session: session, context: context).start(
+            totalDuration: plannedTotalDuration,
+            measureBookLoudness: measureBookLoudness
+        )
         return .started
-    }
-
-    private static func runParallelTasks(group: [AudioFile], tempDir: URL, session: ConversionSession, context: ConversionContext,
-                                         progressBase: Double, progressWeight: Double,
-                                         extensionStr: String, showIndividualPacmans: Bool,
-                                         workerLimit: Int,
-                                         inputSnapshots: [String: OutputDestinationSnapshot],
-                                         argsProvider: @escaping @Sendable (Int, AudioFile, URL) -> [String]) -> [String]? {
-        // ffmpeg einmal vorab auflösen. Fehlt es, die Ursache klar benennen und
-        // abbrechen — der frühere /usr/bin/false-Fallback pro Segment erzeugte
-        // nur irreführende "Segment fehlgeschlagen"-Meldungen.
-        guard let ffmpegURL = getBinaryURL(name: "ffmpeg") else {
-            session.enqueueLog(
-                "❌ ffmpeg wurde nicht gefunden (weder gebündelt noch im PATH/Homebrew/MacPorts). Bitte ./build.sh ausführen oder ffmpeg installieren.",
-                type: .highlight,
-                runID: context.id
-            )
-            return nil
-        }
-        let maxConcurrent = max(1, min(workerLimit, group.count))
-        let semaphore = DispatchSemaphore(value: maxConcurrent)
-        let groupQueue = DispatchQueue(label: "com.hoerbuchkloeppler.parallel", attributes: .concurrent)
-        let completionGroup = DispatchGroup()
-        
-        let results = ParallelResults(count: group.count)
-        let tracker = ParallelProgressTracker(durations: group.map(\.duration))
-        let itemCount = group.count
-
-        session.enqueueSegmentReset(
-            title: showIndividualPacmans ? nil : "Audio-Dekodierung (WAV)",
-            phase: showIndividualPacmans ? .encoding : .decoding,
-            runID: context.id
-        )
-
-        for (idx, file) in group.enumerated() {
-            // Vor dem Einreihen warten: auch die Dispatch-Warteschlange bleibt begrenzt.
-            semaphore.wait()
-            if context.isCancelled || context.hasSegmentFailure { semaphore.signal(); break }
-            completionGroup.enter()
-            groupQueue.async {
-                var succeeded = false
-                defer {
-                    semaphore.signal()
-                    completionGroup.leave()
-                }
-                defer { if !succeeded && !context.isCancelled { context.failSegments() } }
-
-                if context.isCancelled {
-                    return
-                }
-                do {
-                    try validateInputSnapshots(for: [file], expected: inputSnapshots)
-                } catch {
-                    session.enqueueLog(
-                        "❌ \(error.localizedDescription)",
-                        type: .highlight,
-                        runID: context.id
-                    )
-                    return
-                }
-                
-                let segmentURL = tempDir.appendingPathComponent("seg_\(idx).\(extensionStr)")
-                let finalArgs = argsProvider(idx, file, segmentURL)
-                
-                if showIndividualPacmans {
-                    session.enqueueSegmentInitialization(
-                        index: idx,
-                        filename: file.name,
-                        runID: context.id
-                    )
-                }
-
-                let process = Process()
-                process.executableURL = ffmpegURL
-                process.arguments = finalArgs
-                
-                defer { context.unregister(process) }
-                
-                session.enqueueVerboseLog(
-                    "Starte Segment \(idx+1): ffmpeg \(finalArgs.joined(separator: " "))",
-                    runID: context.id
-                )
-                
-                let errorPipe = Pipe()
-                process.standardError = errorPipe
-                let outputReader = ProcessPipeReader(
-                    handle: errorPipe.fileHandleForReading
-                )
-                let consumeProgress: @Sendable (inout FFmpegProgressParser, Data) -> Void = { parser, data in
-                    guard let currentSeconds = parser.consume(data), file.duration > 0 else { return }
-                    let progress = min(1, max(0, currentSeconds / file.duration))
-                    let totalProgress = tracker.update(index: idx, progress: progress)
-                    session.enqueueProgress(
-                        mappedProgress(base: progressBase, weight: progressWeight, phaseProgress: totalProgress),
-                        segmentIndex: showIndividualPacmans ? idx : 0,
-                        segmentProgress: showIndividualPacmans ? progress : totalProgress,
-                        runID: context.id
-                    )
-                }
-
-                do {
-                    guard try context.run(process) else { return }
-                    try? errorPipe.fileHandleForWriting.close()
-                    outputReader.start(state: FFmpegProgressParser(), onChunk: consumeProgress)
-                    process.waitUntilExit()
-                    let hadBackgroundProcesses = ProcessTerminator
-                        .terminateRemainingOwnedGroup(process)
-                    // Join des Lesers vor Status/Phasenwechsel: Kein Callback aus
-                    // diesem Segment darf danach noch Fortschritt einreihen.
-                    let stderrData = outputReader.waitUntilEOF(timeout: 0.25)
-                    if context.isCancelled { return }
-                    // Ein anderes Segment ist bereits fatal gescheitert und hat
-                    // dieses per SIGTERM beendet (`failSegments`). Der so
-                    // erzwungene Exit ist keine eigene Ursache und würde das Log
-                    // nur mit Folgefehlern samt stderr-Auszug füllen.
-                    if context.hasSegmentFailure { return }
-                    if hadBackgroundProcesses {
-                        session.enqueueLog(
-                            "❌ Segment \(idx+1) ließ nach dem Werkzeug-Exit Hintergrundprozesse zurück; der Batch wird verworfen.",
-                            type: .highlight,
-                            runID: context.id
-                        )
-                        return
-                    }
-                    if outputReader.joinTimedOut || outputReader.failedToReadOutput {
-                        session.enqueueLog(
-                            "❌ Segment \(idx+1) lieferte keine vollständige Werkzeugausgabe; der Batch wird verworfen.",
-                            type: .highlight,
-                            runID: context.id
-                        )
-                        return
-                    }
-                    do {
-                        // ffmpeg öffnet die URL selbst. Eine während des Lesens
-                        // ersetzte oder in-place geänderte Quelle darf deshalb
-                        // auch bei Exit 0 kein gültiges Segment liefern.
-                        try validateInputSnapshots(
-                            for: [file],
-                            expected: inputSnapshots
-                        )
-                    } catch {
-                        session.enqueueLog(
-                            "❌ \(error.localizedDescription)",
-                            type: .highlight,
-                            runID: context.id
-                        )
-                        return
-                    }
-                    if process.terminationStatus == 0 {
-                        var fileIsValid = false
-                        if let attr = try? FileManager.default.attributesOfItem(atPath: segmentURL.path),
-                           let size = attr[.size] as? Int64, size > 0 {
-                            fileIsValid = true
-                        }
-                        
-                        if fileIsValid {
-                            succeeded = true
-                            let finishedCount = results.store(segmentURL.path, at: idx)
-                            let totalProgress = tracker.update(
-                                index: idx,
-                                progress: 1
-                            )
-                            session.enqueueProgress(
-                                mappedProgress(
-                                    base: progressBase,
-                                    weight: progressWeight,
-                                    phaseProgress: totalProgress
-                                ),
-                                segmentIndex: showIndividualPacmans || finishedCount == itemCount
-                                    ? (showIndividualPacmans ? idx : 0)
-                                    : nil,
-                                segmentProgress: showIndividualPacmans || finishedCount == itemCount
-                                    ? 1
-                                    : nil,
-                                runID: context.id
-                            )
-                        } else {
-                            session.enqueueLog(
-                                "❌ KRITISCHER FEHLER: Zieldatei Segment \(idx+1) ist leer oder fehlt.",
-                                type: .highlight,
-                                runID: context.id
-                            )
-                        }
-                    } else {
-                        let diagnostic = String(data: stderrData, encoding: .utf8)?
-                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                        let errorMessage = diagnostic.isEmpty ? "Unbekannter FFmpeg Fehler" : diagnostic
-                        session.enqueueLog(
-                            "❌ Segment \(idx+1) fehlgeschlagen (Exit-Code \(process.terminationStatus)):\n\(errorMessage)",
-                            type: .highlight,
-                            runID: context.id
-                        )
-                    }
-                } catch {
-                    if !context.isCancelled {
-                        session.enqueueLog(
-                            "❌ Prozess-Fehler bei Segment \(idx+1): \(error.localizedDescription)",
-                            type: .highlight,
-                            runID: context.id
-                        )
-                    }
-                }
-            }
-        }
-        completionGroup.wait()
-        return results.completedPaths()
-    }
-
-    /// Schreibt die concat-Liste (`audio_list.txt`) und die FFMETADATA-
-    /// Kapiteldatei (`chapters.txt`) nach tempDir. Gibt `false` zurück, wenn ein
-    /// Schreibvorgang fehlschlägt — sonst liefe ffmpeg mit fehlender Steuerdatei
-    /// weiter und meldete einen irreführenden Fehler. Pfade werden fürs
-    /// concat-Format escaped (einfaches Anführungszeichen → `'\''`).
-    private static func writeConcatAndChapters(
-        validPaths: [String],
-        group: [AudioFile],
-        listFile: URL,
-        metaFile: URL,
-        session: ConversionSession,
-        runID: UUID
-    ) -> Bool {
-        let fileListContent = validPaths.map { "file '\($0.replacingOccurrences(of: "'", with: "'\\''"))'" }.joined(separator: "\n")
-        let metaContent = FFMetadata.encodeChapters(group: group)
-        do {
-            try fileListContent.write(to: listFile, atomically: true, encoding: .utf8)
-            try metaContent.write(to: metaFile, atomically: true, encoding: .utf8)
-            return true
-        } catch {
-            session.enqueueLog(
-                "❌ KRITISCHER FEHLER: Steuerdateien konnten nicht geschrieben werden: \(error.localizedDescription)",
-                type: .highlight,
-                runID: runID
-            )
-            return false
-        }
-    }
-
-    /// Gemeinsamer MP4/M4B-Mux-Aufbau für Standard- und Parallelmodus. Nur die
-    /// Audio-Codecargumente unterscheiden sich; Inputs, Metadaten, Cover-Mapping
-    /// und Ausgabe müssen in beiden Pfaden identisch bleiben.
-    private static func finalMuxArguments(
-        listFile: URL,
-        metaFile: URL,
-        coverInput: String?,
-        audioMode: MuxAudioMode,
-        job: ConversionJob,
-        outputPath: String
-    ) -> [String] {
-        var arguments = [
-            "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", listFile.path,
-            "-i", metaFile.path
-        ]
-        // Parallelmodus: Die fertig kodierten Segmente werden per concat nur
-        // noch kopiert (`-c:a copy`). Ohne `-copyts` setzt ffmpeg die Zeitstempel
-        // je Segment neu auf und die Kapitelmarken aus der FFMETADATA-Datei
-        // verschieben sich gegen den Ton. Abnahme der Kapitelstarts beider Modi:
-        // tests/verify_audio_transitions.py.
-        arguments += audioMode.timestampArguments
-        if let coverInput { arguments += ["-i", coverInput] }
-        arguments += audioMode.codecArguments
-        arguments += [
-            "-map", "0:a", "-map_metadata", "1",
-            "-metadata", "title=\(job.title)",
-            "-metadata", "album=\(job.title)",
-            "-metadata", "artist=\(job.author)",
-            "-metadata", "genre=\(job.genre)",
-            "-metadata", "composer=\(job.narrator)",
-            "-metadata", "grouping=\(job.series)",
-            "-metadata", "disc=\(job.volumeNumber)",
-            "-metadata", "language=\(job.language)",
-            "-metadata:s:a:0", "language=\(job.language)"
-        ]
-        if coverInput != nil {
-            arguments += ["-map", "2:0", "-c:v", "copy", "-disposition:v", "attached_pic"]
-        }
-        // Der MP4-Muxer leitet das Format sonst aus der Dateiendung ab. Der
-        // Produktionspfad schreibt aber auf einen Dateideskriptor, deshalb muss
-        // das Format ausdrücklich dabeistehen.
-        arguments += ["-f", "ipod", outputPath]
-        return arguments
-    }
-
-    /// Gemeinsamer Abschluss beider Kodiermodi: Steuerdateien und Cover
-    /// vorbereiten, Mux-Argumente bauen und den finalen ffmpeg-Prozess starten.
-    /// Der jeweilige Modus liefert nur seine Segmentpfade, Codec-Argumente und
-    /// Fortschrittsaufteilung.
-    private static func finalizeConvertedSegments(
-        _ validPaths: [String],
-        session: ConversionSession,
-        job: ConversionJob,
-        context: ConversionContext,
-        group: [AudioFile],
-        tempDir: URL,
-        finalURL: URL,
-        stagingOwnership: StagingOwnership,
-        stagingHandle: StagingOutputHandle,
-        progressBase: Double,
-        progressScale: Double,
-        segmentProgressFraction: Double,
-        audioMode: MuxAudioMode,
-        logMessage: String,
-        pacmanTitle: String,
-        phase: ConversionPhase = .encoding
-    ) -> Bool {
-        let listFile = tempDir.appendingPathComponent("audio_list.txt")
-        let metaFile = tempDir.appendingPathComponent("chapters.txt")
-        guard writeConcatAndChapters(
-            validPaths: validPaths,
-            group: group,
-            listFile: listFile,
-            metaFile: metaFile,
-            session: session,
-            runID: context.id
-        ) else { return false }
-        let coverInput = resolveCoverInputPath(
-            job: job,
-            session: session,
-            tempDir: tempDir,
-            runID: context.id
-        )
-        let args = finalMuxArguments(
-            listFile: listFile,
-            metaFile: metaFile,
-            coverInput: coverInput,
-            audioMode: audioMode,
-            job: job,
-            outputPath: "/dev/fd/0"
-        )
-        return runFinalProcess(
-            args: args,
-            session: session,
-            context: context,
-            progressBase: progressBase + progressScale * segmentProgressFraction,
-            progressWeight: progressScale * (1 - segmentProgressFraction),
-            phaseDuration: group.reduce(0) { $0 + $1.duration },
-            logMessage: logMessage,
-            pacmanTitle: pacmanTitle,
-            phase: phase,
-            stagingURL: finalURL,
-            expectedStagingOwnership: stagingOwnership,
-            stagingHandle: stagingHandle
-        )
-    }
-
-    private static func performSequentialConversion(
-        session: ConversionSession,
-        job: ConversionJob,
-        context: ConversionContext,
-        group: [AudioFile],
-        tempDir: URL,
-        finalURL: URL,
-        stagingOwnership: StagingOwnership,
-        stagingHandle: StagingOutputHandle,
-        progressBase: Double,
-        progressScale: Double
-    ) -> Bool {
-        let wavPaths = runParallelTasks(group: group, tempDir: tempDir, session: session, context: context, progressBase: progressBase, progressWeight: progressScale * 0.2, extensionStr: "wav", showIndividualPacmans: false, workerLimit: job.settings.effectiveWorkerLimit, inputSnapshots: job.plan.inputSnapshots) { _, file, url in
-            FFmpegWrapper.getArgsForStandardSlicing(
-                file: file,
-                url: url,
-                settings: job.settings
-            )
-        }
-        guard let validPaths = wavPaths else { return false }
-        return finalizeConvertedSegments(
-            validPaths,
-            session: session,
-            job: job,
-            context: context,
-            group: group,
-            tempDir: tempDir,
-            finalURL: finalURL,
-            stagingOwnership: stagingOwnership,
-            stagingHandle: stagingHandle,
-            progressBase: progressBase,
-            progressScale: progressScale,
-            segmentProgressFraction: 0.2,
-            audioMode: .encodeAAC(settings: job.settings, gainDB: job.loudnessGain),
-            logMessage: "🛠️ Starte komplette Apple CVBR Kodierung...",
-            pacmanTitle: "Apple AAC Encoding"
-        )
-    }
-
-    private static func performParallelConversion(
-        session: ConversionSession,
-        job: ConversionJob,
-        context: ConversionContext,
-        group: [AudioFile],
-        tempDir: URL,
-        finalURL: URL,
-        stagingOwnership: StagingOwnership,
-        stagingHandle: StagingOutputHandle,
-        progressBase: Double,
-        progressScale: Double
-    ) -> Bool {
-        let aacPaths = runParallelTasks(group: group, tempDir: tempDir, session: session, context: context, progressBase: progressBase, progressWeight: progressScale * 0.9, extensionStr: "m4a", showIndividualPacmans: true, workerLimit: job.settings.effectiveWorkerLimit, inputSnapshots: job.plan.inputSnapshots) { _, file, url in
-            FFmpegWrapper.getArgsForParallelEncoding(
-                file: file,
-                url: url,
-                settings: job.settings,
-                gainDB: job.loudnessGain
-            )
-        }
-        guard let validPaths = aacPaths else { return false }
-        return finalizeConvertedSegments(
-            validPaths,
-            session: session,
-            job: job,
-            context: context,
-            group: group,
-            tempDir: tempDir,
-            finalURL: finalURL,
-            stagingOwnership: stagingOwnership,
-            stagingHandle: stagingHandle,
-            progressBase: progressBase,
-            progressScale: progressScale,
-            segmentProgressFraction: 0.9,
-            audioMode: .streamCopy,
-            logMessage: "🛠️ Finaler Stream-Copy & MP4-Muxing gestartet...",
-            pacmanTitle: "Finaler Zusammenbau",
-            phase: .muxing
-        )
-    }
-
-    static func runFinalProcess(
-        args: [String],
-        session: ConversionSession,
-        context: ConversionContext,
-        progressBase: Double,
-        progressWeight: Double,
-        phaseDuration: TimeInterval,
-        logMessage: String,
-        pacmanTitle: String,
-        phase: ConversionPhase = .encoding,
-        stagingURL: URL? = nil,
-        expectedStagingOwnership: StagingOwnership? = nil,
-        stagingHandle: StagingOutputHandle? = nil,
-        beforeProcessStart: (() -> Void)? = nil,
-        executableURL: URL? = nil
-    ) -> Bool {
-        session.enqueueSegmentReset(title: pacmanTitle, phase: phase, runID: context.id)
-        if context.isCancelled { return false }
-        session.enqueueLog(logMessage, type: .highlight, runID: context.id)
-        
-        // Fehlendes ffmpeg klar melden statt (wie früher) /usr/bin/false zu starten,
-        // dessen Exit-Code nur eine irreführende Fehlermeldung produzierte.
-        guard let ffmpegURL = executableURL ?? getBinaryURL(name: "ffmpeg") else {
-            session.enqueueLog(
-                "❌ ffmpeg wurde nicht gefunden (weder gebündelt noch im PATH/Homebrew/MacPorts). Bitte ./build.sh ausführen oder ffmpeg installieren.",
-                type: .highlight,
-                runID: context.id
-            )
-            return false
-        }
-        let process = Process()
-        process.executableURL = ffmpegURL
-        process.arguments = args
-        if let stagingHandle {
-            // Foundation erhält den offenen Staging-Deskriptor als stdin und
-            // hält ihn beim Spawn als Dateideskriptor 0 offen. ffmpeg schreibt
-            // nach /dev/fd/0 und folgt dadurch keinem austauschbaren Pfad.
-            process.standardInput = stagingHandle.processInputHandle()
-        }
-        let pipe = Pipe()
-        process.standardError = pipe
-        session.enqueueVerboseLog(
-            "Führe Final-Prozess aus: ffmpeg \(args.joined(separator: " "))",
-            runID: context.id
-        )
-        
-        defer { context.unregister(process) }
-        
-        do {
-            if let stagingURL, let expectedStagingOwnership {
-                guard case .existing(let current) = captureSnapshot(of: stagingURL),
-                      stagingOwnershipMatches(
-                        expectedStagingOwnership,
-                        identity: current,
-                        at: stagingURL
-                      ),
-                      let protectedDirectory = expectedStagingOwnership
-                        .protectedDirectory,
-                      let protectedIdentity = expectedStagingOwnership
-                        .protectedDirectoryIdentity,
-                      let currentDirectory = fileSystemIdentity(
-                        at: protectedDirectory,
-                        followSymlink: false
-                      ),
-                      protectedIdentity.matchesDirectoryEntry(currentDirectory),
-                      temporaryDirectoryOwnerPID(protectedDirectory)
-                        == expectedStagingOwnership.ownerPID else {
-                    session.enqueueLog(
-                        "❌ Geschützte temporäre Ausgabe wurde vor dem ffmpeg-Start ausgetauscht.",
-                        type: .highlight,
-                        runID: context.id
-                    )
-                    return false
-                }
-            }
-            beforeProcessStart?()
-            guard try context.run(process) else { return false }
-            let outputReader = ProcessPipeReader(handle: pipe.fileHandleForReading)
-            try? pipe.fileHandleForWriting.close()
-            outputReader.start(state: FFmpegProgressParser()) { parser, data in
-                guard let currentSeconds = parser.consume(data), phaseDuration > 0 else { return }
-                let progress = min(1, max(0, currentSeconds / phaseDuration))
-                session.enqueueProgress(
-                    mappedProgress(base: progressBase, weight: progressWeight, phaseProgress: progress),
-                    segmentIndex: 0,
-                    segmentProgress: progress,
-                    runID: context.id
-                )
-            }
-            
-            process.waitUntilExit()
-            let hadBackgroundProcesses = ProcessTerminator
-                .terminateRemainingOwnedGroup(process)
-            let stderrData = outputReader.waitUntilEOF(timeout: 0.25)
-            if context.isCancelled { return false }
-            if hadBackgroundProcesses {
-                session.enqueueLog(
-                    "❌ KRITISCHER FEHLER: Werkzeug meldete Exit, ließ aber Hintergrundprozesse zurück. Die Ausgabe wird nicht übernommen.",
-                    type: .highlight,
-                    runID: context.id
-                )
-                return false
-            }
-            if outputReader.joinTimedOut || outputReader.failedToReadOutput {
-                session.enqueueLog(
-                    "❌ KRITISCHER FEHLER: Werkzeugausgabe blieb unvollständig. Die Ausgabe wird nicht übernommen.",
-                    type: .highlight,
-                    runID: context.id
-                )
-                return false
-            }
-            if process.terminationStatus == 0 {
-                session.enqueueProgress(
-                    mappedProgress(
-                        base: progressBase,
-                        weight: progressWeight,
-                        phaseProgress: 1
-                    ),
-                    segmentIndex: 0,
-                    segmentProgress: 1,
-                    runID: context.id
-                )
-                return true
-            }
-            let details = String(data: stderrData, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let suffix = details.map { $0.isEmpty ? "" : "\n\($0)" } ?? ""
-            session.enqueueLog(
-                "❌ KRITISCHER FEHLER beim finalen Zusammenfügen. "
-                + "Exit-Code: \(process.terminationStatus)\(suffix)",
-                type: .highlight,
-                runID: context.id
-            )
-            return false
-        } catch {
-            if !context.isCancelled {
-                session.enqueueLog(
-                    "❌ KRITISCHER FEHLER: \(error.localizedDescription)",
-                    type: .highlight,
-                    runID: context.id
-                )
-            }
-            return false
-        }
-    }
-
-    /// Schreibt den vor Workerstart aufgenommenen Cover-Snapshot in `tempDir`
-    /// und liefert seinen Pfad für ffmpeg. Damit liest der Mux weder eine später
-    /// ausgetauschte manuelle Bilddatei noch veränderlichen Session-Zustand.
-    private static func resolveCoverInputPath(
-        job: ConversionJob,
-        session: ConversionSession,
-        tempDir: URL,
-        runID: UUID
-    ) -> String? {
-        if let data = job.coverData {
-            let coverURL = tempDir.appendingPathComponent("cover.img")
-            do {
-                try data.write(to: coverURL)
-                return coverURL.path
-            } catch {
-                session.enqueueLog(
-                    "⚠️ Eingebettetes Cover konnte nicht zwischengespeichert werden — Output ohne Cover.",
-                    type: .info,
-                    runID: runID
-                )
-                return nil
-            }
-        }
-        return nil
     }
 
     static func mappedProgress(base: Double, weight: Double, phaseProgress: Double) -> Double {
@@ -1672,7 +750,7 @@ public struct FFmpegWrapper {
         if session.currentConversionContext() == nil {
             session.runState = ConversionRunState(rejectedWith: status)
         }
-        session.addLog("❌ \(message)", type: .highlight)
+        session.addLog(message, type: .error)
         return .rejected(message)
     }
 
@@ -1717,54 +795,10 @@ public struct FFmpegWrapper {
         }
     }
 
-    private static func formatFileSize(_ bytes: Int64) -> String {
+    static func formatFileSize(_ bytes: Int64) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useMB, .useGB]
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
-    }
-}
-
-
-extension FFmpegWrapper {
-    private static func analyzeBookLoudness(job: ConversionJob, session: ConversionSession, context: ConversionContext) throws -> LoudnessMeasurement {
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("HB_Temp_\(UUID().uuidString)")
-        try createOwnedTempDirectory(folder)
-        context.registerTempDirectory(folder)
-        defer { context.removeTempDirectory(folder) }
-        session.enqueueLog("Lautheitsanalyse: zusätzlicher vollständiger Dekodier- und Analysepass für das gesamte Buch; temporärer WAV-Bestand.", type: .info, runID: context.id)
-        let files = job.plan.groups.flatMap { $0 }
-        guard let paths = runParallelTasks(group: files, tempDir: folder, session: session, context: context, progressBase: 0, progressWeight: 0, extensionStr: "wav", showIndividualPacmans: false, workerLimit: job.settings.effectiveWorkerLimit, inputSnapshots: job.plan.inputSnapshots, argsProvider: { _, file, url in
-            getArgsForStandardSlicing(file: file, url: url, settings: job.settings)
-        }), let executable = getBinaryURL(name: "ffmpeg") else {
-            throw LoudnessError.bookDecodingFailed
-        }
-        session.enqueueSegmentReset(title: "Buchlautheit messen", phase: .measuringLoudness, runID: context.id)
-        let list = folder.appendingPathComponent("analysis.txt")
-        // Die erzeugten Segmentnamen liegen ausschließlich im eigenen UUID-Ordner.
-        try paths.map { "file '\($0.replacingOccurrences(of: "'", with: "'\\''"))'" }.joined(separator: "\n").write(to: list, atomically: true, encoding: .utf8)
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = ["-nostdin", "-hide_banner", "-nostats", "-f", "concat", "-safe", "0", "-i", list.path, "-af", "loudnorm=I=-18:TP=-1:LRA=50:print_format=json", "-f", "null", "-"]
-        let pipe = Pipe()
-        process.standardError = pipe
-        process.standardOutput = FileHandle.nullDevice
-        let reader = ProcessPipeReader(handle: pipe.fileHandleForReading)
-        defer { context.unregister(process) }
-        guard try context.run(process) else { throw CancellationError() }
-        try? pipe.fileHandleForWriting.close()
-        reader.start()
-        process.waitUntilExit()
-        let background = ProcessTerminator.terminateRemainingOwnedGroup(process)
-        let data = reader.waitUntilEOF(timeout: 0.25)
-        if context.isCancelled { throw CancellationError() }
-        guard !reader.joinTimedOut, !reader.failedToReadOutput else {
-            throw LoudnessError.incompleteToolOutput
-        }
-        guard process.terminationStatus == 0, !background else {
-            throw LoudnessError.analysisFailed(diagnostic: String(decoding: data, as: UTF8.self))
-        }
-        try validateInputSnapshots(for: files, expected: job.plan.inputSnapshots)
-        return try LoudnessMeasurement.parse(data)
     }
 }

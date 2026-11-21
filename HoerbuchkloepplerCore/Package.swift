@@ -10,6 +10,9 @@ let package = Package(
         .library(
             name: "HoerbuchkloepplerCore",
             targets: ["HoerbuchkloepplerCore"]),
+        .library(
+            name: "HoerbuchkloepplerAppSupport",
+            targets: ["HoerbuchkloepplerAppSupport"]),
         .executable(
             name: "kloeppler",
             targets: ["kloeppler"])
@@ -22,6 +25,9 @@ let package = Package(
             name: "HoerbuchkloepplerCore",
             dependencies: [],
             resources: [.copy("Resources/bin")]),
+        .target(
+            name: "HoerbuchkloepplerAppSupport",
+            dependencies: ["HoerbuchkloepplerCore"]),
         .executableTarget(
             name: "kloeppler",
             dependencies: [
@@ -30,6 +36,9 @@ let package = Package(
             ]),
         .testTarget(
             name: "HoerbuchkloepplerCoreTests",
-            dependencies: ["HoerbuchkloepplerCore"])
+            dependencies: ["HoerbuchkloepplerCore"]),
+        .testTarget(
+            name: "HoerbuchkloepplerAppSupportTests",
+            dependencies: ["HoerbuchkloepplerAppSupport", "HoerbuchkloepplerCore"])
     ]
 )

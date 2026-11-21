@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		34E0E2982FAA8E3100EBB737 /* HoerbuchkloepplerCore in Frameworks */ = {isa = PBXBuildFile; productRef = 34E0E2972FAA8E3100EBB737 /* HoerbuchkloepplerCore */; };
+		54AA00012FB0000000000001 /* HoerbuchkloepplerAppSupport in Frameworks */ = {isa = PBXBuildFile; productRef = 54AA00012FB0000000000002 /* HoerbuchkloepplerAppSupport */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -41,6 +42,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				34E0E2982FAA8E3100EBB737 /* HoerbuchkloepplerCore in Frameworks */,
+				54AA00012FB0000000000001 /* HoerbuchkloepplerAppSupport in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -76,6 +78,7 @@
 			name = "Hörbuchklöppler";
 			packageProductDependencies = (
 				34E0E2972FAA8E3100EBB737 /* HoerbuchkloepplerCore */,
+				54AA00012FB0000000000002 /* HoerbuchkloepplerAppSupport */,
 			);
 			productName = "Hörbuchklöppler";
 			productReference = EAEA1F3E2FA63B2600432AC0 /* Hörbuchklöppler.app */;
@@ -273,7 +276,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.4.36;
+				MARKETING_VERSION = 1.4.37;
 				PRODUCT_BUNDLE_IDENTIFIER = danielmueller.Hoerbuchkloeppler;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -303,7 +306,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.4.36;
+				MARKETING_VERSION = 1.4.37;
 				PRODUCT_BUNDLE_IDENTIFIER = danielmueller.Hoerbuchkloeppler;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -351,6 +354,10 @@
 		34E0E2972FAA8E3100EBB737 /* HoerbuchkloepplerCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = HoerbuchkloepplerCore;
+		};
+		54AA00012FB0000000000002 /* HoerbuchkloepplerAppSupport */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = HoerbuchkloepplerAppSupport;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

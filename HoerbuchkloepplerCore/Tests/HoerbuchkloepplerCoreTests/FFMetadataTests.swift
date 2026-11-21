@@ -148,7 +148,7 @@ struct ParseFFMetadataChaptersTests {
         #expect(AudioFile.validatedEmbeddedArtworkData(png) == png)
         #expect(AudioFile.validatedEmbeddedArtworkData(Data("kein Bild".utf8)) == nil)
         #expect(AudioFile.validatedEmbeddedArtworkData(
-            Data(count: FFmpegWrapper.maximumCoverByteCount + 1)
+            Data(count: CoverArtwork.maximumByteCount + 1)
         ) == nil)
     }
 

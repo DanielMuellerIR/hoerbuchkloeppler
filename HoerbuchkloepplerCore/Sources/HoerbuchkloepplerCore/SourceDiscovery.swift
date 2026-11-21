@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 struct FileDiscoveryResult: Sendable {
     let files: [FoundFile]
@@ -7,25 +8,45 @@ struct FileDiscoveryResult: Sendable {
 
 /// `DirectoryEnumerator` darf seinen Fehler-Handler nebenläufig aufrufen. Der
 /// Recorder hält deshalb nur den ersten Fehler hinter einer kleinen Sperre fest.
-private final class DirectoryScanFailureRecorder: @unchecked Sendable {
-    private let lock = NSLock()
-    private var firstFailure: String?
+private final class DirectoryScanFailureRecorder: Sendable {
+    private let failure = OSAllocatedUnfairLock<String?>(initialState: nil)
 
     func record(url: URL, error: Error) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard firstFailure == nil else { return }
-        firstFailure = "\(url.path): \(error.localizedDescription)"
+        let message = "\(url.path): \(error.localizedDescription)"
+        failure.withLock { if $0 == nil { $0 = message } }
     }
 
     func snapshot() -> String? {
-        lock.lock()
-        defer { lock.unlock() }
-        return firstFailure
+        failure.withLock { $0 }
     }
 }
 
 enum SourceDiscovery {
+    enum Input: Sendable {
+        case folder(URL)
+        case file(FoundFile)
+        case unreadable(URL)
+    }
+
+    static func classify(_ urls: [URL], allowFolders: Bool) async -> [Input] {
+        let task = Task.detached {
+            urls.compactMap { url -> Input? in
+                guard !Task.isCancelled else { return nil }
+                var isDirectory: ObjCBool = false
+                if allowFolders, FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                   isDirectory.boolValue {
+                    return .folder(url)
+                }
+                return foundFile(at: url).map(Input.file) ?? .unreadable(url)
+            }
+        }
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
     /// Löst genau einen Dateipfad nach denselben Regeln wie der Ordnerscan auf.
     /// Verzeichnis- und defekte Symlinks sind keine importierbaren Dateien.
     static func foundFile(at url: URL) -> FoundFile? {
@@ -174,7 +195,7 @@ enum SourceDiscovery {
             // Dauer und Metadaten. Der LINKNAME bleibt trotzdem erhalten: er
             // bestimmt Reihenfolge und Kapiteltitel, sonst gäbe eine Sammlung
             // aus `01.wav -> Original-B.wav`, `02.wav -> Original-A.wav` die
-            // vom Nutzer festgelegte Reihenfolge auf (Review-Fund 2026-08-17).
+            // vom Nutzer festgelegte Reihenfolge auf.
             enumerator.skipDescendants()
             if let found = foundFile(at: fileURL) { files.append(found) }
         }

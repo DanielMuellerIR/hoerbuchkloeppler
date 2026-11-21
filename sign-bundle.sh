@@ -32,9 +32,7 @@ if [ "$IDENTITY" != "-" ]; then
 fi
 
 # --- Spuren des Build-Macs entfernen, BEVOR signiert wird ---------------------
-# (strip und Löschen machen eine vorhandene Signatur ungültig, deshalb hier und
-# nicht später.) Gefunden am 2026-08-04 in der ausgelieferten App: An zwei
-# Stellen stand der volle Pfad dieses Macs.
+# strip und Änderungen am Bundle machen vorhandene Signaturen ungültig.
 #
 # 1. Debug-Map in den Binärdateien. Der Compiler notiert für jede übersetzte
 #    Quelldatei den vollen Pfad ihrer .o-Datei. `strip -S` nimmt genau diese

@@ -15,7 +15,7 @@ struct TemporaryDirectoryTests {
         try Data("behalten".utf8).write(to: sentinel)
 
         #expect(throws: (any Error).self) {
-            try FFmpegWrapper.createOwnedTempDirectory(directory)
+            try OwnedTemporaryDirectory.create(directory)
         }
         #expect(FileManager.default.fileExists(atPath: sentinel.path))
     }
@@ -27,11 +27,11 @@ struct TemporaryDirectoryTests {
         for cancel in [false, true] {
             let directory = root.appendingPathComponent("HB_Temp_\(UUID().uuidString)")
             let parked = root.appendingPathComponent("ursprünglich-\(UUID().uuidString)")
-            try FFmpegWrapper.createOwnedTempDirectory(directory)
+            try OwnedTemporaryDirectory.create(directory)
             let context = ConversionContext()
             context.registerTempDirectory(directory)
             try FileManager.default.moveItem(at: directory, to: parked)
-            try FFmpegWrapper.createOwnedTempDirectory(directory)
+            try OwnedTemporaryDirectory.create(directory)
             let sentinel = directory.appendingPathComponent("wichtig.txt")
             try Data("behalten".utf8).write(to: sentinel)
 
@@ -53,7 +53,7 @@ struct TemporaryDirectoryTests {
         defer { try? FileManager.default.removeItem(at: root) }
         for cancel in [false, true] {
             let directory = root.appendingPathComponent("HB_Temp_\(UUID().uuidString)")
-            try FFmpegWrapper.createOwnedTempDirectory(directory)
+            try OwnedTemporaryDirectory.create(directory)
             let context = ConversionContext()
             context.registerTempDirectory(directory)
             try Data("Segment".utf8).write(
@@ -77,26 +77,28 @@ struct TemporaryDirectoryTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let directory = root.appendingPathComponent("HB_Temp_\(UUID().uuidString)")
         let parked = root.appendingPathComponent("ursprünglich")
-        try FFmpegWrapper.createOwnedTempDirectory(directory)
+        try OwnedTemporaryDirectory.create(directory)
         let identity = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: directory, followSymlink: false)
+            FileSystemEntry.identity(at: directory, followSymlink: false)
         )
         var hookError: (any Error)?
 
-        FFmpegWrapper.removeOwnedTempDirectory(
+        OwnedTemporaryDirectory.remove(
             directory,
             expectedIdentity: identity,
-            beforeQuarantine: {
-                do {
-                    try FileManager.default.moveItem(at: directory, to: parked)
-                    try FFmpegWrapper.createOwnedTempDirectory(directory)
-                    try Data("behalten".utf8).write(
-                        to: directory.appendingPathComponent("wichtig.txt")
-                    )
-                } catch {
-                    hookError = error
+            checkpoints: .init(
+                beforeQuarantine: {
+                    do {
+                        try FileManager.default.moveItem(at: directory, to: parked)
+                        try OwnedTemporaryDirectory.create(directory)
+                        try Data("behalten".utf8).write(
+                            to: directory.appendingPathComponent("wichtig.txt")
+                        )
+                    } catch {
+                        hookError = error
+                    }
                 }
-            }
+            )
         )
 
         #expect(hookError == nil)
@@ -112,40 +114,42 @@ struct TemporaryDirectoryTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let directory = root.appendingPathComponent("HB_Temp_\(UUID().uuidString)")
         let parked = root.appendingPathComponent("ursprüngliche-quarantaene")
-        try FFmpegWrapper.createOwnedTempDirectory(directory)
+        try OwnedTemporaryDirectory.create(directory)
         try Data("eigen".utf8).write(
             to: directory.appendingPathComponent("segment.m4a")
         )
         let identity = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: directory, followSymlink: false)
+            FileSystemEntry.identity(at: directory, followSymlink: false)
         )
         var replacementURL: URL?
         var hookError: (any Error)?
 
-        FFmpegWrapper.removeOwnedTempDirectory(
+        OwnedTemporaryDirectory.remove(
             directory,
             expectedIdentity: identity,
-            beforeBoundRemoval: {
-                do {
-                    let quarantine = try #require(
-                        FileManager.default.contentsOfDirectory(
-                            at: root,
-                            includingPropertiesForKeys: nil
-                        ).first { $0.lastPathComponent.hasPrefix(".HB_Cleanup_") }
-                    )
-                    try FileManager.default.moveItem(at: quarantine, to: parked)
-                    try FileManager.default.createDirectory(
-                        at: quarantine,
-                        withIntermediateDirectories: false
-                    )
-                    try Data("behalten".utf8).write(
-                        to: quarantine.appendingPathComponent("wichtig.txt")
-                    )
-                    replacementURL = quarantine
-                } catch {
-                    hookError = error
+            checkpoints: .init(
+                beforeBoundRemoval: {
+                    do {
+                        let quarantine = try #require(
+                            FileManager.default.contentsOfDirectory(
+                                at: root,
+                                includingPropertiesForKeys: nil
+                            ).first { $0.lastPathComponent.hasPrefix(".HB_Cleanup_") }
+                        )
+                        try FileManager.default.moveItem(at: quarantine, to: parked)
+                        try FileManager.default.createDirectory(
+                            at: quarantine,
+                            withIntermediateDirectories: false
+                        )
+                        try Data("behalten".utf8).write(
+                            to: quarantine.appendingPathComponent("wichtig.txt")
+                        )
+                        replacementURL = quarantine
+                    } catch {
+                        hookError = error
+                    }
                 }
-            }
+            )
         )
 
         let replacement = try #require(replacementURL)
@@ -168,7 +172,7 @@ struct TemporaryDirectoryTests {
         for directory in [unowned, misleading] {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         }
-        try FFmpegWrapper.createOwnedTempDirectory(orphan)
+        try OwnedTemporaryDirectory.create(orphan)
         try "987654".write(
             to: orphan.appendingPathComponent(".owner-pid"),
             atomically: true,
@@ -182,7 +186,7 @@ struct TemporaryDirectoryTests {
             )
         }
 
-        FFmpegWrapper.cleanupOldTempDirectories(
+        OwnedTemporaryDirectory.cleanupOldTempDirectories(
             in: root,
             now: Date(timeIntervalSince1970: 200_000)
         )
@@ -197,16 +201,16 @@ struct TemporaryDirectoryTests {
         let root = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
         let cleanup = root.appendingPathComponent(".HB_Cleanup_987654-\(UUID().uuidString)")
-        try FFmpegWrapper.createOwnedTempDirectory(cleanup, ownerPID: 987654)
+        try OwnedTemporaryDirectory.create(cleanup, ownerPID: 987654)
         let entry = cleanup.appendingPathComponent("entry")
         try Data("eigener Rest".utf8).write(to: entry)
-        let identity = try #require(FFmpegWrapper.fileSystemIdentity(at: entry, followSymlink: false))
-        try FFmpegWrapper.writeCleanupEntryIdentity(identity, in: cleanup)
+        let identity = try #require(FileSystemEntry.identity(at: entry, followSymlink: false))
+        try CleanupEntryRecord.write(identity, in: cleanup)
         try Data("Recovery".utf8).write(to: cleanup.appendingPathComponent("fremd.txt"))
         try FileManager.default.setAttributes([.creationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: cleanup.path)
-        FFmpegWrapper.cleanupOutputQuarantines(in: root)
+        OutputCleanup.removeOrphanedQuarantines(in: root)
         for _ in 0..<2 {
-            FFmpegWrapper.cleanupOldTempDirectories(in: root, now: Date(timeIntervalSince1970: 200_000))
+            OwnedTemporaryDirectory.cleanupOldTempDirectories(in: root, now: Date(timeIntervalSince1970: 200_000))
         }
         let remains = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
         #expect(remains.count == 1)
@@ -222,14 +226,36 @@ struct TemporaryDirectoryTests {
         let invalid = root.appendingPathComponent(".HB_Cleanup_987654-\(UUID().uuidString)")
         let loudness = root.appendingPathComponent("HB_Loudness_\(UUID().uuidString)")
         for directory in [invalid, loudness] {
-            try FFmpegWrapper.createOwnedTempDirectory(directory, ownerPID: 987654)
+            try OwnedTemporaryDirectory.create(directory, ownerPID: 987654)
             try FileManager.default.setAttributes([.creationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: directory.path)
         }
         try Data("defekt".utf8).write(to: invalid.appendingPathComponent(".entry-identity.json"))
         try Data("WAV-Rest".utf8).write(to: loudness.appendingPathComponent("audio.wav"))
-        FFmpegWrapper.cleanupOldTempDirectories(in: root, now: Date(timeIntervalSince1970: 200_000))
+        OwnedTemporaryDirectory.cleanupOldTempDirectories(in: root, now: Date(timeIntervalSince1970: 200_000))
         #expect(FileManager.default.fileExists(atPath: invalid.path))
         #expect(!FileManager.default.fileExists(atPath: loudness.path))
+    }
+
+    @Test(
+        "Temp-Sweep erhält nicht zuordenbare Nutzdaten alter Quarantänen",
+        arguments: ["entry", "entry.m4b", ".HB_EntryCleanup", "recovery.txt"]
+    )
+    func tempSweepPreservesUnrecordedOutput(_ name: String) throws {
+        let root = try makeTestDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cleanup = root.appendingPathComponent(".HB_Cleanup_987654-\(UUID().uuidString)")
+        try OwnedTemporaryDirectory.create(cleanup, ownerPID: 987654)
+        let payload = cleanup.appendingPathComponent(name)
+        let data = Data("möglicher Recovery-Rest".utf8)
+        try data.write(to: payload)
+        try FileManager.default.setAttributes(
+            [.creationDate: Date(timeIntervalSince1970: 1)],
+            ofItemAtPath: cleanup.path
+        )
+
+        OwnedTemporaryDirectory.cleanupOldTempDirectories(in: root, now: Date(timeIntervalSince1970: 200_000))
+
+        #expect(try Data(contentsOf: payload) == data)
     }
 
     @Test("Altlastenbereinigung erfasst markierte Cleanup-Quarantänen")
@@ -258,7 +284,7 @@ struct TemporaryDirectoryTests {
             )
         }
 
-        FFmpegWrapper.cleanupOldTempDirectories(
+        OwnedTemporaryDirectory.cleanupOldTempDirectories(
             in: root,
             now: Date(timeIntervalSince1970: 200_000)
         )

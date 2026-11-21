@@ -6,7 +6,9 @@ from pathlib import Path
 import plistlib
 import shutil
 import subprocess
-import tempfile
+import signal
+
+from cli_temp import test_workspace
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -210,8 +212,37 @@ def run_case(root, executable, name, *, existing=True, arguments=(), failure=Non
             if changed_identity:
                 env["HK_INSTALL_CHANGED_PID"] = str(owned_processes[0].pid)
                 env["HK_INSTALL_PS_COUNT"] = str(case / "ps-count")
-        result = subprocess.run(["bash", str(workspace / "install.sh"), *arguments],
-                                env=env, capture_output=True, text=True, timeout=30)
+        command = ["bash", str(workspace / "install.sh"), *arguments]
+        with subprocess.Popen(
+            command,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        ) as installer:
+            try:
+                stdout, stderr = installer.communicate(timeout=90)
+            except subprocess.TimeoutExpired as timeout:
+                try:
+                    os.killpg(installer.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    stdout, stderr = installer.communicate(timeout=5)
+                    (case / "timeout.log").write_text(stdout + "\n" + stderr)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(installer.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    (case / "timeout.log").write_bytes(
+                        (timeout.stdout or b"") + b"\n" + (timeout.stderr or b"")
+                    )
+                raise
+            result = subprocess.CompletedProcess(
+                command, installer.returncode, stdout, stderr
+            )
         alive = [process.poll() is None for process in owned_processes]
     finally:
         for process in owned_processes:
@@ -235,7 +266,7 @@ def run_case(root, executable, name, *, existing=True, arguments=(), failure=Non
 
 
 def main():
-    with tempfile.TemporaryDirectory(prefix="hk-install-fixtures-") as directory:
+    with test_workspace("hk-install-fixtures-") as directory:
         root = Path(directory).resolve()
         assert not root.is_relative_to("/Applications")
         shutil.copytree(REPO / "tools/InstallBundle", root / "InstallBundle",

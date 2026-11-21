@@ -5,6 +5,15 @@ import Darwin
 
 @Suite("Prozessübergreifende Zielsperren")
 struct OutputLeaseTests {
+    private let tryExclusiveLock = """
+        import fcntl, sys
+        handle = open(sys.argv[1], 'a')
+        try:
+            fcntl.lockf(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit(9)
+        """
+
     @Test("Nur ein Lauf kann dasselbe Ziel reservieren")
     func outputLeaseIsExclusiveWithinProcess() throws {
         let directory = try makeTestDirectory()
@@ -60,19 +69,10 @@ struct OutputLeaseTests {
         let output = directory.appendingPathComponent("Buch.m4b")
         var lease: OutputLeaseSet? = try OutputLeases.acquire(for: [output])
         let lockPath = OutputLeases.outputLockURL(for: output).path
-        let script = """
-        import fcntl, sys
-        handle = open(sys.argv[1], 'a')
-        try:
-            fcntl.lockf(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise SystemExit(9)
-        """
-
         let blocked = withExtendedLifetime(lease) {
-            FFmpegWrapper.runCapturedProcess(
+            ProcessRunner.capture(
                 executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
-                arguments: ["-c", script, lockPath],
+                arguments: ["-c", tryExclusiveLock, lockPath],
                 timeout: 2
             )
         }
@@ -83,9 +83,9 @@ struct OutputLeaseTests {
         #expect(blockedStatus == 9)
 
         lease = nil
-        let available = FFmpegWrapper.runCapturedProcess(
+        let available = ProcessRunner.capture(
             executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
-            arguments: ["-c", script, lockPath],
+            arguments: ["-c", tryExclusiveLock, lockPath],
             timeout: 2
         )
         guard case .completed(let availableStatus, _) = available else {
@@ -93,5 +93,44 @@ struct OutputLeaseTests {
             return
         }
         #expect(availableStatus == 0)
+    }
+
+    @Test("Ein ersetzter Zielsymlink bleibt bis zum Ende des Exports gesperrt")
+    func outputLeaseRemainsHeldWhenTargetSymlinkIsReplaced() throws {
+        let directory = try makeTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let linked = directory.appendingPathComponent("Original.m4b")
+        try Data("Erhalten".utf8).write(to: linked)
+        let output = directory.appendingPathComponent("Buch.m4b")
+        try FileManager.default.createSymbolicLink(at: output, withDestinationURL: linked)
+        let legacyLock = OutputLeases.outputLockURL(for: output)
+        var lease: OutputLeaseSet? = try OutputLeases.acquire(for: [output])
+
+        let replacement = directory.appendingPathComponent("staging.m4b")
+        try Data("Neu".utf8).write(to: replacement)
+        try #require(replacement.path.withCString { staged in
+            output.path.withCString { target in
+                Darwin.renameatx_np(AT_FDCWD, staged, AT_FDCWD, target, UInt32(RENAME_SWAP))
+            }
+        } == 0)
+        let currentLock = OutputLeases.outputLockURL(for: output)
+        #expect(legacyLock != currentLock)
+
+        withExtendedLifetime(lease) {
+            #expect(throws: ConversionOutputError.self) { _ = try OutputLeases.acquire(for: [output]) }
+            for lock in [legacyLock, currentLock] {
+                let result = ProcessRunner.capture(executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
+                    arguments: ["-c", tryExclusiveLock, lock.path],
+                    timeout: 2)
+                guard case .completed(let status, _) = result else {
+                    Issue.record("Zweiter Prozess lieferte keinen Exit-Status")
+                    continue
+                }
+                #expect(status == 9)
+            }
+        }
+        lease = nil
+        _ = try OutputLeases.acquire(for: [output])
+        #expect(try String(contentsOf: linked, encoding: .utf8) == "Erhalten")
     }
 }

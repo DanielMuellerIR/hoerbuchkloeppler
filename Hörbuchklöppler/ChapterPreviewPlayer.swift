@@ -107,9 +107,8 @@ final class ChapterPreviewPlayer: ObservableObject {
         }
     }
 
-    /// Erst nach dem Sprung an den Kapitelanfang ist die Abspielposition
-    /// aussagekräftig. Vorher lieferte sie 0, und ein „Teilen" auf einem
-    /// inneren m4b-Kapitel rechnete gegen dessen Startzeit ins Negative.
+    /// Erst nach dem Sprung an den Kapitelanfang ist die Position für
+    /// das Teilen eines Kapitels aussagekräftig.
     var absolutePlaybackTime: Double? {
         guard let player, player === seekedPlayer else { return nil }
         return player.currentTime().seconds

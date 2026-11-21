@@ -61,7 +61,7 @@ struct SourceDiscoveryTests {
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
 
         let session = ConversionSession(settings: AudioSettings())
-        let found = try #require(ConversionSession.foundFile(at: link))
+        let found = try #require(SourceDiscovery.foundFile(at: link))
         let loaded = await session.loadAudioFiles(from: found)
 
         #expect(loaded.files.count == 1)
@@ -79,7 +79,7 @@ struct SourceDiscoveryTests {
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
 
         let session = ConversionSession(settings: AudioSettings())
-        let found = try #require(ConversionSession.foundFile(at: link))
+        let found = try #require(SourceDiscovery.foundFile(at: link))
         let loaded = await session.loadAudioFiles(from: found)
 
         #expect(loaded.files.isEmpty)
@@ -93,7 +93,7 @@ struct SourceDiscoveryTests {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let video = directory.appendingPathComponent("nur-video.mp4")
-        let ffmpeg = try #require(FFmpegWrapper.getBinaryURL(name: "ffmpeg"))
+        let ffmpeg = try #require(ToolLocator.binaryURL(name: "ffmpeg"))
         let process = Process()
         process.executableURL = ffmpeg
         process.arguments = [
@@ -106,7 +106,7 @@ struct SourceDiscoveryTests {
 
         let session = ConversionSession(settings: AudioSettings())
         session.logSink = { _ in }
-        let found = try #require(ConversionSession.foundFile(at: video))
+        let found = try #require(SourceDiscovery.foundFile(at: video))
         let loaded = await session.loadAudioFiles(from: found)
         await Task.yield()
 

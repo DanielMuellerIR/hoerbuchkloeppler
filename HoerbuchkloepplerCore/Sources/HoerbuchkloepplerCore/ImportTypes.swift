@@ -1,6 +1,6 @@
 import Foundation
 
-public struct ImportToken: Equatable, Sendable {
+struct ImportToken: Equatable, Sendable {
     let generation: UUID
     let coverRevision: UInt
     let allowsSelectionUI: Bool
@@ -69,7 +69,7 @@ public struct AudioImportFailure: Equatable, Sendable {
     }
 
     var logMessage: String {
-        "❌ \(sourceDescription): \(message)."
+        "\(sourceDescription): \(message)."
     }
 }
 

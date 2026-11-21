@@ -255,8 +255,8 @@ struct CancellationIsolationTests {
             .appendingPathComponent("HB_Temp_\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: firstDirectory) }
         defer { try? FileManager.default.removeItem(at: secondDirectory) }
-        try FFmpegWrapper.createOwnedTempDirectory(firstDirectory)
-        try FFmpegWrapper.createOwnedTempDirectory(secondDirectory)
+        try OwnedTemporaryDirectory.create(firstDirectory)
+        try OwnedTemporaryDirectory.create(secondDirectory)
         let first = ConversionContext()
         let second = ConversionContext()
         first.registerTempDirectory(firstDirectory)
@@ -327,7 +327,7 @@ struct CancellationIsolationTests {
         #expect(session.progress == 0.6)
         #expect(session.eventLogs.map(\.message) == [
             "Vor dem Abschluss",
-            "🏁 Vorgang mit Fehlern beendet."
+            "Vorgang mit Fehlern beendet."
         ])
         #expect(session.completedOutputURLs == [output])
         #expect(session.lastConversionSucceeded == false)
@@ -338,10 +338,10 @@ struct CancellationIsolationTests {
     func cancellationRemovesStagedOutput() throws {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let staged = FFmpegWrapper.stagingOutputURL(
+        let staged = OutputArtifactNames.stagingOutputURL(
             for: directory.appendingPathComponent("Buch.m4b")
         )
-        try FFmpegWrapper.createOwnedStagingOutput(staged)
+        try OutputStaging.createLegacyOutput(staged)
         try Data("unvollständig".utf8).write(to: staged)
         let context = ConversionContext()
         context.registerStagedOutput(staged)
@@ -371,10 +371,10 @@ struct CancellationIsolationTests {
     func cancellationEscalatesAndThenCleansFiles() throws {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let staged = FFmpegWrapper.stagingOutputURL(
+        let staged = OutputArtifactNames.stagingOutputURL(
             for: directory.appendingPathComponent("Buch.m4b")
         )
-        try FFmpegWrapper.createOwnedStagingOutput(staged)
+        try OutputStaging.createLegacyOutput(staged)
         let context = ConversionContext()
         context.registerStagedOutput(staged)
 
@@ -439,10 +439,10 @@ struct CancellationIsolationTests {
     func cancellationCleanupLeavesCallerThread() throws {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let staged = FFmpegWrapper.stagingOutputURL(
+        let staged = OutputArtifactNames.stagingOutputURL(
             for: directory.appendingPathComponent("Buch.m4b")
         )
-        let ownership = try FFmpegWrapper.createOwnedStagingOutput(staged)
+        let ownership = try OutputStaging.createLegacyOutput(staged)
         let probe = CallerThreadProbe(callerThread: Thread.current)
         let context = ConversionContext { _, _ in probe.record() }
         context.registerStagedOutput(staged, ownership: ownership)
@@ -511,7 +511,7 @@ struct CancellationIsolationTests {
 
         let messages = session.eventLogs.map(\.message)
         #expect(messages.count == 2)
-        #expect(messages.first == "🛑 Vorgang wird abgebrochen und bereinigt.")
+        #expect(messages.first == "Vorgang wird abgebrochen und bereinigt.")
         #expect(messages.last?.contains("keine gültige Besitzer-Markierung") == true)
         #expect(session.conversionStatus == "Abgebrochen")
         #expect(!session.isCurrentConversion(context.id))
@@ -566,9 +566,9 @@ struct CancellationIsolationTests {
             .appendingPathComponent("HB_Temp_Test-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        try FFmpegWrapper.createOwnedTempDirectory(directory)
+        try OwnedTemporaryDirectory.create(directory)
 
-        #expect(FFmpegWrapper.temporaryDirectoryHasLiveOwner(directory))
+        #expect(OwnedTemporaryDirectory.hasLiveOwner(directory))
     }
 
     /// Der Positivfall allein genügt nicht: Fiele die Lebendprüfung weg, bliebe
@@ -582,10 +582,10 @@ struct CancellationIsolationTests {
 
         let unmarked = root.appendingPathComponent("ohne-marke")
         try FileManager.default.createDirectory(at: unmarked, withIntermediateDirectories: true)
-        #expect(!FFmpegWrapper.temporaryDirectoryHasLiveOwner(unmarked))
+        #expect(!OwnedTemporaryDirectory.hasLiveOwner(unmarked))
 
         let dead = root.appendingPathComponent("toter-besitzer")
-        try FFmpegWrapper.createOwnedTempDirectory(dead)
+        try OwnedTemporaryDirectory.create(dead)
         // Ein kurzlebiges Kind liefert eine PID, die beim Prüfen sicher tot ist.
         let corpse = Process()
         corpse.executableURL = URL(fileURLWithPath: "/usr/bin/true")
@@ -593,6 +593,6 @@ struct CancellationIsolationTests {
         corpse.waitUntilExit()
         try Data(String(corpse.processIdentifier).utf8)
             .write(to: dead.appendingPathComponent(".owner-pid"))
-        #expect(!FFmpegWrapper.temporaryDirectoryHasLiveOwner(dead))
+        #expect(!OwnedTemporaryDirectory.hasLiveOwner(dead))
     }
 }

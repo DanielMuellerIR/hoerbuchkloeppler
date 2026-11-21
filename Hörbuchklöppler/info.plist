@@ -79,6 +79,6 @@
 	<key>NSRemovableVolumesUsageDescription</key>
 	<string>Hörbuchklöppler liest Audiodateien und Projekte von externen Laufwerken und speichert dort Hörbücher und Projekte.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
-	<string>Benötigt für das Speichern von Hörbüchern im Download-Ordner</string>
+	<string>Hörbuchklöppler liest Audiodateien und Projekte aus dem Downloads-Ordner und speichert dort Hörbücher und Projekte.</string>
 </dict>
 </plist>

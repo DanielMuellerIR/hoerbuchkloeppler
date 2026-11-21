@@ -67,10 +67,7 @@ public struct AudioSettings: Codable, Equatable, Sendable {
     }
 
     /// Der Bitratenstring als Bit pro Sekunde, oder `nil`, wenn er nicht der
-    /// dokumentierten Form `<zahl>[k]` entspricht. Einzige Umrechnungsstelle:
-    /// Die Vorschau hatte eine eigene Fassung mit `replacingOccurrences(of: "k")`
-    /// und einem Force-Unwrap, die bei jeder Erweiterung des Formats gebrochen
-    /// wäre.
+    /// dokumentierten Form `<zahl>[k]` entspricht.
     public var bitsPerSecond: Int? { Self.bitsPerSecond(bitrate) }
 
     static func bitsPerSecond(_ value: String) -> Int? {

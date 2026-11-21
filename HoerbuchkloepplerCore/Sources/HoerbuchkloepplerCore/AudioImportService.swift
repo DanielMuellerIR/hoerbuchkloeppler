@@ -1,19 +1,19 @@
 import Foundation
 import AVFoundation
 import Darwin
+import os
 
 /// Zähler für tatsächlich ausgeführte Analyseanforderungen. Ein gebündelter
 /// AVFoundation-Aufruf lädt drei Eigenschaften; Artwork-Daten bleiben separat.
-public struct ImportAnalysisMetrics: Sendable, Codable {
-    public var sourceAnalyses = 0
-    public var assetLoadRequests = 0
-    public var artworkDataRequests = 0
-    public var trackLanguageRequests = 0
-    public var chapterProcessRequests = 0
+struct ImportAnalysisMetrics: Sendable, Codable {
+    var sourceAnalyses = 0
+    var assetLoadRequests = 0
+    var artworkDataRequests = 0
+    var trackLanguageRequests = 0
+    var chapterProcessRequests = 0
 }
 
 /// Der Importdienst benutzt denselben Snapshot-Typ wie Staging und Projektformat.
-/// Vorher hatte er eine eigene Fassung mit einer vierten Feldmenge.
 typealias ImportSourceIdentity = FileSystemIdentity
 
 extension FileSystemIdentity {
@@ -48,26 +48,27 @@ enum SourceAnalysisResult: Sendable {
     case cancelled
 }
 
-public final class AudioImportService: @unchecked Sendable {
-    private let lock = NSLock()
-    private var configuredWorkers = 4
-    private var counters = ImportAnalysisMetrics()
-    private var artworkCache: [URL: ImportedSourceAnalysis] = [:]
+final class AudioImportService: Sendable {
+    private struct State: Sendable {
+        var configuredWorkers = 4
+        var counters = ImportAnalysisMetrics()
+        var artworkCache: [URL: ImportedSourceAnalysis] = [:]
+    }
 
-    public init() {}
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     /// Begrenzte Parallelität für lokale und langsamere externe Datenträger.
     /// Höhere Werte bleiben auch bei fehlerhaften Settings auf acht begrenzt.
-    public var workerLimit: Int {
-        get { lock.withLock { configuredWorkers } }
-        set { lock.withLock { configuredWorkers = min(8, max(1, newValue)) } }
+    var workerLimit: Int {
+        get { state.withLock { $0.configuredWorkers } }
+        set { state.withLock { $0.configuredWorkers = min(8, max(1, newValue)) } }
     }
-    public var metrics: ImportAnalysisMetrics { lock.withLock { counters } }
-    func recordChapterRequest() { lock.withLock { counters.chapterProcessRequests += 1 } }
+    var metrics: ImportAnalysisMetrics { state.withLock { $0.counters } }
+    func recordChapterRequest() { state.withLock { $0.counters.chapterProcessRequests += 1 } }
 
     func analyze(_ file: FoundFile) async -> SourceAnalysisResult {
         guard !Task.isCancelled else { return .cancelled }
-        lock.withLock { counters.sourceAnalyses += 1 }
+        state.withLock { $0.counters.sourceAnalyses += 1 }
         // Weichen sichtbarer und aufgelöster Pfad schon hier voneinander ab, ist
         // die Quelle zwischen Scan und Analyse getauscht worden. Die drei
         // späteren Prüfungen melden denselben Sachverhalt als `.sourceChanged`;
@@ -80,7 +81,7 @@ public final class AudioImportService: @unchecked Sendable {
         return await withTaskCancellationHandler {
             do {
                 guard !Task.isCancelled else { return .cancelled }
-                lock.withLock { counters.assetLoadRequests += 1 }
+                state.withLock { $0.counters.assetLoadRequests += 1 }
                 let (tracks, duration, metadata) = try await asset.load(.tracks, .duration, .metadata)
                 guard !Task.isCancelled else { return .cancelled }
                 guard ImportSourceIdentity(followingSymlink: file.readURL)?.matchesContentSnapshot(identity) == true,
@@ -103,7 +104,7 @@ public final class AudioImportService: @unchecked Sendable {
                 }
                 var bookMetadata = await Self.bookMetadata(from: metadata)
                 if bookMetadata["language"] == nil {
-                    lock.withLock { counters.trackLanguageRequests += 1 }
+                    state.withLock { $0.counters.trackLanguageRequests += 1 }
                     if let (code, extended) = try? await audioTrack.load(.languageCode, .extendedLanguageTag),
                        let language = extended ?? code, !language.isEmpty, language != "und" {
                         bookMetadata["language"] = language
@@ -120,7 +121,7 @@ public final class AudioImportService: @unchecked Sendable {
                     artworkItems: metadata.filter(AudioFile.isArtworkItem),
                     bookMetadata: bookMetadata
                 )
-                lock.withLock { artworkCache[file.readURL] = analysis }
+                state.withLock { $0.artworkCache[file.readURL] = analysis }
                 return .success(analysis)
             } catch {
                 if Task.isCancelled { return .cancelled }
@@ -134,8 +135,8 @@ public final class AudioImportService: @unchecked Sendable {
     /// Zusätzliche Buchfelder aus demselben AVFoundation-Snapshot. Die Keys
     /// entsprechen den Ausgabe-Tags und lassen sich ohne GUI-Abhängigkeit in
     /// ein Projekt übernehmen. Ein veränderter Quellpfad liefert keine alten Werte.
-    public func metadata(for url: URL) -> [String: String]? {
-        guard let analysis = lock.withLock({ artworkCache[url] }), analysis.isCurrent() else { return nil }
+    func metadata(for url: URL) -> [String: String]? {
+        guard let analysis = state.withLock({ $0.artworkCache[url] }), analysis.isCurrent() else { return nil }
         return analysis.bookMetadata
     }
 
@@ -191,21 +192,21 @@ public final class AudioImportService: @unchecked Sendable {
         return result
     }
 
-    public func clearCachedArtwork() { lock.withLock { artworkCache.removeAll() } }
+    func clearCachedArtwork() { state.withLock { $0.artworkCache.removeAll() } }
 
     func retainCachedArtwork(for urls: [URL]) {
         let retained = Set(urls)
-        lock.withLock { artworkCache = artworkCache.filter { retained.contains($0.key) } }
+        state.withLock { $0.artworkCache = $0.artworkCache.filter { retained.contains($0.key) } }
     }
 
     func artwork(at url: URL) async -> Data? {
-        if let cached = lock.withLock({ artworkCache[url] }), cached.isCurrent() {
+        if let cached = state.withLock({ $0.artworkCache[url] }), cached.isCurrent() {
             return await artwork(from: cached)
         }
         // Ein veralteter Eintrag war schlechter als gar keiner: Er lieferte
         // dauerhaft `nil`, während ein Cache-Fehltreffer neu analysiert und ein
         // inzwischen vorhandenes Cover gefunden hätte.
-        lock.withLock { artworkCache[url] = nil }
+        state.withLock { $0.artworkCache[url] = nil }
         guard case .success(let analysis) = await analyze(FoundFile(source: url, resolved: url)) else { return nil }
         return await artwork(from: analysis)
     }
@@ -215,7 +216,7 @@ public final class AudioImportService: @unchecked Sendable {
         let data = await AudioFile.extractEmbeddedArtwork(
             from: analysis.file.url,
             candidateCount: analysis.artworkItems.count
-        ) { [self] in lock.withLock { counters.artworkDataRequests += 1 } }
+        ) { [self] in state.withLock { $0.counters.artworkDataRequests += 1 } }
         guard !Task.isCancelled, analysis.isCurrent() else { return nil }
         return data
     }

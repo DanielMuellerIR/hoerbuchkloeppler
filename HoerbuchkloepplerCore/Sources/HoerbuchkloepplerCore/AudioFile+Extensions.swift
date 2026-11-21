@@ -67,17 +67,17 @@ extension AudioFile {
         candidateCount: Int,
         onRequest: @Sendable () -> Void = {}
     ) async -> Data? {
-        guard candidateCount > 0, !taskCancellationRequested(),
-              let executable = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else { return nil }
+        guard candidateCount > 0, !Task.isCancelled,
+              let executable = ToolLocator.binaryURL(name: "ffmpeg") else { return nil }
         let extractionStart = DispatchTime.now().uptimeNanoseconds
         for index in 0..<min(64, candidateCount) {
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - extractionStart) / 1_000_000_000
             let remainingTimeout = 15 - elapsed
-            guard remainingTimeout > 0, !taskCancellationRequested() else { return nil }
+            guard remainingTimeout > 0, !Task.isCancelled else { return nil }
             let process = Process()
             process.executableURL = executable
             process.arguments = [
-                "-nostdin", "-v", "quiet", "-max_alloc", String(FFmpegWrapper.maximumCoverByteCount),
+                "-nostdin", "-v", "quiet", "-max_alloc", String(CoverArtwork.maximumByteCount),
                 "-i", url.path, "-map", "0:v:disp:attached_pic:\(index)",
                 "-c", "copy", "-frames:v", "1", "-f", "image2pipe", "pipe:1"
             ]
@@ -102,7 +102,7 @@ extension AudioFile {
                         let start = DispatchTime.now().uptimeNanoseconds
                         let output = readAnalysisOutput(
                             from: pipe.fileHandleForReading,
-                            maximumByteCount: FFmpegWrapper.maximumCoverByteCount,
+                            maximumByteCount: CoverArtwork.maximumByteCount,
                             timeout: remainingTimeout,
                             shouldCancel: { cancellation.isCancelled }
                         ) { ProcessTerminator.terminateAndWait([process]) }
@@ -119,7 +119,7 @@ extension AudioFile {
                     } catch { return (nil, false) }
                 }
             } onCancel: { cancellation.cancel() }
-            guard !taskCancellationRequested() else { return nil }
+            guard !Task.isCancelled else { return nil }
             if let data = result.data { return data }
             if !result.streamFound { break }
         }
@@ -180,10 +180,10 @@ extension AudioFile {
         let url = file.readURL
         let visibleURL = file.source
         guard file.isChapterContainer else { return .files([]) }
-        guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
+        guard !shouldCancel(), !Task.isCancelled else { return .cancelled }
 
-        guard let ffmpegURL = FFmpegWrapper.getBinaryURL(name: "ffmpeg") else {
-            log("⚠️ ffmpeg wurde nicht gefunden. Kapitel-Extraktion übersprungen.")
+        guard let ffmpegURL = ToolLocator.binaryURL(name: "ffmpeg") else {
+            log("ffmpeg wurde nicht gefunden. Kapitel-Extraktion übersprungen.")
             return .files([await fallbackFile()])
         }
 
@@ -258,41 +258,41 @@ extension AudioFile {
                     ProcessTerminator.terminateRemainingOwnedGroup(process)
                     guard !shouldCancel(), !cancellation.isCancelled else { return .cancelled }
                     guard !output.timedOut, processExited else {
-                        log("⚠️ Kapitelanalyse für \(visibleURL.lastPathComponent) nach \(Int(chapterExtractionTimeout)) Sekunden abgebrochen. Datei wird übersprungen.")
+                        log("Kapitelanalyse für \(visibleURL.lastPathComponent) nach \(Int(chapterExtractionTimeout)) Sekunden abgebrochen. Datei wird übersprungen.")
                         return .failed(.chapterAnalysisTimedOut)
                     }
                     guard !output.readFailed else {
-                        return .fallback("⚠️ Kapitelmetadaten aus \(visibleURL.lastPathComponent) konnten nicht vollständig gelesen werden. Nutze die Datei als ein Kapitel.")
+                        return .fallback("Kapitelmetadaten aus \(visibleURL.lastPathComponent) konnten nicht vollständig gelesen werden. Nutze die Datei als ein Kapitel.")
                     }
                     guard !output.exceededLimit else {
-                        return .fallback("⚠️ Kapitelmetadaten in \(visibleURL.lastPathComponent) überschreiten 8 MiB. Nutze die Datei als ein Kapitel.")
+                        return .fallback("Kapitelmetadaten in \(visibleURL.lastPathComponent) überschreiten 8 MiB. Nutze die Datei als ein Kapitel.")
                     }
                     guard process.terminationStatus == 0 else {
-                        return .fallback("⚠️ ffmpeg konnte Kapitel aus \(visibleURL.lastPathComponent) nicht vollständig lesen. Nutze die Datei als ein Kapitel.")
+                        return .fallback("ffmpeg konnte Kapitel aus \(visibleURL.lastPathComponent) nicht vollständig lesen. Nutze die Datei als ein Kapitel.")
                     }
 
                     guard let text = String(data: output.data, encoding: .utf8) else {
-                        return .fallback("⚠️ FFMETADATA von \(visibleURL.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
+                        return .fallback("FFMETADATA von \(visibleURL.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
                     }
                     let chapters = FFMetadata.decodeChapters(text)
                     guard !chapters.isEmpty else {
-                        return .fallback("⚠️ Keine Kapitel in \(visibleURL.lastPathComponent) gefunden. Nutze die Datei als ein Kapitel.")
+                        return .fallback("Keine Kapitel in \(visibleURL.lastPathComponent) gefunden. Nutze die Datei als ein Kapitel.")
                     }
 
                     return .chapters(chapters)
                 } catch {
                     if shouldCancel() || cancellation.isCancelled { return .cancelled }
-                    return .fallback("⚠️ Kapitel aus \(visibleURL.lastPathComponent) konnten nicht gelesen werden: \(error.localizedDescription)")
+                    return .fallback("Kapitel aus \(visibleURL.lastPathComponent) konnten nicht gelesen werden: \(error.localizedDescription)")
                 }
             }
-            guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
+            guard !shouldCancel(), !Task.isCancelled else { return .cancelled }
             let parsedChapters: [FFMetadata.Chapter]
             switch metadata {
             case .chapters(let chapters): parsedChapters = chapters
             case .fallback(let message):
                 log(message)
                 let fallback = await fallbackFile()
-                guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
+                guard !shouldCancel(), !Task.isCancelled else { return .cancelled }
                 return .files([fallback])
             case .failed(let reason): return .failed(reason)
             case .cancelled: return .cancelled
@@ -304,7 +304,7 @@ extension AudioFile {
                 let loadedDuration = try? await AVURLAsset(url: url).load(.duration)
                 totalDuration = sanitizeDuration(loadedDuration.map(CMTimeGetSeconds) ?? 0)
             }
-            guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
+            guard !shouldCancel(), !Task.isCancelled else { return .cancelled }
             let resolvedChapters: [AudioFile]? = await AudioAnalysisExecutor.perform {
                 guard !shouldCancel(), !cancellation.isCancelled else { return nil }
                 guard let chapters = FFMetadata.normalizedChapters(
@@ -325,14 +325,14 @@ extension AudioFile {
                 guard !shouldCancel(), !cancellation.isCancelled else { return nil }
                 return audioFiles
             }
-            guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
+            guard !shouldCancel(), !Task.isCancelled else { return .cancelled }
             guard let resolvedChapters else {
-                log("⚠️ Unvollständige Kapitelzeiten in \(visibleURL.lastPathComponent). Nutze die Datei als ein Kapitel.")
+                log("Unvollständige Kapitelzeiten in \(visibleURL.lastPathComponent). Nutze die Datei als ein Kapitel.")
                 let fallback = await fallbackFile()
-                guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
+                guard !shouldCancel(), !Task.isCancelled else { return .cancelled }
                 return .files([fallback])
             }
-            log("✅ \(resolvedChapters.count) Kapitel aus \(visibleURL.lastPathComponent) extrahiert.")
+            log("\(resolvedChapters.count) Kapitel aus \(visibleURL.lastPathComponent) extrahiert.")
             return .files(resolvedChapters)
         } onCancel: {
             cancellation.cancel()

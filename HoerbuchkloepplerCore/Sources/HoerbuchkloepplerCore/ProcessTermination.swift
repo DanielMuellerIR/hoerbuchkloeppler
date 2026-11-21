@@ -148,6 +148,11 @@ enum ProcessTerminator {
         )
     }
 
+    static func hasRemainingOwnedGroup(_ process: Process) -> Bool {
+        guard !process.isRunning, let group = ownedGroup(for: process) else { return false }
+        return groupIsRunning(group)
+    }
+
     /// Nach dem Exit des direkten Werkzeugprozesses darf seine besessene
     /// Prozessgruppe keine Nachkommen mehr enthalten. Ein Wrapper könnte sonst
     /// den eigentlichen Encoder im Hintergrund weiterlaufen lassen, während die
@@ -155,9 +160,7 @@ enum ProcessTerminator {
     /// Der Rückgabewert sagt, ob ein solcher Rest gefunden und beendet wurde.
     @discardableResult
     static func terminateRemainingOwnedGroup(_ process: Process) -> Bool {
-        guard !process.isRunning,
-              let group = ownedGroup(for: process),
-              groupIsRunning(group) else { return false }
+        guard hasRemainingOwnedGroup(process) else { return false }
         terminateAndWait([process])
         return true
     }
@@ -362,165 +365,6 @@ final class ProcessPipeReader: @unchecked Sendable {
                 return Data("[Diagnose gekürzt; letzte \(maximumBytes) Bytes]\n".utf8) + output
             }
             return output
-        }
-    }
-}
-
-enum CapturedProcessResult: Sendable {
-    case completed(status: Int32, output: Data)
-    case timedOut(output: Data)
-    case cancelled(output: Data)
-    case failed(String)
-}
-
-extension FFmpegWrapper {
-    /// Nur reguläre, ausführbare Dateien sind startfähige Tool-Kandidaten.
-    /// Ein gebündeltes Binary ohne x-Bit darf den funktionierenden PATH-Fallback
-    /// nicht verdecken. Symlinks werden vor der Prüfung aufgelöst:
-    /// `attributesOfItem` folgt ihnen nicht und meldet `.typeSymbolicLink` statt
-    /// `.typeRegular` — die üblichen Homebrew-/MacPorts-Symlinks (z.B.
-    /// `/opt/homebrew/bin/ffmpeg` → `../Cellar/…`) fielen sonst durch.
-    public static func isUsableExecutable(_ url: URL) -> Bool {
-        let resolved = url.resolvingSymlinksInPath()
-        guard FileManager.default.isExecutableFile(atPath: resolved.path),
-              let attributes = try? FileManager.default.attributesOfItem(atPath: resolved.path),
-              attributes[.type] as? FileAttributeType == .typeRegular else {
-            return false
-        }
-        return true
-    }
-
-    static func resolveBinaryURL(name: String, bundledURL: URL?, pathEnvironment: String?, fallbackPaths: [String]) -> URL? {
-        var candidates: [URL] = []
-        if let bundledURL { candidates.append(bundledURL) }
-        if let pathEnvironment {
-            candidates += pathEnvironment.split(separator: ":").map {
-                URL(fileURLWithPath: String($0)).appendingPathComponent(name)
-            }
-        }
-        candidates += fallbackPaths.map { URL(fileURLWithPath: $0) }
-        for candidate in candidates where isUsableExecutable(candidate) {
-            // Nicht den später veränderbaren Symlink starten, sondern genau das
-            // reguläre Binary, das `isUsableExecutable` geprüft hat.
-            return candidate.resolvingSymlinksInPath()
-        }
-        return nil
-    }
-
-    public static func getBinaryURL(name: String) -> URL? {
-        let bundledURL = Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "bin")
-        let fallbackPaths = ["/opt/homebrew/bin/\(name)", "/usr/local/bin/\(name)", "/opt/local/bin/\(name)", "/usr/bin/\(name)", "/bin/\(name)"]
-        return resolveBinaryURL(
-            name: name,
-            bundledURL: bundledURL,
-            pathEnvironment: ProcessInfo.processInfo.environment["PATH"],
-            fallbackPaths: fallbackPaths
-        )
-    }
-
-    /// Liefert nur dann eine Version, wenn der Prozess wirklich startet,
-    /// erfolgreich endet und eine nichtleere Ausgabe liefert.
-    public static func toolVersion(name: String) -> (url: URL, version: String)? {
-        guard let url = getBinaryURL(name: name), let version = toolVersion(at: url, name: name) else { return nil }
-        return (url, version)
-    }
-
-    static func toolVersion(at url: URL, name: String) -> String? {
-        guard isUsableExecutable(url) else { return nil }
-        let result = runCapturedProcess(
-            executableURL: url,
-            // Auch der kurze Versionsaufruf erfüllt den repo-weiten
-            // ffmpeg-Vertrag mit `-nostdin`. `runCapturedProcess` trennt stdin
-            // zusätzlich vom Terminal, damit beide Schutzschichten unabhängig
-            // von künftigen Aufrufwegen erhalten bleiben.
-            arguments: name == "mediainfo" ? ["--Version"] : ["-nostdin", "-version"],
-            timeout: 5
-        )
-        guard case .completed(let status, let data) = result,
-              status == 0,
-              let output = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-              !output.isEmpty else { return nil }
-        let parts = output.components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-        if let index = parts.firstIndex(where: { $0.lowercased() == "version" }),
-           index + 1 < parts.count {
-            return parts[index + 1].replacingOccurrences(of: ",", with: "")
-        }
-        if name == "mediainfo",
-           let version = parts.first(where: { $0.hasPrefix("v") && $0.contains(".") }) {
-            return version
-        }
-        return parts.first
-    }
-
-    static func runCapturedProcess(
-        executableURL: URL,
-        arguments: [String],
-        context: ToolProcessContext? = nil,
-        timeout: TimeInterval
-    ) -> CapturedProcessResult {
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        // Kein Werkzeug hier liest von stdin. Ohne diese Zeile erbt das Kind den
-        // stdin der App beziehungsweise das Terminal der CLI.
-        process.standardInput = FileHandle.nullDevice
-        let reader = ProcessPipeReader(handle: pipe.fileHandleForReading, maximumBytes: 32 * 1024 * 1024, requiresCompleteOutput: true)
-        do {
-            let started: Bool
-            if let context {
-                started = try context.run(process)
-            } else {
-                try process.run()
-                ProcessTerminator.recordOwnedProcessGroup(process)
-                started = true
-            }
-            guard started else { return .cancelled(output: Data()) }
-            defer {
-                if let context {
-                    context.unregister(process)
-                } else {
-                    ProcessTerminator.forgetOwnedProcessGroup(process)
-                }
-            }
-            try? pipe.fileHandleForWriting.close()
-            reader.start()
-
-            let boundedTimeout = timeout.isFinite ? max(0, timeout) : 5
-            ProcessTerminator.wait(upTo: boundedTimeout) { process.isRunning }
-            let timedOut = process.isRunning
-            if timedOut {
-                ProcessTerminator.terminateAndWait([process])
-            }
-            // Ein Prozess im nicht unterbrechbaren Kernel-Wait — etwa auf einem
-            // abgerissenen Netz-Mount — überlebt auch SIGKILL, bis sein I/O
-            // zurückkommt. Ein unbedingtes `waitUntilExit()` blockierte hier
-            // trotz der angegebenen Frist unbegrenzt.
-            let exited = !process.isRunning
-            if exited { process.waitUntilExit() }
-            // Auch kurze Hilfsaufrufe dürfen keinen vom Wrapper abgekoppelten
-            // Nachkommen im eigenen Prozessbaum zurücklassen.
-            ProcessTerminator.terminateRemainingOwnedGroup(process)
-            // Ein bereits beendeter direkter Prozess kann einen Nachkommen mit
-            // geerbtem stdout hinterlassen. Dessen offener Schreibdeskriptor darf
-            // den informativen Versions-/MediaInfo-Aufruf nicht endlos blockieren.
-            let output = reader.waitUntilEOF(timeout: 0.25)
-            if context?.isCancelled == true { return .cancelled(output: output) }
-            // Eine gekürzte Ausgabe darf nicht wie eine vollständige aussehen:
-            // Aus halben MediaInfo-Daten entstünden sonst falsche Titel- und
-            // Autorvorschläge, ohne dass jemand gewarnt wird.
-            if timedOut || !exited || reader.joinTimedOut {
-                return .timedOut(output: output)
-            }
-            if reader.failedToReadOutput { return .failed("Werkzeugausgabe konnte nicht vollständig gelesen werden.") }
-            if reader.exceededOutputLimit { return .failed("Werkzeugausgabe überschreitet 32 MiB; vollständige Analyse nicht möglich.") }
-            return .completed(status: process.terminationStatus, output: output)
-        } catch {
-            return .failed(error.localizedDescription)
         }
     }
 }

@@ -1,3 +1,4 @@
+import HoerbuchkloepplerAppSupport
 import HoerbuchkloepplerCore
 import Foundation
 import SwiftUI
@@ -12,16 +13,8 @@ struct ContentView: View {
     @StateObject private var documentOpen = DocumentOpenCoordinator()
     @StateObject private var coverDrop = CoverDropCoordinator()
     @Environment(\.openWindow) private var openWindow
-    private static let sidebarContentWidth: CGFloat = 250
-    private static let sidebarPadding: CGFloat = 16
-    @State private var selectedChapters: Set<UUID> = []
-    @State private var renamePrefix = "Kapitel"
-    @State private var projectError: String?
-    @State private var showingSettings = false
+    @StateObject private var presentation = WindowPresentationCoordinator()
     @State private var toolStatus = ToolStatus()
-    @State private var toolError: String?
-    @State private var cliHandoffError: String?
-    @State private var providersToRetry: [NSItemProvider]?
     /// Einmal aufgelöster CLI-Pfad. Die Auflösung durchsucht den gesamten PATH
     /// mit je einem Dateisystemzugriff pro Eintrag; im View-Body ausgewertet
     /// liefe das bei jedem Fortschritts-Update zweimal auf dem Main Actor und
@@ -57,316 +50,142 @@ struct ContentView: View {
     }
 
     private func saveAndExport() {
+        guard canExport else { return }
         switch toolStatus.exportAvailability {
         case .checking: return
-        case .available: flow.selectOutput(session: session)
-        case .unavailable(let message): toolError = message
+        case .available: flow.selectOutput(session: session, coverDrop: coverDrop, presentation: presentation)
+        case .unavailable(let message): presentation.present(.error(title: "Werkzeuge nicht verfügbar", message: message))
         }
     }
 
-    private func toolStatusText(_ name: String, availability: ToolStatus.Availability) -> some View {
-        Text("\(name): \(availability.text)")
-            .foregroundColor(availability == .unavailable ? .red : .secondary)
-    }
 
     var body: some View {
         ZStack {
             HSplitView {
-                // --- Linke Sidebar (Cover & Metadaten) ---
-                GeometryReader { geometry in
-                    ScrollView {
-                        VStack(spacing: 20) {
-                            VStack {
-                                CoverView(image: session.coverImage) { provider in
-                                    coverDrop.load(provider, session: session)
-                                }
-                                    .frame(width: 180, height: 180).shadow(radius: 5)
-                                if session.coverImage != nil || session.coverPath != nil {
-                                    Button(action: { session.removeCover() }) {
-                                        Label("Cover entfernen", systemImage: "trash").font(.system(size: 11)).foregroundColor(.red)
-                                    }.buttonStyle(.plain).padding(.top, 5)
-                                }
-                            }
-                            VStack(alignment: .leading, spacing: 12) {
-                                Group {
-                                    Label("Titel", systemImage: "text.alignleft")
-                                    TextField("Hörbuch Titel", text: $session.title).textFieldStyle(.roundedBorder)
-                                    Label("Autor", systemImage: "person")
-                                    TextField("Autor", text: $session.author).textFieldStyle(.roundedBorder)
-                                    Label("Genre", systemImage: "music.note")
-                                    TextField("Genre", text: $session.genre).textFieldStyle(.roundedBorder)
-                                    TextField("Sprecher", text: $session.narrator).textFieldStyle(.roundedBorder)
-                                    TextField("Reihe", text: $session.series).textFieldStyle(.roundedBorder)
-                                    TextField("Bandnummer", text: $session.volumeNumber).textFieldStyle(.roundedBorder)
-                                    TextField("Sprache (z. B. de)", text: $session.language).textFieldStyle(.roundedBorder)
-                                }.font(.system(size: 12, weight: .medium)).foregroundColor(.secondary)
-                            }
-                            .padding(.horizontal)
-                            Spacer() // Drückt alles nach oben und unten
-                            Button(action: { showingSettings.toggle() }) {
-                                Label("Einstellungen", systemImage: "gearshape").font(.system(size: 16, weight: .medium))
-                            }.buttonStyle(.bordered).padding(.bottom, 10)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("System-Check").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
-                                toolStatusText("FFmpeg", availability: toolStatus.ffmpeg)
-                                toolStatusText("MediaInfo", availability: toolStatus.mediaInfo)
-                            }
-                            .font(.system(size: 10, design: .monospaced))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding()
-                            .background(Color.gray.opacity(0.1))
-                            .cornerRadius(8)
-                            .padding(.horizontal)
-                        }
-                        .frame(width: Self.sidebarContentWidth)
-                        .padding(Self.sidebarPadding)
-                        .frame(minHeight: geometry.size.height)
-                    }
-                }
-                .frame(width: Self.sidebarContentWidth + 2 * Self.sidebarPadding)
-                .background(Color(NSColor.windowBackgroundColor))
+                SidebarMetadataView(session: session, toolStatus: toolStatus, onFileDrop: { provider in
+                    coverDrop.load(provider, session: session)
+                }, showSettings: { presentation.request(.settings) })
 
-                // --- Rechte Seite (Dateiliste & Progress) ---
                 VStack {
-                    if session.audioFiles.isEmpty {
-                        VStack(spacing: 10) {
-                            Image(systemName: "music.note").font(.largeTitle).foregroundColor(.gray)
-                            Text("Audiodateien oder Ordner hierherziehen")
-                                .font(.headline).foregroundColor(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(Color.gray.opacity(0.1)).cornerRadius(8)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.3), lineWidth: 1))
-                    } else {
-                        VStack(spacing: 0) {
-                            HStack {
-                                Spacer()
-                                Button("Alle löschen") {
-                                    preview.stop()
-                                    selectedChapters.removeAll()
-                                    session.audioFiles.removeAll()
-                                }
-                                    .foregroundColor(.red).buttonStyle(.bordered)
-                                    .disabled(session.isImporting)
-                            }.padding([.top, .horizontal])
-                            HStack {
-                                TextField("Titelpräfix", text: $renamePrefix).frame(width: 120)
-                                Button("Auswahl nummerieren") { session.renameChapters(ids: selectedChapters, prefix: renamePrefix) }
-                                    .disabled(selectedChapters.isEmpty)
-                                Button("↑") { moveSelection(by: -1) }.disabled(selectedChapters.count != 1)
-                                Button("↓") { moveSelection(by: 1) }.disabled(selectedChapters.count != 1)
-                                Button("Teilen") {
-                                    if let id = preview.playingID, let time = preview.absolutePlaybackTime {
-                                        preview.stop(); session.splitChapter(id: id, at: time)
-                                    }
-                                }.disabled(!preview.canSplit).help("Kapitel an der aktuellen Abspielposition teilen")
-                                Button("Zusammenführen") {
-                                    if let id = selectedChapters.first { preview.stop(); session.mergeChapterWithNext(id: id) }
-                                }.disabled(!canMergeSelectedChapter).help("Mit dem unmittelbar folgenden Zeitabschnitt derselben Quelle zusammenführen")
-                            }
-                            .padding(.horizontal)
-                            // Solange ein Import läuft, gehört die Liste ihm.
-                            .disabled(session.isImporting)
-                            List(selection: $selectedChapters) {
-                                ForEach($session.audioFiles) { $file in
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        HStack {
-                                            Image(systemName: "music.note").foregroundColor(.accentColor).frame(width: 20)
-                                            TextField("Kapitel Titel", text: $file.chapterTitle).textFieldStyle(.plain).font(.system(size: 13, weight: .medium))
-                                            Spacer()
-                                            Text(formatDuration(file.duration))
-                                                .font(.system(size: 11, design: .monospaced)).foregroundColor(.secondary)
-                                                .help("Kapitel-Dauer")
-                                            Button(action: { preview.toggle(file) }) {
-                                                Image(systemName: preview.playingID == file.id ? "pause.circle.fill" : "play.circle")
-                                                    .foregroundColor(.green).frame(width: 20)
-                                            }.buttonStyle(.plain).help("Kapitel anhören")
-                                            Button(action: { session.fetchRawMediaInfo(for: file) }) { Image(systemName: "info.circle").foregroundColor(.blue).frame(width: 20) }.buttonStyle(.plain)
-                                            Button(action: { if preview.playingID == file.id { preview.stop() }; session.audioFiles.removeAll(where: { $0.id == file.id }) }) { Image(systemName: "trash").foregroundColor(.red).frame(width: 20) }.buttonStyle(.plain)
-                                        }
-                                        Text(file.name).font(.system(size: 10)).foregroundColor(.gray).padding(.leading, 30)
-                                    }
-                                    .padding(.vertical, 4)
-                                    .tag(file.id)
-                                }
-                                .onMove { offsets, destination in session.moveChapters(from: offsets, to: destination) }
-                            }
-                            .disabled(session.isImporting)
-                        }
-                    }
-
-                    VStack {
-                        Spacer()
-                        if flow.isCheckingSources {
-                            HStack(spacing: 12) {
-                                ProgressView("Projektquellen werden geprüft …").controlSize(.small)
-                                Button("Abbrechen") { flow.cancelStart() }
-                            }
-                            .frame(height: 47)
-                        } else {
-                            Button(action: saveAndExport) {
-                                Text("Hörbuch erzeugen").frame(width: 200, height: 35)
-                            }
-                            .keyboardShortcut("r", modifiers: .command).buttonStyle(.borderedProminent).controlSize(.large)
-                            .disabled(
-                                session.isConverting
-                                    || session.isImporting
-                                    || session.audioFiles.isEmpty
-                                    || session.isPreparingArtwork
-                                    || toolStatus.exportAvailability == .checking
-                            )
-                        }
-                        Spacer()
-                        
-                        HStack {
-                            Spacer()
-                            Button(action: copyAndOpenCLI) {
-                                Text("-> CLI")
-                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(Color.gray.opacity(0.1))
-                                    .cornerRadius(4)
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            .disabled(
-                                session.cliFolderIfRepresentable == nil
-                                    || kloepplerURL == nil
-                            )
-                            .help(cliHandoffHelp)
-                        }
-                        .padding(.trailing, 20)
-                        .padding(.bottom, 10)
-                    }
-                    .frame(height: 130)
+                    ChapterListView(session: session, preview: preview)
+                    ExportFooterView(
+                        busyMessage: flow.activity?.rawValue ?? (coverDrop.isPending ? "Cover wird geladen …" : nil),
+                        canExport: canExport,
+                        canOpenCLI: session.cliFolderIfRepresentable != nil && kloepplerURL != nil,
+                        cliHelp: cliHandoffHelp,
+                        export: saveAndExport,
+                        cancelWork: {
+                            if flow.activity != nil { flow.cancelWork() }
+                            else { coverDrop.cancel() }
+                        },
+                        openCLI: copyAndOpenCLI
+                    )
                 }
             }
 
-            // Das Overlay bleibt bis zum definitiven Abschluss sichtbar.
             if session.showOverlay {
                 ConversionOverlayView(session: session)
                     .transition(.opacity)
                     .zIndex(10)
                     .onAppear {
-                        Task { @MainActor in
-                            NSApp.keyWindow?.makeFirstResponder(nil)
-                        }
+                        Task { @MainActor in documentOpen.window?.makeFirstResponder(nil) }
                     }
             }
         }
-        .errorAlert(
-            "Werkzeuge nicht verfügbar",
-            message: $toolError,
-            fallback: "FFmpeg und MediaInfo werden für den Export benötigt."
-        )
-        .errorAlert(
-            "Import nicht übernommen",
-            message: $session.importErrorMessage,
-            fallback: "Unbekannter Analysefehler"
-        )
-        .errorAlert(
-            "Konvertierung nicht gestartet",
-            message: $flow.conversionStartError,
-            fallback: "Unbekannter Startfehler"
-        )
-        .errorAlert(
-            "CLI-Handoff fehlgeschlagen",
-            message: $cliHandoffError,
-            fallback: "Das Terminal konnte nicht geöffnet werden."
-        )
-        .errorAlert(
-            "Cover nicht übernommen",
-            message: $coverDrop.errorMessage,
-            fallback: "Die Cover-Datei ließ sich nicht laden."
-        )
-        .errorAlert(
-            "Vorschau nicht möglich",
-            message: $preview.unplayableFile,
-            fallback: "Die Quelldatei ließ sich nicht abspielen."
-        )
-        .errorAlert("Datei nicht geöffnet", message: $documentOpen.errorMessage, fallback: "Die Datei ließ sich nicht öffnen.")
-        .alert("Import hat zu lange gewartet", isPresented: Binding(
-            get: { providersToRetry != nil },
-            set: { if !$0 { providersToRetry = nil } }
-        ), presenting: providersToRetry) { providers in
-            Button("Abbrechen", role: .cancel) { providersToRetry = nil }
-            Button("Wiederholen") {
-                guard !session.isConverting, !session.isImporting else {
-                    projectError = "Es läuft bereits ein Import oder eine Konvertierung. Bitte danach erneut importieren."
-                    return
-                }
-                importProviders(providers)
-            }
-        } message: { _ in
-            Text("Der Drag-and-drop-Import hat nach 60 Sekunden noch nicht alle Dateien bereitgestellt. Der neue Import wurde verworfen. Das bisherige Hörbuch bleibt erhalten.")
-        }
-        .alert("Projekt öffnen?", isPresented: Binding(
-            get: { documentOpen.projectToConfirm != nil },
-            set: { if !$0 { documentOpen.cancelProject() } }
-        ), presenting: documentOpen.projectToConfirm) { url in
-            Button("Abbrechen", role: .cancel) { documentOpen.cancelProject() }
-            Button("Projekt öffnen", role: .destructive) {
-                Task { await documentOpen.confirmProject(url, session: session, beforeOpening: { preview.stop() }) }
-            }
-        } message: { url in
-            Text("Das aktuelle Hörbuch wird durch \(url.lastPathComponent) ersetzt. Nicht gespeicherte Änderungen gehen dabei verloren.")
-        }
+        .background { sheetHost }
         .task { await checkTools() }
-        .onDisappear { coverDrop.cancel() }
-        .onDisappear { flow.cancelStart() }
+        .onChange(of: modelErrors.map { $0.message.wrappedValue }) { _ in receiveModelErrors() }
+        .onChange(of: session.showSelectionUI) { updateSheet(.metadata, requested: $0) }
+        .onChange(of: session.showInfoSheet) { updateSheet(.fileInfo, requested: $0) }
+        .onChange(of: documentOpen.projectToConfirm) { url in
+            if let url { confirmProjectOpen(url) }
+        }
+        .onDisappear {
+            presentation.detach()
+            coverDrop.cancel()
+            flow.cancelWork()
+        }
         .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
         .frame(minWidth: 850, minHeight: 650)
-        .sheet(isPresented: $showingSettings) { SettingsView(session: session, isPresented: $showingSettings) }
-        .alert("Datei existiert bereits", isPresented: $flow.showingOverwriteAlert) {
-            Button("Abbrechen", role: .cancel) { flow.cancelOverwrite() }
-            Button("Drüberklöppeln", role: .destructive) {
-                if let plan = flow.pendingPlan { flow.start(plan, session: session) }
-            }
-        } message: {
-            Text("Diese tatsächlichen Zieldateien existieren bereits:\n\(flow.collidingOutputNames.joined(separator: "\n"))\n\nMöchten Sie sie wirklich überklöppeln?")
-        }
-        .sheet(isPresented: $flow.showingConversionPreview) {
-            if let plan = flow.previewPlan, let preview = flow.preview {
-                OutputPreviewView(preview: preview, onCancel: {
-                    flow.cancelPreview()
-                }, onStart: {
-                    // `confirmPreview` schließt die Vorschau selbst.
-                    flow.confirmPreview(plan, session: session)
-                })
-            }
-        }
-        .sheet(isPresented: $session.showSelectionUI) { MetadataSelectionView(session: session) }
-        .sheet(isPresented: $session.showInfoSheet) {
-            VStack(spacing: 0) {
-                HStack { Text("Datei-Details").font(.headline).padding(.leading); Spacer(); Button("Schließen") { session.cancelRawMediaInfo() }.padding(.trailing) }.frame(height: 40).background(Color(NSColor.windowBackgroundColor))
-                Divider()
-                ZStack {
-                    if session.isFetchingInfo { ProgressView() } else { ScrollView { Text(session.selectedFileInfoText).font(.system(size: 12, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading).padding() } }
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            .frame(width: 700, height: 500)
-            .onDisappear { session.cancelRawMediaInfo() }
-        }
-        .alert("Projekt", isPresented: Binding(get: { projectError != nil }, set: { if !$0 { projectError = nil } })) {
-            Button("OK", role: .cancel) { projectError = nil }
-        } message: { Text(projectError ?? "") }
         .toolbar {
-            Button("Projekt öffnen …") { projectPanel(save: false) }.keyboardShortcut("o", modifiers: [.command, .shift]).disabled(session.isConverting)
-            Button("Projekt speichern …") { projectPanel(save: true) }.keyboardShortcut("s", modifiers: .command).disabled(session.isConverting || session.isImporting)
+            Button("Projekt öffnen …") { projectPanel(save: false) }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
+                .disabled(session.isConverting)
+            Button("Projekt speichern …") { projectPanel(save: true) }
+                .keyboardShortcut("s", modifiers: .command)
+                .disabled(session.isConverting || session.isImporting)
             Button("Rückgängig") { undoRouter.undo() }.disabled(!undoRouter.canUndo)
             Button("Wiederholen") { undoRouter.redo() }.disabled(!undoRouter.canRedo)
             Button("Dateien oder Ordner hinzufügen …", action: chooseImportSources)
                 .keyboardShortcut("o", modifiers: .command)
                 .disabled(session.isConverting)
         }
-        .safeAreaInset(edge: .bottom) {
-            // Ein Container ist nötig: Zwei Geschwister-Views aus einem
-            // ViewBuilder werden nicht untereinander, sondern deckungsgleich
-            // gestapelt — Quellenprobleme und Importfortschritt lägen übereinander.
-            VStack(alignment: .leading, spacing: 0) {
+        .safeAreaInset(edge: .bottom) { importStatus }
+        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
+            guard !session.isConverting else { return false }
+            importProviders(providers)
+            return true
+        }
+        .background(ProjectWindowReader(router: undoRouter) { [weak documentOpen, weak session, weak preview, weak presentation, weak flow, weak coverDrop] window in
+            presentation?.attach(to: window) { [weak documentOpen, weak flow, weak coverDrop] in
+                documentOpen?.cancelProject()
+                flow?.cancelWork()
+                coverDrop?.cancel()
+            }
+            guard let documentOpen, let session else { return }
+            documentOpen.attach(to: window, session: session, beforeOpening: { [weak preview] in preview?.stop() })
+        })
+        .focusedSceneObject(undoRouter)
+        .onAppear {
+            receiveModelErrors()
+            updateSheet(.metadata, requested: session.showSelectionUI)
+            updateSheet(.fileInfo, requested: session.showInfoSheet)
+            undoRouter.configure(session: session, beforeChapterEdit: { preview.stop() })
+            let action = openWindow
+            DocumentOpenCoordinator.createWindow = { action(id: DocumentOpenCoordinator.windowID) }
+        }
+    }
+
+    private var canExport: Bool {
+        !session.isConverting && !session.isImporting && !session.audioFiles.isEmpty
+            && !session.isPreparingArtwork && !coverDrop.isPending
+            && flow.activity == nil && flow.preview == nil && toolStatus.exportAvailability != .checking
+    }
+
+    private func fileInfoSheet(_ sheet: PresentedWindowSheet) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Datei-Details").font(.headline)
+                Spacer()
+                Button("Schließen") { presentation.dismissSheet(sheet.id) }
+            }
+            .padding(.horizontal)
+            .frame(height: 40)
+            .background(Color(nsColor: .windowBackgroundColor))
+            Divider()
+            ZStack {
+                if session.isFetchingInfo {
+                    ProgressView()
+                } else {
+                    ScrollView {
+                        Text(session.selectedFileInfoText)
+                            .font(.system(size: 12, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding()
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(width: 700, height: 500)
+    }
+
+    private var importStatus: some View {
+        VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading) {
-                ForEach(session.projectSourceIssues) { issue in Text("\(issue.reason): \(issue.path)").foregroundColor(.red).textSelection(.enabled) }
+                ForEach(session.projectSourceIssues) { issue in
+                    Text("\(issue.reason): \(issue.path)").foregroundStyle(.red).textSelection(.enabled)
+                }
             }
             if session.isImporting {
                 HStack {
@@ -375,59 +194,139 @@ struct ContentView: View {
                     Text("\(session.importCompletedItems) / \(session.importTotalItems): \(session.importDetail)")
                         .lineLimit(1)
                     Spacer()
-                    Button("Import abbrechen") { session.cancelImport() }
+                    Button("Import abbrechen", action: session.cancelImport)
                         .disabled(!session.canCancelImport)
-                }.padding(8)
-            }
+                }
+                .padding(8)
             }
         }
-        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-            guard !session.isConverting else { return false }
-            importProviders(providers)
-            return true
+    }
+
+    private var modelErrors: [(title: String, message: Binding<String?>)] {
+        [
+            ("Import nicht übernommen", $session.importErrorMessage),
+            ("Konvertierung nicht gestartet", $flow.conversionStartError),
+            ("Cover nicht übernommen", $coverDrop.errorMessage),
+            ("Vorschau nicht möglich", $preview.unplayableFile),
+            ("Datei nicht geöffnet", $documentOpen.errorMessage)
+        ]
+    }
+
+    private func receiveModelErrors() {
+        for source in modelErrors {
+            guard let message = source.message.wrappedValue else { continue }
+            source.message.wrappedValue = nil
+            presentation.present(.error(title: source.title, message: message))
         }
-        .background(ProjectWindowReader(router: undoRouter) { [weak documentOpen, weak session, weak preview] window in
-            guard let documentOpen, let session else { return }
-            documentOpen.attach(to: window, session: session, beforeOpening: { [weak preview] in preview?.stop() })
+    }
+
+    @ViewBuilder
+    private var sheetHost: some View {
+        if let sheet = presentation.sheet {
+            Color.clear.frame(width: 0, height: 0)
+                .sheet(isPresented: sheetBinding(sheet), onDismiss: {
+                    presentation.sheetDismissed(sheet.id)
+                }) {
+                    sheetContent(sheet)
+                        .onAppear { presentation.sheetAppeared(sheet.id) }
+                }
+                // Der Callback gehört zum Host dieses Tickets, auch nach Fensterwechsel.
+                .id(sheet.id)
+        }
+    }
+
+    private func sheetBinding(_ sheet: PresentedWindowSheet) -> Binding<Bool> {
+        Binding(get: {
+            presentation.sheet?.id == sheet.id && presentation.sheet?.isPresented == true
+        }, set: { presented in
+            if !presented { presentation.dismissSheet(sheet.id) }
         })
-        .focusedSceneObject(undoRouter)
-        .onAppear {
-            undoRouter.configure(session: session, beforeChapterEdit: { preview.stop() })
-            let action = openWindow
-            DocumentOpenCoordinator.createWindow = { action(id: DocumentOpenCoordinator.windowID) }
+    }
+
+    @ViewBuilder
+    private func sheetContent(_ sheet: PresentedWindowSheet) -> some View {
+        switch sheet.kind {
+        case .settings:
+            SettingsView(session: session, isPresented: sheetBinding(sheet))
+        case .conversionPreview:
+            if let preview = flow.preview {
+                OutputPreviewView(preview: preview, onCancel: {
+                    presentation.dismissSheet(sheet.id)
+                }, onStart: {
+                    flow.confirmPreview(sheet.id, session: session, coverDrop: coverDrop, presentation: presentation)
+                    presentation.dismissSheet(sheet.id)
+                })
+            }
+        case .metadata: MetadataSelectionView(session: session)
+        case .fileInfo: fileInfoSheet(sheet)
         }
     }
 
-    private func moveSelection(by offset: Int) {
-        guard let id = selectedChapters.first, let index = session.audioFiles.firstIndex(where: { $0.id == id }) else { return }
-        let target = index + offset
-        guard session.audioFiles.indices.contains(target) else { return }
-        session.moveChapters(from: IndexSet(integer: index), to: offset > 0 ? target + 1 : target)
+    private func updateSheet(_ kind: WindowSheet, requested: Bool) {
+        guard requested else {
+            presentation.dismiss(kind)
+            return
+        }
+        presentation.request(kind) { _ in
+            guard !presentation.isQueued(kind) else { return }
+            switch kind {
+            case .metadata: session.showSelectionUI = false
+            case .fileInfo: session.cancelRawMediaInfo()
+            case .settings, .conversionPreview: break
+            }
+        }
     }
 
-    /// Zeigt ein Panel als Sheet, wenn es ein Fenster gibt, sonst modal. Ein
-    /// stilles `return` ohne Fenster hieße: Der Menübefehl tut bei minimiertem
-    /// Fenster kommentarlos nichts — der Ausgabepfad kann das schon länger.
-    private static func present(_ panel: NSSavePanel, then handle: @escaping (NSApplication.ModalResponse) -> Void) {
-        if let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first {
-            panel.beginSheetModal(for: window, completionHandler: handle)
-        } else {
-            handle(panel.runModal())
+    private func confirmProjectOpen(_ url: URL) {
+        presentation.present(.openProject(url)) { accepted in
+            guard documentOpen.projectToConfirm == url else { return }
+            guard accepted else {
+                documentOpen.cancelProject()
+                return
+            }
+            Task { [weak owner = documentOpen.window] in
+                guard let owner, documentOpen.window === owner, documentOpen.projectToConfirm == url else { return }
+                await documentOpen.confirmProject(url, session: session, beforeOpening: { preview.stop() })
+            }
         }
+    }
+
+    private func confirmImportRetry(_ providers: [NSItemProvider]) {
+        presentation.present(.retryImport) { accepted in
+            guard accepted else { return }
+            guard !session.isConverting, !session.isImporting else {
+                presentation.present(.error(
+                    title: "Import nicht gestartet",
+                    message: "Es läuft bereits ein Import oder eine Konvertierung. Bitte danach erneut importieren."
+                ))
+                return
+            }
+            importProviders(providers)
+        }
+    }
+
+    private func showCLIError(_ message: String) {
+        presentation.present(.error(title: "CLI-Handoff fehlgeschlagen", message: message))
     }
 
     private func projectPanel(save: Bool) {
         if save {
-            let panel = NSSavePanel(); panel.nameFieldStringValue = "Hörbuch.hkproject"
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = "Hörbuch.hkproject"
             panel.allowedContentTypes = [DocumentOpenCoordinator.projectType]
-            Self.present(panel) { response in
+            presentation.present(panel) { response in
                 guard response == .OK, let url = panel.url else { return }
-                Task { do { try await session.saveProjectAsync(to: url) } catch { projectError = error.localizedDescription } }
+                Task {
+                    do { try await session.saveProjectAsync(to: url) }
+                    catch { presentation.present(.error(title: "Projekt nicht gespeichert", message: error.localizedDescription)) }
+                }
             }
         } else {
-            let panel = NSOpenPanel(); panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = false
             panel.allowedContentTypes = [DocumentOpenCoordinator.projectType]
-            Self.present(panel) { response in
+            presentation.present(panel) { response in
                 guard response == .OK, let url = panel.url else { return }
                 documentOpen.receive(url, session: session, beforeOpening: { preview.stop() })
             }
@@ -441,7 +340,7 @@ struct ContentView: View {
         panel.allowsMultipleSelection = true
         panel.prompt = "Importieren"
         panel.message = "Audiodateien oder Ordner auswählen"
-        Self.present(panel) { response in
+        presentation.present(panel) { response in
             // Eine bestätigte Auswahl ohne Dateien darf keinen leeren Batch
             // starten: Der entwertete dann die laufende Cover-Suche.
             guard response == .OK, !panel.urls.isEmpty else { return }
@@ -453,24 +352,16 @@ struct ContentView: View {
     }
 
     private func importProviders(_ providers: [NSItemProvider]) {
-        providersToRetry = nil
         ImportCoordinator.importProviders(providers, session: session, onTimeout: { providers in
-            providersToRetry = providers
+            confirmImportRetry(providers)
         })
-    }
-
-    /// Kapitel-Dauer als `m:ss` bzw. `h:mm:ss` (ab einer Stunde).
-    private func formatDuration(_ seconds: TimeInterval) -> String {
-        let total = Int(seconds.rounded())
-        let h = total / 3600, m = (total % 3600) / 60, s = total % 60
-        return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 
     private func copyAndOpenCLI() {
         // Über `addLog` allein wäre die Meldung unsichtbar: Das Protokoll zeigt
         // nur das Konvertierungs-Overlay, und das ist beim CLI-Handoff nie offen.
         guard let folderURL = session.cliFolderIfRepresentable else {
-            cliHandoffError = "Die aktuelle Liste stammt nicht vollständig aus einem einzelnen Ordner-Import."
+            showCLIError("Die aktuelle Liste stammt nicht vollständig aus einem einzelnen Ordner-Import.")
             return
         }
         // Beim Klick erneut auflösen: Der beim Start gemerkte Pfad kann
@@ -478,7 +369,7 @@ struct ContentView: View {
         // Suchkosten problemlos.
         guard let kloepplerURL = Self.resolveKloepplerURL() else {
             self.kloepplerURL = nil
-            cliHandoffError = "Das Programm „kloeppler\u{201C} wurde nicht gefunden."
+            showCLIError("Das Programm „kloeppler“ wurde nicht gefunden.")
             return
         }
         self.kloepplerURL = kloepplerURL
@@ -501,8 +392,8 @@ struct ContentView: View {
         let terminalDirectory = kloepplerURL.deletingLastPathComponent()
         Task {
             guard let message = await Self.openTerminal(at: terminalDirectory) else { return }
-            session.addLog("⚠️ \(message)")
-            cliHandoffError = message
+            session.addLog(message, type: .warning)
+            showCLIError(message)
         }
     }
 
@@ -550,29 +441,5 @@ struct ContentView: View {
             return "Nicht verfügbar, weil das Programm „kloeppler“ nicht gefunden wurde."
         }
         return "Öffnet das Terminal mit dem vollständigen Befehl für die aktuellen Einstellungen, Metadaten und das Cover."
-    }
-
-    private var canMergeSelectedChapter: Bool {
-        guard selectedChapters.count == 1,
-              let id = selectedChapters.first else { return false }
-        return session.canMergeChapterWithNext(id: id)
-    }
-}
-
-private struct CoverView: View {
-    var image: NSImage?
-    var onFileDrop: (NSItemProvider) -> Void
-
-    var body: some View {
-        ZStack {
-            if let img = image { Image(nsImage: img).resizable().aspectRatio(contentMode: .fill) }
-            else { Color.gray.opacity(0.2); VStack { Image(systemName: "photo.on.rectangle.angled").font(.largeTitle).foregroundColor(.gray); Text("Cover Drop").font(.caption).foregroundColor(.gray) } }
-        }
-        .frame(width: 180, height: 180).cornerRadius(12).clipped()
-        .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-            guard let provider = providers.first else { return false }
-            onFileDrop(provider)
-            return true
-        }
     }
 }

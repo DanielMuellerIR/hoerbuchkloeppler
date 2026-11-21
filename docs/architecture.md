@@ -5,7 +5,9 @@
 - **`HoerbuchkloepplerCore/`** — Swift Package, gesamte Kernlogik; speist beide
   Frontends. Library-Target `HoerbuchkloepplerCore` + Executable-Target
   `kloeppler` (`Package.swift`).
-- **`Hörbuchklöppler/`** — SwiftUI-macOS-App (dünne UI über dem Core).
+- **`HoerbuchkloepplerAppSupport`** — SwiftPM-Target für AppKit-Koordinatoren.
+  App und Swift-Tests verwenden denselben Code.
+- **`Hörbuchklöppler/`** — SwiftUI-macOS-App über Core und AppSupport.
 - **`Hörbuchklöppler.xcodeproj`** — Xcode-Projekt der App.
 
 Die Frontends enthalten **keine** Konvertierungslogik — die steckt komplett im
@@ -13,10 +15,10 @@ Core.
 
 ## Execution-Engine
 
-- Externe Tools laufen über `Process()` (`ProcessTermination.swift`).
+- Externe Tools laufen als eigene Prozessgruppen. `ProcessRunner` liest begrenzte vollständige Ausgaben, `ProcessPipeReader` liefert auch laufende Diagnose- und Fortschrittsdaten.
 - ffmpeg-Aufrufe **immer mit `-nostdin`** — sonst hängt der Prozess im
   Hintergrund.
-- Binär-Auflösung: Zentraler Helper `FFmpegWrapper.getBinaryURL(name:)` sucht erst im `Bundle.module`, dann in allen Pfaden der Umgebungsvariablen `$PATH` und schließlich in typischen macOS Standardordnern (`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`).
+- Binär-Auflösung: `ToolLocator` sucht erst im `Bundle.module`, dann in allen Pfaden der Umgebungsvariablen `$PATH` und schließlich in typischen macOS Standardordnern (`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`).
 - **Swift-6-Isolation:** `ConversionSession` gehört vollständig zum Main Actor;
   nur dort wird `@Published`-State gelesen oder geändert. Der blockierende
   ffmpeg-Worker erhält dafür einen unveränderlichen `ConversionJob`-Snapshot und
@@ -69,10 +71,10 @@ Core.
 
 ## UI-Pattern (App)
 
-„Pro-Terminal"-Overlay (`ConversionOverlayView.swift`): Live-Log mit
-Zeitstempeln, Copy-All, Pacman-Fortschritt (`ᗧ••••`, Variante C) über volle
-Terminalbreite, Text als ein Block selektierbar. CLI-Pendant: ANSI-Cursor-
-Steuerung + Pacman in `KloepplerCLI.swift`.
+Das Konvertierungsprotokoll zeigt Phase, kopierbare Ausgaben und einen Textbalken
+pro Segment. Die gemeinsame Animation läuft nur bei aktivem Segmentfortschritt.
+Die CLI beobachtet den Laufzustand und zeichnet bei einem Terminal über den
+`TerminalRenderer`.
 
 ## Source-Map (Core)
 
@@ -81,28 +83,34 @@ Symbolnamen als Anker (bewusst **ohne** Zeilennummern — die driften bei jeder
 
 | Datei | Zuständigkeit | Schlüssel-Symbole |
 |---|---|---|
-| `ConversionPlan.swift` | Gemeinsamer Split-/Zielplan und Quell-/Ziel-Snapshot-Validierung | `ConversionPlan` · `makeConversionPlan` · `validateConversionPlan` · `splitAudioFilesIfNeeded` |
-| `FFmpegWrapper.swift` | Kodierpipeline und Laufsteuerung: Ausgabeplan, laufbezogener Besitz von Prozessen und Zwischendateien, Segment- und Muxing-Schritte | `ConversionContext` · `ConversionJob` · `convert(session:plan:)` · `performSequentialConversion` · `performParallelConversion` · `runFinalProcess` |
-| `ProcessTermination.swift` | Prozess-Lebenszyklus: Werkzeugprozesse starten, ihre Ausgabe lesen, zweistufig (TERM→KILL) samt Prozessgruppe beenden, Tool-Auflösung | `ProcessTerminator` · `wait(upTo:while:)` · `terminateAndWait` · `ToolProcessContext` · `ProcessPipeReader` · `getBinaryURL` · `runCapturedProcess` |
+| `ConversionPlan.swift` | Gemeinsamer Split-/Zielplan und Quell-/Ziel-Snapshot-Validierung | `ConversionPlan` · `ConversionPlanner.makePlan` · `validateConversionPlan` |
+| `FFmpegWrapper.swift` | Startprüfung, Übergabe und Abbruch eines Laufs | `convert` · `convertAsync` · `ConversionContext` |
+| `ConversionPipeline.swift` | Buch- und Gruppenausführung, MediaInfo vor der Übernahme, gemeinsame Abschlussmeldung | `ConversionPipeline` · `ConversionJob` |
+| `SegmentEncoder.swift`, `FFmpegMuxer.swift`, `LoudnessAnalyzer.swift` | Begrenzte geordnete Segmentarbeit, abschließender Mux und zusätzlicher Lautheitspass | `SegmentEncoder` · `FFmpegMuxer` · `LoudnessAnalyzer` |
+| `ToolLocator.swift`, `ProcessRunner.swift`, `ProcessTermination.swift` | Werkzeuge finden, begrenzt lesen, Prozessgruppen verwalten und per TERM/KILL beenden | `ToolLocator` · `ProcessRunner.capture` · `ProcessDeadline` · `ProcessTerminator` · `ProcessPipeReader` |
 | `OutputLeases.swift` | Kanonische Zielschlüssel, prozessinternes Register und prozessübergreifende POSIX-Sperren | `OutputLeases.acquire` · `OutputLeaseSet` |
-| `OutputStaging.swift` | Geschützte Zwischendateien anlegen, Ziele atomar übernehmen und nur nachweislich eigene Einträge bereinigen | `FileSystemIdentity` · `StagingOwnership` · `createProtectedStagingOutput` · `commitStagedOutput` · `removeOrphanedStagedOutputs` · `removeOwnedTempDirectory` |
+| `FileSystemEntry.swift`, `OutputStaging.swift`, `OutputCommit.swift` | Dateieinträge prüfen, Staging geschützt öffnen und atomar übernehmen | `FileSystemIdentity` · `OutputStaging.createProtectedOutput` · `OutputCommit.publish` |
+| `OutputCleanup.swift`, `OwnedTemporaryDirectory.swift`, `CleanupEntryRecord.swift` | Eigene Zwischendateien und verdrängte Ziele nach Abbruch oder Wiederanlauf erkennen und entfernen | `OutputCleanup.removeOrphans` · `OwnedTemporaryDirectory.remove` · `CleanupEntryRecord` |
 | `CLIInvocation.swift` | Vollständiger, POSIX-shell-sicherer GUI→CLI-Handoff | `CLIInvocation.arguments` · `shellCommand` |
 | `ConversionSession.swift` | Main-Actor-isolierter Sitzungszustand, Übernahme und Abbruch von Importen, Worker→UI-Nachrichten | `importURLs` · `startProviderImport` · `importFiles` · `prepareFolder` · `addLog` |
 | `ImportTypes.swift` | Vorgemerkte Importdaten, Scanergebnis und typisierte Quellen bei Importfehlern | `PendingImportBatch` · `ScannedFolder` · `AudioImportFailure` |
 | `SourceDiscovery.swift` | Dateisuche, Symlink-Auflösung, Deduplizierung und natürliche Kapitelreihenfolge | `discoverFileURLs` · `foundFile(at:)` · `deduplicateAudioFiles` · `audioFileComesBefore` |
 | `AudioFile.swift`, `FoundFile.swift` | Kapitelzeiträume, sichtbare Quellpfade und aufgelöste Lese-URLs | `AudioFile` · `FoundFile` |
-| `CoverArtwork.swift` | ImageIO-Validierung und Thumbnail-Vorschau ohne vorherigen NSImage-Voll-Decode | `thumbnail` · `preview` |
+| `CoverArtwork.swift` | Originalbytes, gemeinsame 32-MiB-Grenze und begrenzte Thumbnail-Vorschau | `PreparedImportArtwork` · `CoverArtwork.thumbnail` |
+| `MediaInfoService.swift` | Begrenzte Text- und JSON-Abfragen, Zeichensätze und Titelauswahl | `readText` · `readTitleAndAuthor` · `resolveMetadata` |
+| `ChapterHistory.swift` | Kapiteländerungen, Undo/Redo und Buchzustand beim Entfernen des letzten Kapitels | `renameChapter` · `undoChapterEdit` · `redoChapterEdit` |
 | `AudioSettings.swift` | Einstellungs-Struct (`Codable`) | Felder → [settings.md](settings.md) |
 | `SettingsManager.swift` | Laden/Speichern `~/.Hoerbuchkloeppler/settings.json` | `shared` · `loadSettings` · `saveSettings` |
 | `AudioFile+Extensions.swift` | Begrenzte ffmpeg-Artwork-Extraktion; Kapitel-Extraktion via **gebündeltem ffmpeg** (`-f ffmetadata`) auf eigener Utility-Queue mit Task-/Importabbruch | `extractEmbeddedArtwork` · `extractChapters` |
 | `FFMetadata.swift` | Kapitelblöcke lesen und schreiben, Titel maskieren und Kapitelgrenzen an die Dateidauer anpassen | `decodeChapters` · `encodeChapters` · `normalizedChapters` |
-| `KloepplerCLI.swift` | AsyncParsableCommand-CLI: erwarteter Import, TTY-abhängige ANSI-Animation, Klartextstatus in Pipes, SIGINT-Phasen, ASCII-Cover — Optionen siehe [build-and-test.md](build-and-test.md) | `KloepplerCLI` (`@main`) · `execute(_:)` · `validate()` · `resolveOutputFile` · `sanitizeFilename` · `buildPacmanBar` · `generateAsciiArt` |
+| `KloepplerCLI.swift`, `CLIExecution.swift` | Typisierte Argumente und Ablauf vom Import zum Abschluss | `KloepplerCLI` · `CLIExecution.run` |
+| `CLIInterrupts.swift`, `CLIDestination.swift`, `CLIOutput.swift`, `TerminalArtwork.swift` | Signale, Ausgabeziel, JSON oder Terminalstatus und Cover-Darstellung | `InterruptState` · `CLIDestination` · `CLIOutput` · `TerminalArtwork` |
 | `TerminalRenderer.swift` | Physische Statuszeilen, Unicode-Anzeigebreite und sichere Neuzeichnung bei Terminal-Größenwechseln | `TerminalRenderer` · `TerminalGeometry` |
 
-App-Views (`Hörbuchklöppler/`): `ContentView`, `ConversionOverlayView`
-(mit `LogTranscriptView`), `MetadataSelectionView`, `SettingsView`,
-`ErrorAlert.swift` (gemeinsamer `View.errorAlert`-Modifier),
-`Hörbuchklöppler.swift` (App-Entry).
+In der App verbindet `ContentView` `SidebarMetadataView`, `ChapterListView`
+und `ExportFooterView`. `ConversionOverlayView` zeigt den laufenden Export,
+`WindowPresentationCoordinator` steuert die modale Präsentation des
+jeweiligen Fensters. Der Werkzeugstatus bleibt beim Scrollen der Metadaten sichtbar.
 
 Belegte, noch nicht beauftragte Produkt- und Performance-Ansätze stehen getrennt
 in [opportunities.md](opportunities.md).
@@ -111,8 +119,9 @@ in [opportunities.md](opportunities.md).
 
 - `AudiobookProject.swift`: versioniertes Transportmodell, Quellreferenzen und
   SHA-256-Fingerprints; enthält keine Audiodaten.
-- `ConversionSession+Project.swift`: Projektübernahme, Quellenprüfung und
-  Kapitelhistorie mit Umordnen, Nummerieren, Teilen und Zusammenführen.
+- `ConversionSession+Project.swift`: Hintergrundarbeit für Projektöffnung,
+  Speichern und Quellenprüfung mit erneuter Identitätsprüfung vor dem Start.
+  Kapitel behalten ihre Quellbindung durch Teilen, Zusammenführen und Undo.
 - `ConversionRunState.swift`: flüchtiger Konvertierungszustand, unabhängig vom
   gespeicherten Projekt; vorhandene Session-Eigenschaften bleiben Adapter.
 - `RunReport.swift`: versionierte Inspect- und JSON-Laufberichte für die CLI.
@@ -137,4 +146,6 @@ Dateiidentität, Metadaten-/Artwork-Snapshots, begrenzte Tasks und Analysezähle
 linearen Pegel aus.
 
 `OutputCoordinator.swift` besitzt Ausgabeauswahl, Vorschau, Überschreibbestätigung
-und Laufstart; `ContentView` bindet dessen Zustand.
+und Laufstart; `ContentView` bindet dessen Zustand. Planung, Quellenprüfung und
+Zielreservierung laufen außerhalb des Main Actors. Der Start prüft den noch
+aktuellen Projekt- und Vorschauzustand im zugehörigen Fenster.

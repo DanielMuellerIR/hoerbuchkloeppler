@@ -5,7 +5,7 @@ import HoerbuchkloepplerCore
 /// Provider erst sammeln: Anzahl gleichzeitiger Audioanalysen bleibt auch bei
 /// großen Datei-Drops durch den gemeinsamen Importdienst begrenzt.
 @MainActor
-enum ImportCoordinator {
+public enum ImportCoordinator {
     @MainActor private final class ProviderCollection {
         private var results: [FileProviderItem?]
         private var remaining: Int
@@ -58,7 +58,7 @@ enum ImportCoordinator {
         }
     }
 
-    static func importProviders(
+    public static func importProviders(
         _ providers: [NSItemProvider],
         session: ConversionSession,
         timeout: Duration = .seconds(60),
@@ -80,7 +80,7 @@ enum ImportCoordinator {
         }
     }
 
-    static func importURLs(_ urls: [URL], session: ConversionSession) async {
+    public static func importURLs(_ urls: [URL], session: ConversionSession) async {
         await session.importURLs(urls)
     }
 }

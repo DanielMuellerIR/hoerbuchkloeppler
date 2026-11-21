@@ -20,25 +20,25 @@ public struct ConversionPlan: Sendable {
     }
 }
 
-extension FFmpegWrapper {
-    public static func makeConversionPlan(files: [AudioFile], outputURL: URL, maxDurationHours: Int?) -> ConversionPlan {
+enum ConversionPlanner {
+    static func makePlan(files: [AudioFile], outputURL: URL, maxDurationHours: Int?) -> ConversionPlan {
         let groups = splitAudioFilesIfNeeded(files, maxDurationHours: maxDurationHours)
         let outputs = groups.indices.map {
             resolveOutputURL(outputURL, groupIndex: $0, splitGroupsCount: groups.count)
         }
         let inputSnapshots = Dictionary(
             files.map {
-                let key = canonicalPath($0.url)
-                return (key, captureSnapshot(of: $0.url, followSymlink: true))
+                let key = FileSystemEntry.canonicalPath($0.url)
+                return (key, FileSystemEntry.snapshot(of: $0.url, followSymlink: true))
             },
             uniquingKeysWith: { first, _ in first }
         )
         return ConversionPlan(
             groups: groups,
             outputURLs: outputs,
-            outputSnapshots: outputs.map { captureSnapshot(of: $0) },
+            outputSnapshots: outputs.map { FileSystemEntry.snapshot(of: $0) },
             outputDirectorySnapshots: outputs.map {
-                captureSnapshot(
+                FileSystemEntry.snapshot(
                     of: $0.deletingLastPathComponent(),
                     followSymlink: true
                 )
@@ -56,7 +56,7 @@ extension FFmpegWrapper {
         expected: OutputDestinationSnapshot
     ) throws {
         let directory = output.deletingLastPathComponent()
-        let current = captureSnapshot(of: directory, followSymlink: true)
+        let current = FileSystemEntry.snapshot(of: directory, followSymlink: true)
         switch (expected, current) {
         case (.existing(let old), .existing(let new))
             where old.matchesDirectoryEntry(new):
@@ -82,9 +82,9 @@ extension FFmpegWrapper {
     ) throws {
         var checked = Set<String>()
         for file in files {
-            let key = canonicalPath(file.url)
+            let key = FileSystemEntry.canonicalPath(file.url)
             guard checked.insert(key).inserted else { continue }
-            let current = captureSnapshot(of: file.url, followSymlink: true)
+            let current = FileSystemEntry.snapshot(of: file.url, followSymlink: true)
             guard let planned = expected[key] else {
                 throw ConversionOutputError.sourceChanged(file.sourceURL)
             }
@@ -116,14 +116,24 @@ extension FFmpegWrapper {
             )
         }
         let files = plan.groups.flatMap { $0 }
+        for group in plan.groups {
+            var duration: TimeInterval = 0
+            for file in group {
+                duration += file.duration
+                guard file.startTime.isFinite, file.startTime >= 0, file.duration.isFinite, file.duration > 0,
+                      duration * 1_000 < Double(Int64.max) else {
+                    throw ConversionOutputError.invalidChapterTime(file.sourceURL)
+                }
+            }
+        }
         try validateInputSnapshots(for: files, expected: plan.inputSnapshots)
 
         let inputByPath = Dictionary(
-            files.map { (canonicalPath($0.url), $0) },
+            files.map { (FileSystemEntry.canonicalPath($0.url), $0) },
             uniquingKeysWith: { first, _ in first }
         )
         let inputIdentities: [(AudioFile, FileSystemIdentity)] = files.compactMap { file in
-            guard case .existing(let identity) = plan.inputSnapshots[canonicalPath(file.url)] else {
+            guard case .existing(let identity) = plan.inputSnapshots[FileSystemEntry.canonicalPath(file.url)] else {
                 return nil
             }
             return (file, identity)
@@ -135,12 +145,12 @@ extension FFmpegWrapper {
                 for: output,
                 expected: plan.outputDirectorySnapshots[index]
             )
-            let outputPath = canonicalPath(output)
+            let outputPath = FileSystemEntry.canonicalPath(output)
             guard seenOutputs.insert(outputPath).inserted else {
                 throw ConversionOutputError.destinationChanged(output)
             }
             let planned = plan.outputSnapshots[index]
-            let current = captureSnapshot(of: output)
+            let current = FileSystemEntry.snapshot(of: output)
             guard planned.matchesContent(of: current) else {
                 if case .inaccessible(let number) = current {
                     throw ConversionOutputError.destinationInaccessible(output, number)
@@ -157,7 +167,7 @@ extension FFmpegWrapper {
             if let input = inputByPath[outputPath] {
                 throw ConversionOutputError.destinationAliasesInput(output, input.sourceURL)
             }
-            if let outputIdentity = fileSystemIdentity(at: output, followSymlink: true),
+            if let outputIdentity = FileSystemEntry.identity(at: output, followSymlink: true),
                let match = inputIdentities.first(where: {
                    $0.1.device == outputIdentity.device && $0.1.inode == outputIdentity.inode
                }) {
@@ -180,18 +190,20 @@ extension FFmpegWrapper {
         // und der leere Plan liefe in einen sachfremden Zielfehler.
         guard !files.isEmpty else { return [] }
         guard let maxHours = maxDurationHours, maxHours > 0 else { return [files] }
-        var result: [[AudioFile]] = []; var currentGroup: [AudioFile] = []; var currentDuration: TimeInterval = 0
+        let limit = Double(maxHours) * 3600
+        var result: [[AudioFile]] = []
+        var currentGroup: [AudioFile] = []
+        var currentDuration: TimeInterval = 0
         for file in files {
-            if currentDuration + file.duration <= Double(maxHours) * 3600 {
-                currentGroup.append(file); currentDuration += file.duration
-            } else {
-                if !currentGroup.isEmpty { result.append(currentGroup) }
-                currentGroup = [file]; currentDuration = file.duration
+            if !currentGroup.isEmpty, currentDuration + file.duration > limit {
+                result.append(currentGroup)
+                currentGroup = []
+                currentDuration = 0
             }
+            currentGroup.append(file)
+            currentDuration += file.duration
         }
-        if !currentGroup.isEmpty { result.append(currentGroup) }
+        result.append(currentGroup)
         return result
     }
-
-
 }

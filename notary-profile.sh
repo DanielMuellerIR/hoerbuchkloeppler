@@ -49,12 +49,8 @@ hoerbuchkloeppler_require_notary_profile() {
   # `history` ist der verlässliche Test: findet gültige Profile zuverlässiger
   # als ein bloßer security-find-generic-password-Check.
   #
-  # Fünf Versuche statt einem: `history` meldet gelegentlich fälschlich „No
-  # Keychain password item found", obwohl das Profil da ist (2026-07-26 auf
-  # einem Mac belegt — Versuch 1 fehlgeschlagen, Versuch 2 sofort ok). Ein
-  # einzelner Fehlversuch würde sonst einen ganzen Lauf grundlos abbrechen oder
-  # unnötig nach store-credentials fragen; ein wirklich fehlendes Profil
-  # scheitert auch nach fünf Versuchen.
+  # `history` kann kurzzeitig ein vorhandenes Schlüsselbundprofil als fehlend
+  # melden. Erst nach mehreren Fehlversuchen nach der Einrichtung fragen.
   if ! hoerbuchkloeppler_notary_profile_works "$profile"; then
     echo "✗ Notary-Profil '$profile' ist auf diesem Mac nicht verwendbar." >&2
     echo "  (Schlüsselbund-Profile werden zwischen Macs nicht synchronisiert;" >&2

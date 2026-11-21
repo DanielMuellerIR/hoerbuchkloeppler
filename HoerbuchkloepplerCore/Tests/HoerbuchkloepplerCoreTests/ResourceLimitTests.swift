@@ -73,7 +73,7 @@ struct ResourceLimitTests {
         #expect(try context.run(process))
         context.failSegments()
         #expect(!process.isRunning)
-        #expect(context.hasSegmentFailure)
+        #expect(!context.canRunSegments)
         #expect(!context.isCancelled)
         let next = Process()
         next.executableURL = URL(fileURLWithPath: "/usr/bin/true")

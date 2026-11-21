@@ -12,30 +12,108 @@ struct OutputRecoveryTests {
         let deadOwner: pid_t = 987_654
         let final = directory.appendingPathComponent("Buch.m4b")
         try Data("alt".utf8).write(to: final)
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
-        var staging: StagingOutputHandle? = try FFmpegWrapper
-            .createProtectedStagingOutput(for: final, ownerPID: deadOwner)
+        let expected = FileSystemEntry.snapshot(of: final)
+        var staging: StagingOutputHandle? = try OutputStaging.createProtectedOutput(for: final, ownerPID: deadOwner)
         let stagingURL = try #require(staging?.url)
         let ownership = try #require(staging?.ownership)
         let protectedDirectory = try #require(ownership.protectedDirectory)
         try Data("neu".utf8).write(to: stagingURL)
 
-        let removed = try FFmpegWrapper.commitStagedOutput(
+        let removed = try OutputCommit.publish(
             stagingURL,
             to: final,
             expectedDestination: expected,
             expectedStagingOwnership: ownership,
-            unlinkDisplacedOutput: { _, _ in false }
+            operations: .init(removeDisplacedOutput: { _, _ in false })
         )
         #expect(!removed)
         #expect(try String(contentsOf: final, encoding: .utf8) == "neu")
         #expect(try String(contentsOf: stagingURL, encoding: .utf8) == "alt")
         staging = nil
 
-        FFmpegWrapper.cleanupOutputQuarantines(in: directory)
+        OutputCleanup.removeOrphanedQuarantines(in: directory)
 
         #expect(!FileManager.default.fileExists(atPath: protectedDirectory.path))
         #expect(try String(contentsOf: final, encoding: .utf8) == "neu")
+    }
+
+    @Test("Alter Export bleibt nach fehlgeschlagenem Rücktausch im geschützten Staging erhalten")
+    func failedProtectedRollbackRetainsPreviousOutput() throws {
+        let directory = try makeTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        let parked = directory.appendingPathComponent("verschoben.m4b")
+        try Data("bestätigtes Ziel".utf8).write(to: final)
+        let expected = FileSystemEntry.snapshot(of: final)
+        let staging = try OutputStaging.createProtectedOutput(for: final, ownerPID: 987_654)
+        try Data("eigene Ausgabe".utf8).write(to: staging.url)
+        var swapAttempt = 0
+
+        let error = #expect(throws: ConversionOutputError.self) {
+            try OutputCommit.publish(
+                staging.url,
+                to: final,
+                expectedDestination: expected,
+                expectedStagingOwnership: staging.ownership,
+                operations: .init(rename: { source, destination, flags in
+                    guard flags == UInt32(RENAME_SWAP) else {
+                        errno = EACCES
+                        return -1
+                    }
+                    swapAttempt += 1
+                    let result = FileSystemEntry.rename(from: source, to: destination, flags: flags)
+                    if swapAttempt == 1, result == 0 {
+                        #expect(
+                            FileSystemEntry.rename(
+                                from: final, to: parked, flags: UInt32(RENAME_EXCL)) == 0)
+                    }
+                    return result
+                })
+            )
+        }
+        guard case .restoreFailed(let failedTarget, let recovery, let number) = error else {
+            Issue.record("Unerwarteter Rücktauschfehler: \(String(describing: error))")
+            return
+        }
+        #expect(failedTarget == final)
+        #expect(recovery == staging.url)
+        #expect(number == ENOENT)
+        #expect(try String(contentsOf: staging.url, encoding: .utf8) == "bestätigtes Ziel")
+
+        OutputCleanup.removeOrphans(for: final)
+
+        #expect(try String(contentsOf: staging.url, encoding: .utf8) == "bestätigtes Ziel")
+        #expect(try String(contentsOf: parked, encoding: .utf8) == "eigene Ausgabe")
+    }
+
+    @Test("Alter Swap-Datensatz ohne bestätigte Übernahme schützt mögliche Altdatei")
+    func oldAlternateCleanupIdentityIsNotDeletionProof() throws {
+        struct LegacyRecord: Encodable {
+            let identity: FileSystemIdentity
+            let filename = "entry.m4b"
+            let stableIdentityOnly = true
+            let alternateIdentity: FileSystemIdentity
+            let alternateStableIdentityOnly = false
+        }
+        let directory = try makeTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        try Data("bestätigtes Ziel".utf8).write(to: final)
+        let original = try #require(FileSystemEntry.identity(at: final, followSymlink: false))
+        let staging = try OutputStaging.createProtectedOutput(for: final, ownerPID: 987_654)
+        let container = try #require(staging.ownership.protectedDirectory)
+        try Data("eigene Ausgabe".utf8).write(to: staging.url)
+        try JSONEncoder().encode(
+            LegacyRecord(identity: staging.ownership.identity, alternateIdentity: original)
+        ).write(to: container.appendingPathComponent(CleanupEntryRecord.markerName))
+        let record = try #require(CleanupEntryRecord.read(in: container))
+        #expect(record.identity == staging.ownership.identity)
+        try FileManager.default.removeItem(at: staging.url)
+        try FileManager.default.moveItem(at: final, to: staging.url)
+
+        OutputCleanup.removeOrphans(for: final)
+
+        #expect(try String(contentsOf: staging.url, encoding: .utf8) == "bestätigtes Ziel")
     }
 
     @Test("Fehlgeschlagenes Staging-Cleanup bleibt bis zum erneuten Versuch registriert")
@@ -43,7 +121,7 @@ struct OutputRecoveryTests {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
-        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        let staging = try OutputStaging.createProtectedOutput(for: final)
         let protectedDirectory = try #require(
             staging.ownership.protectedDirectory
         )
@@ -71,7 +149,7 @@ struct OutputRecoveryTests {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
-        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        let staging = try OutputStaging.createProtectedOutput(for: final)
         let protectedDirectory = try #require(
             staging.ownership.protectedDirectory
         )
@@ -83,7 +161,7 @@ struct OutputRecoveryTests {
             staging.url,
             ownership: staging.ownership
         )
-        _ = try FFmpegWrapper.commitStagedOutput(
+        _ = try OutputCommit.publish(
             staging.url,
             to: final,
             expectedDestination: .missing,
@@ -106,29 +184,31 @@ struct OutputRecoveryTests {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
-        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        let staging = try OutputStaging.createProtectedOutput(for: final)
         let protectedDirectory = try #require(
             staging.ownership.protectedDirectory
         )
         try Data("alte Ausgabe".utf8).write(to: staging.url)
         let identity = try #require(
-            FFmpegWrapper.fileSystemIdentity(
+            FileSystemEntry.identity(
                 at: staging.url,
                 followSymlink: false
             )
         )
         var observedCleanupDirectory: URL?
 
-        _ = FFmpegWrapper.removeDisplacedOutput(
+        _ = OutputCleanup.removeDisplacedOutput(
             staging.url,
             expectedIdentity: identity,
             cleanupParent: directory,
-            afterQuarantine: { cleanupDirectory in
-                observedCleanupDirectory = cleanupDirectory
-                try? Data("Recovery".utf8).write(
-                    to: cleanupDirectory.appendingPathComponent("extra.txt")
-                )
-            }
+            checkpoints: .init(
+                afterQuarantine: { cleanupDirectory in
+                    observedCleanupDirectory = cleanupDirectory
+                    try? Data("Recovery".utf8).write(
+                        to: cleanupDirectory.appendingPathComponent("extra.txt")
+                    )
+                }
+            )
         )
 
         #expect(
@@ -150,15 +230,15 @@ struct OutputRecoveryTests {
         let cleanup = directory.appendingPathComponent(
             ".HB_DisplacedCleanup_\(owner)-\(UUID().uuidString)"
         )
-        try FFmpegWrapper.createOwnedTempDirectory(cleanup, ownerPID: owner)
+        try OwnedTemporaryDirectory.create(cleanup, ownerPID: owner)
         let entry = cleanup.appendingPathComponent("entry")
         try Data("erwartet".utf8).write(to: entry)
         let entryIdentity = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: entry, followSymlink: false)
+            FileSystemEntry.identity(at: entry, followSymlink: false)
         )
-        try FFmpegWrapper.writeCleanupEntryIdentity(entryIdentity, in: cleanup)
+        try CleanupEntryRecord.write(entryIdentity, in: cleanup)
         let directoryIdentity = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: cleanup, followSymlink: false)
+            FileSystemEntry.identity(at: cleanup, followSymlink: false)
         )
         let record = CleanupEntryRecord(
             identity: entryIdentity,
@@ -167,31 +247,33 @@ struct OutputRecoveryTests {
         )
         var replacementWritten = false
 
-        FFmpegWrapper.removeOwnedTempDirectory(
+        OwnedTemporaryDirectory.remove(
             cleanup,
             expectedIdentity: directoryIdentity,
             expectedOwnerPID: owner,
-            beforeRecordedEntryQuarantine: { descriptor in
-                guard "entry".withCString({
-                    Darwin.unlinkat(descriptor, $0, 0)
-                }) == 0 else { return }
-                let replacement = "entry".withCString {
-                    Darwin.openat(
-                        descriptor,
-                        $0,
-                        O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW,
-                        mode_t(0o600)
-                    )
+            contents: .recordedOutput(record),
+            checkpoints: .init(
+                beforeRecordedEntryQuarantine: { descriptor in
+                    guard "entry".withCString({
+                        Darwin.unlinkat(descriptor, $0, 0)
+                    }) == 0 else { return }
+                    let replacement = "entry".withCString {
+                        Darwin.openat(
+                            descriptor,
+                            $0,
+                            O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW,
+                            mode_t(0o600)
+                        )
+                    }
+                    guard replacement >= 0 else { return }
+                    let payload = Data("fremd".utf8)
+                    replacementWritten = payload.withUnsafeBytes {
+                        Darwin.write(replacement, $0.baseAddress, $0.count)
+                            == $0.count
+                    }
+                    _ = Darwin.close(replacement)
                 }
-                guard replacement >= 0 else { return }
-                let payload = Data("fremd".utf8)
-                replacementWritten = payload.withUnsafeBytes {
-                    Darwin.write(replacement, $0.baseAddress, $0.count)
-                        == $0.count
-                }
-                _ = Darwin.close(replacement)
-            },
-            expectedCleanupEntry: record
+            )
         )
 
         #expect(replacementWritten)
@@ -214,22 +296,22 @@ struct OutputRecoveryTests {
         let cleanup = directory.appendingPathComponent(
             ".HB_DisplacedCleanup_\(deadOwner)-\(UUID().uuidString)"
         )
-        try FFmpegWrapper.createOwnedTempDirectory(
+        try OwnedTemporaryDirectory.create(
             cleanup,
             ownerPID: deadOwner
         )
         let entry = cleanup.appendingPathComponent("entry")
         try Data("Altdatei".utf8).write(to: entry)
         let identity = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: entry, followSymlink: false)
+            FileSystemEntry.identity(at: entry, followSymlink: false)
         )
-        try FFmpegWrapper.writeCleanupEntryIdentity(identity, in: cleanup)
+        try CleanupEntryRecord.write(identity, in: cleanup)
         try FileManager.default.moveItem(
             at: entry,
             to: cleanup.appendingPathComponent(".HB_EntryCleanup")
         )
 
-        FFmpegWrapper.cleanupOutputQuarantines(in: directory)
+        OutputCleanup.removeOrphanedQuarantines(in: directory)
 
         #expect(!FileManager.default.fileExists(atPath: cleanup.path))
     }
@@ -240,8 +322,8 @@ struct OutputRecoveryTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
         try Data("alt".utf8).write(to: final)
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
-        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        let expected = FileSystemEntry.snapshot(of: final)
+        let staging = try OutputStaging.createProtectedOutput(for: final)
         try Data("neu".utf8).write(to: staging.url)
         let context = ConversionContext()
         context.registerStagedOutput(
@@ -249,12 +331,12 @@ struct OutputRecoveryTests {
             ownership: staging.ownership
         )
 
-        let removed = try FFmpegWrapper.commitStagedOutput(
+        let removed = try OutputCommit.publish(
             staging.url,
             to: final,
             expectedDestination: expected,
             expectedStagingOwnership: staging.ownership,
-            unlinkDisplacedOutput: { _, _ in false }
+            operations: .init(removeDisplacedOutput: { _, _ in false })
         )
         #expect(!removed)
         guard case .existing(let oldIdentity) = expected else {
@@ -282,12 +364,12 @@ struct OutputRecoveryTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
         try Data("alt".utf8).write(to: final)
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let expected = FileSystemEntry.snapshot(of: final)
         guard case .existing(let oldIdentity) = expected else {
             Issue.record("Bestehendes Ziel lieferte keinen Snapshot")
             return
         }
-        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        let staging = try OutputStaging.createProtectedOutput(for: final)
         let protectedDirectory = try #require(
             staging.ownership.protectedDirectory
         )
@@ -302,12 +384,12 @@ struct OutputRecoveryTests {
             staging.url,
             ownership: staging.ownership
         )
-        _ = try FFmpegWrapper.commitStagedOutput(
+        _ = try OutputCommit.publish(
             staging.url,
             to: final,
             expectedDestination: expected,
             expectedStagingOwnership: staging.ownership,
-            unlinkDisplacedOutput: { _, _ in false }
+            operations: .init(removeDisplacedOutput: { _, _ in false })
         )
         context.registerDisplacedOutput(
             staging.url,
@@ -332,36 +414,38 @@ struct OutputRecoveryTests {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
-        let staged = FFmpegWrapper.stagingOutputURL(for: final)
+        let staged = OutputArtifactNames.stagingOutputURL(for: final)
         let replacement = directory.appendingPathComponent("fremd.m4b")
         try Data("bestätigtes Ziel".utf8).write(to: final)
         try Data("eigene Ausgabe".utf8).write(to: staged)
         try Data("fremder Ersatz".utf8).write(to: replacement)
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let expected = FileSystemEntry.snapshot(of: final)
         var renameCount = 0
         var recoveryURL: URL?
 
         do {
-            _ = try FFmpegWrapper.commitStagedOutput(
+            _ = try OutputCommit.publish(
                 staged,
                 to: final,
                 expectedDestination: expected,
-                beforeRename: {
-                    try? FileManager.default.removeItem(at: staged)
-                    try? FileManager.default.moveItem(at: replacement, to: staged)
-                },
-                renameOperation: { source, destination, flags in
-                    renameCount += 1
-                    if renameCount == 2 {
-                        errno = EIO
-                        return -1
+                operations: .init(
+                    beforeDestinationCheck: {
+                        try? FileManager.default.removeItem(at: staged)
+                        try? FileManager.default.moveItem(at: replacement, to: staged)
+                    },
+                    rename: { source, destination, flags in
+                        renameCount += 1
+                        if renameCount == 2 {
+                            errno = EIO
+                            return -1
+                        }
+                        return FileSystemEntry.rename(
+                            from: source,
+                            to: destination,
+                            flags: flags
+                        )
                     }
-                    return FFmpegWrapper.renameEntry(
-                        from: source,
-                        to: destination,
-                        flags: flags
-                    )
-                }
+                )
             )
             Issue.record("Erzwungener Rollback-Fehler blieb aus")
         } catch let error as ConversionOutputError {
@@ -376,7 +460,7 @@ struct OutputRecoveryTests {
         #expect(!recovered.lastPathComponent.contains(".partial-"))
         #expect(try String(contentsOf: final, encoding: .utf8) == "fremder Ersatz")
         #expect(try String(contentsOf: recovered, encoding: .utf8) == "bestätigtes Ziel")
-        FFmpegWrapper.removeOrphanedStagedOutputs(for: final)
+        OutputCleanup.removeOrphans(for: final)
         #expect(FileManager.default.fileExists(atPath: recovered.path))
     }
 
@@ -385,36 +469,38 @@ struct OutputRecoveryTests {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
-        let staged = FFmpegWrapper.stagingOutputURL(for: final, ownerPID: 987_654)
+        let staged = OutputArtifactNames.stagingOutputURL(for: final, ownerPID: 987_654)
         let replacement = directory.appendingPathComponent("fremd.m4b")
         try Data("bestätigtes Ziel".utf8).write(to: final)
         try Data("eigene Ausgabe".utf8).write(to: staged)
         try Data("fremder Ersatz".utf8).write(to: replacement)
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let expected = FileSystemEntry.snapshot(of: final)
         var renameCount = 0
         var reportedRecovery: URL?
 
         do {
-            _ = try FFmpegWrapper.commitStagedOutput(
+            _ = try OutputCommit.publish(
                 staged,
                 to: final,
                 expectedDestination: expected,
-                beforeRename: {
-                    try? FileManager.default.removeItem(at: staged)
-                    try? FileManager.default.moveItem(at: replacement, to: staged)
-                },
-                renameOperation: { source, destination, flags in
-                    renameCount += 1
-                    if renameCount >= 2 {
-                        errno = EIO
-                        return -1
+                operations: .init(
+                    beforeDestinationCheck: {
+                        try? FileManager.default.removeItem(at: staged)
+                        try? FileManager.default.moveItem(at: replacement, to: staged)
+                    },
+                    rename: { source, destination, flags in
+                        renameCount += 1
+                        if renameCount >= 2 {
+                            errno = EIO
+                            return -1
+                        }
+                        return FileSystemEntry.rename(
+                            from: source,
+                            to: destination,
+                            flags: flags
+                        )
                     }
-                    return FFmpegWrapper.renameEntry(
-                        from: source,
-                        to: destination,
-                        flags: flags
-                    )
-                }
+                )
             )
         } catch let error as ConversionOutputError {
             guard case .restoreFailed(_, let recovery, _) = error else {
@@ -425,7 +511,7 @@ struct OutputRecoveryTests {
         }
 
         #expect(reportedRecovery == staged)
-        FFmpegWrapper.removeOrphanedStagedOutputs(for: final)
+        OutputCleanup.removeOrphans(for: final)
         #expect(try String(contentsOf: staged, encoding: .utf8) == "bestätigtes Ziel")
     }
 
@@ -437,15 +523,15 @@ struct OutputRecoveryTests {
         let staged = directory.appendingPathComponent(".staged.m4b")
         try Data("alt".utf8).write(to: final)
         try Data("neu".utf8).write(to: staged)
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let expected = FileSystemEntry.snapshot(of: final)
         let context = ConversionContext()
         context.registerStagedOutput(staged)
 
-        let removed = try FFmpegWrapper.commitStagedOutput(
+        let removed = try OutputCommit.publish(
             staged,
             to: final,
             expectedDestination: expected,
-            unlinkDisplacedOutput: { _, _ in false }
+            operations: .init(removeDisplacedOutput: { _, _ in false })
         )
 
         #expect(!removed)
@@ -473,21 +559,23 @@ struct OutputRecoveryTests {
         try Data("bestätigte Altdatei".utf8).write(to: displaced)
         try Data("fremder Ersatz".utf8).write(to: replacement)
         let identity = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: displaced, followSymlink: false)
+            FileSystemEntry.identity(at: displaced, followSymlink: false)
         )
         var hookError: (any Error)?
 
-        let removed = FFmpegWrapper.removeDisplacedOutput(
+        let removed = OutputCleanup.removeDisplacedOutput(
             displaced,
             expectedIdentity: identity,
-            beforeQuarantine: {
-                do {
-                    try FileManager.default.moveItem(at: displaced, to: parked)
-                    try FileManager.default.moveItem(at: replacement, to: displaced)
-                } catch {
-                    hookError = error
+            checkpoints: .init(
+                beforeQuarantine: {
+                    do {
+                        try FileManager.default.moveItem(at: displaced, to: parked)
+                        try FileManager.default.moveItem(at: replacement, to: displaced)
+                    } catch {
+                        hookError = error
+                    }
                 }
-            }
+            )
         )
 
         #expect(hookError == nil)
@@ -504,31 +592,33 @@ struct OutputRecoveryTests {
         let parked = directory.appendingPathComponent("cleanup-gesichert")
         try Data("bestätigte Altdatei".utf8).write(to: displaced)
         let identity = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: displaced, followSymlink: false)
+            FileSystemEntry.identity(at: displaced, followSymlink: false)
         )
         var replacementPayload: URL?
         var hookError: (any Error)?
 
-        let removed = FFmpegWrapper.removeDisplacedOutput(
+        let removed = OutputCleanup.removeDisplacedOutput(
             displaced,
             expectedIdentity: identity,
-            afterQuarantine: { cleanupDirectory in
-                do {
-                    try FileManager.default.moveItem(
-                        at: cleanupDirectory,
-                        to: parked
-                    )
-                    try FileManager.default.createDirectory(
-                        at: cleanupDirectory,
-                        withIntermediateDirectories: false
-                    )
-                    let payload = cleanupDirectory.appendingPathComponent("wichtig.txt")
-                    try Data("nicht anfassen".utf8).write(to: payload)
-                    replacementPayload = payload
-                } catch {
-                    hookError = error
+            checkpoints: .init(
+                afterQuarantine: { cleanupDirectory in
+                    do {
+                        try FileManager.default.moveItem(
+                            at: cleanupDirectory,
+                            to: parked
+                        )
+                        try FileManager.default.createDirectory(
+                            at: cleanupDirectory,
+                            withIntermediateDirectories: false
+                        )
+                        let payload = cleanupDirectory.appendingPathComponent("wichtig.txt")
+                        try Data("nicht anfassen".utf8).write(to: payload)
+                        replacementPayload = payload
+                    } catch {
+                        hookError = error
+                    }
                 }
-            }
+            )
         )
 
         #expect(removed)
@@ -545,15 +635,15 @@ struct OutputRecoveryTests {
         let cleanup = directory.appendingPathComponent(
             ".HB_DisplacedCleanup_\(owner)-\(UUID().uuidString)"
         )
-        try FFmpegWrapper.createOwnedTempDirectory(cleanup, ownerPID: owner)
+        try OwnedTemporaryDirectory.create(cleanup, ownerPID: owner)
         let entry = cleanup.appendingPathComponent("entry")
         try Data("erwartet".utf8).write(to: entry)
         let entryIdentity = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: entry, followSymlink: false)
+            FileSystemEntry.identity(at: entry, followSymlink: false)
         )
-        try FFmpegWrapper.writeCleanupEntryIdentity(entryIdentity, in: cleanup)
+        try CleanupEntryRecord.write(entryIdentity, in: cleanup)
         let directoryIdentity = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: cleanup, followSymlink: false)
+            FileSystemEntry.identity(at: cleanup, followSymlink: false)
         )
         let record = CleanupEntryRecord(
             identity: entryIdentity,
@@ -562,29 +652,31 @@ struct OutputRecoveryTests {
         )
         var intruderWritten = false
 
-        FFmpegWrapper.removeOwnedTempDirectory(
+        OwnedTemporaryDirectory.remove(
             cleanup,
             expectedIdentity: directoryIdentity,
             expectedOwnerPID: owner,
-            beforeRecordedEntryQuarantine: { descriptor in
-                // Der aufgezeichnete Eintrag bleibt unangetastet; dazu kommt
-                // eine Datei, die es beim ersten Namens-Scan noch nicht gab.
-                let intruder = "fremd.txt".withCString {
-                    Darwin.openat(
-                        descriptor,
-                        $0,
-                        O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW,
-                        mode_t(0o600)
-                    )
+            contents: .recordedOutput(record),
+            checkpoints: .init(
+                beforeRecordedEntryQuarantine: { descriptor in
+                    // Der aufgezeichnete Eintrag bleibt unangetastet; dazu kommt
+                    // eine Datei, die es beim ersten Namens-Scan noch nicht gab.
+                    let intruder = "fremd.txt".withCString {
+                        Darwin.openat(
+                            descriptor,
+                            $0,
+                            O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW,
+                            mode_t(0o600)
+                        )
+                    }
+                    guard intruder >= 0 else { return }
+                    let payload = Data("Recovery-Daten".utf8)
+                    intruderWritten = payload.withUnsafeBytes {
+                        Darwin.write(intruder, $0.baseAddress, $0.count) == $0.count
+                    }
+                    _ = Darwin.close(intruder)
                 }
-                guard intruder >= 0 else { return }
-                let payload = Data("Recovery-Daten".utf8)
-                intruderWritten = payload.withUnsafeBytes {
-                    Darwin.write(intruder, $0.baseAddress, $0.count) == $0.count
-                }
-                _ = Darwin.close(intruder)
-            },
-            expectedCleanupEntry: record
+            )
         )
 
         #expect(intruderWritten)
@@ -612,24 +704,26 @@ struct OutputRecoveryTests {
         let parked = directory.appendingPathComponent("bestätigt-gesichert.m4b")
         try Data("bestätigte Altdatei".utf8).write(to: displaced)
         let identity = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: displaced, followSymlink: false)
+            FileSystemEntry.identity(at: displaced, followSymlink: false)
         )
         var insertedEntry: URL?
         var hookError: (any Error)?
 
-        let removed = FFmpegWrapper.removeDisplacedOutput(
+        let removed = OutputCleanup.removeDisplacedOutput(
             displaced,
             expectedIdentity: identity,
-            afterQuarantine: { cleanupDirectory in
-                do {
-                    let entry = cleanupDirectory.appendingPathComponent("entry")
-                    try FileManager.default.moveItem(at: entry, to: parked)
-                    try Data("fremder Ersatz".utf8).write(to: entry)
-                    insertedEntry = entry
-                } catch {
-                    hookError = error
+            checkpoints: .init(
+                afterQuarantine: { cleanupDirectory in
+                    do {
+                        let entry = cleanupDirectory.appendingPathComponent("entry")
+                        try FileManager.default.moveItem(at: entry, to: parked)
+                        try Data("fremder Ersatz".utf8).write(to: entry)
+                        insertedEntry = entry
+                    } catch {
+                        hookError = error
+                    }
                 }
-            }
+            )
         )
 
         #expect(removed)
@@ -654,29 +748,31 @@ struct OutputRecoveryTests {
         let firstReplacement = directory.appendingPathComponent("fremd-eins.m4b")
         try Data("erwartete Datei".utf8).write(to: source)
         let expected = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: source, followSymlink: false)
+            FileSystemEntry.identity(at: source, followSymlink: false)
         )
         try Data("fremd eins".utf8).write(to: firstReplacement)
         var hookError: (any Error)?
 
-        let removed = FFmpegWrapper.removeDisplacedOutput(
+        let removed = OutputCleanup.removeDisplacedOutput(
             source,
             expectedIdentity: expected,
-            beforeQuarantine: {
-                do {
-                    try FileManager.default.moveItem(at: source, to: expectedParked)
-                    try FileManager.default.moveItem(at: firstReplacement, to: source)
-                } catch {
-                    hookError = error
+            checkpoints: .init(
+                beforeQuarantine: {
+                    do {
+                        try FileManager.default.moveItem(at: source, to: expectedParked)
+                        try FileManager.default.moveItem(at: firstReplacement, to: source)
+                    } catch {
+                        hookError = error
+                    }
+                },
+                beforeRestore: {
+                    do {
+                        try Data("fremd zwei".utf8).write(to: source)
+                    } catch {
+                        hookError = error
+                    }
                 }
-            },
-            beforeRestore: {
-                do {
-                    try Data("fremd zwei".utf8).write(to: source)
-                } catch {
-                    hookError = error
-                }
-            }
+            )
         )
 
         #expect(!removed)
@@ -695,35 +791,37 @@ struct OutputRecoveryTests {
     func stagingCleanupIsBoundToOwnedDirectory() throws {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let staged = FFmpegWrapper.stagingOutputURL(
+        let staged = OutputArtifactNames.stagingOutputURL(
             for: directory.appendingPathComponent("Buch.m4b")
         )
         let parked = directory.appendingPathComponent("cleanup-gesichert")
-        let ownership = try FFmpegWrapper.createOwnedStagingOutput(staged)
+        let ownership = try OutputStaging.createLegacyOutput(staged)
         try Data("unvollständig".utf8).write(to: staged)
         var replacementPayload: URL?
         var hookError: (any Error)?
 
-        let removed = FFmpegWrapper.removeOwnedStagedOutput(
+        let removed = OutputCleanup.removeLegacyOutput(
             staged,
             expectedOwnership: ownership,
-            afterQuarantine: { cleanupDirectory in
-                do {
-                    try FileManager.default.moveItem(
-                        at: cleanupDirectory,
-                        to: parked
-                    )
-                    try FileManager.default.createDirectory(
-                        at: cleanupDirectory,
-                        withIntermediateDirectories: false
-                    )
-                    let payload = cleanupDirectory.appendingPathComponent("wichtig.txt")
-                    try Data("nicht anfassen".utf8).write(to: payload)
-                    replacementPayload = payload
-                } catch {
-                    hookError = error
+            checkpoints: .init(
+                afterQuarantine: { cleanupDirectory in
+                    do {
+                        try FileManager.default.moveItem(
+                            at: cleanupDirectory,
+                            to: parked
+                        )
+                        try FileManager.default.createDirectory(
+                            at: cleanupDirectory,
+                            withIntermediateDirectories: false
+                        )
+                        let payload = cleanupDirectory.appendingPathComponent("wichtig.txt")
+                        try Data("nicht anfassen".utf8).write(to: payload)
+                        replacementPayload = payload
+                    } catch {
+                        hookError = error
+                    }
                 }
-            }
+            )
         )
 
         #expect(removed)
@@ -747,25 +845,25 @@ struct OutputRecoveryTests {
             ".HB_Cleanup_\(deadOwner)-\(UUID().uuidString)"
         )
         for cleanup in [stagingCleanup, displacedCleanup, reboundCleanup] {
-            try FFmpegWrapper.createOwnedTempDirectory(
+            try OwnedTemporaryDirectory.create(
                 cleanup,
                 ownerPID: deadOwner
             )
             let entry = cleanup.appendingPathComponent("entry")
             try Data("Rest".utf8).write(to: entry)
             let identity = try #require(
-                FFmpegWrapper.fileSystemIdentity(
+                FileSystemEntry.identity(
                     at: entry,
                     followSymlink: false
                 )
             )
-            try FFmpegWrapper.writeCleanupEntryIdentity(
+            try CleanupEntryRecord.write(
                 identity,
                 in: cleanup
             )
         }
 
-        FFmpegWrapper.cleanupOutputQuarantines(in: directory)
+        OutputCleanup.removeOrphanedQuarantines(in: directory)
 
         #expect(!FileManager.default.fileExists(atPath: stagingCleanup.path))
         #expect(!FileManager.default.fileExists(atPath: displacedCleanup.path))
@@ -780,20 +878,20 @@ struct OutputRecoveryTests {
         let cleanup = directory.appendingPathComponent(
             ".HB_DisplacedCleanup_\(deadOwner)-\(UUID().uuidString)"
         )
-        try FFmpegWrapper.createOwnedTempDirectory(cleanup, ownerPID: deadOwner)
+        try OwnedTemporaryDirectory.create(cleanup, ownerPID: deadOwner)
         let expectedSource = directory.appendingPathComponent("erwartet.m4b")
         try Data("erwartet".utf8).write(to: expectedSource)
         let expected = try #require(
-            FFmpegWrapper.fileSystemIdentity(
+            FileSystemEntry.identity(
                 at: expectedSource,
                 followSymlink: false
             )
         )
-        try FFmpegWrapper.writeCleanupEntryIdentity(expected, in: cleanup)
+        try CleanupEntryRecord.write(expected, in: cleanup)
         let entry = cleanup.appendingPathComponent("entry")
         try Data("fremder Eintrag".utf8).write(to: entry)
 
-        FFmpegWrapper.cleanupOutputQuarantines(in: directory)
+        OutputCleanup.removeOrphanedQuarantines(in: directory)
 
         #expect(FileManager.default.fileExists(atPath: cleanup.path))
         #expect(try String(contentsOf: entry, encoding: .utf8) == "fremder Eintrag")

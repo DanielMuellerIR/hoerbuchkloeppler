@@ -12,9 +12,11 @@ Die Quellenprüfung vergleicht SHA-256 über den vollständigen Dateiinhalt. Sie
 meldet fehlende, unlesbare oder veränderte Quellen; GUI und CLI starten damit
 keine Konvertierung. Beim erneuten Speichern bleiben die ursprünglichen
 Fingerprints erhalten, damit Speichern eine veränderte Quelle nicht still
-akzeptiert. Entfernte Kapitel können entfernt und die Quelle neu importiert
-werden. Unbekannte Formatversionen werden abgewiesen, bevor die Session ersetzt
-wird. Projektdateien sind auf 48 MiB und Coverdaten auf 32 MiB begrenzt.
+akzeptiert. Zum Übernehmen einer veränderten Quelle alle zugehörigen Kapitel
+entfernen und die Datei neu importieren. Per Undo wiederhergestellte Kapitel
+behalten ihren ursprünglichen Fingerprint. Unbekannte Formatversionen werden
+abgewiesen, bevor die Session ersetzt wird. Projektdateien sind auf 48 MiB und
+Coverdaten auf 32 MiB begrenzt.
 Kapitelenden müssen als Vorschauzeiten darstellbar sein. Die Gesamtdauer
 muss für die Kapitelmetadaten in Millisekunden als 64-Bit-Ganzzahl darstellbar sein.
 
@@ -38,7 +40,8 @@ Die Kapitelliste unterstützt Mehrfachauswahl und Nummerierung mit Präfix,
 Umordnen per Listendrag oder Pfeilbuttons, Undo/Redo für Kapiteländerungen
 (Cmd+Z/Cmd+Shift+Z), Teilen an der aktuellen Abspielposition und Zusammenführen
 mit dem nächsten Abschnitt. Zusammenführen setzt dieselbe Quelle und lückenlos
-anschließende Zeitabschnitte voraus; der erste Titel bleibt erhalten.
+anschließende Zeitabschnitte voraus. Sind beide Abschnitte bereits gespeichert,
+müssen ihre Fingerprints übereinstimmen. Der erste Titel bleibt erhalten.
 Nachimporte hängen neue, sortierte Kapitel an die vorhandene Reihenfolge an.
 Das Schließen des Konvertierungsprotokolls erhält das bearbeitete Buch.
 
@@ -50,7 +53,9 @@ Konvertierung oder eines offenen Sheets bleibt dieser gesperrt.
 Während eines Imports sind auch Kapitelbearbeitung und Listendrag gesperrt.
 
 Die Kapitelhistorie umfasst höchstens 100 Schritte und wird beim Projektöffnen
-geleert; sie ist nicht Bestandteil der Projektdatei. Die GUI liest und
+geleert; sie ist nicht Bestandteil der Projektdatei. Die Sitzung hält die
+Quellbindungen der aktuellen und im Verlauf erreichbaren Kapitel sowie des
+gerade geschriebenen Stands. Die GUI liest und
 schreibt Projekte außerhalb des Main Actors. Die Quellenprüfung vor dem Export
 ist abbrechbar. Für bereits verifizierte Datei-Snapshots verwendet sie die
 gespeicherten Hashes. Neue oder geänderte Snapshots werden im Hintergrund gelesen.

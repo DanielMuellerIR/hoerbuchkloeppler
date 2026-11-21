@@ -1,97 +1,69 @@
 import HoerbuchkloepplerCore
 import SwiftUI
-import Combine
 
 struct ConversionOverlayView: View {
     @ObservedObject var session: ConversionSession
     
     var body: some View {
         ZStack {
-            // Darker blur background
             VisualEffectView(material: .fullScreenUI, blendingMode: .withinWindow)
-                .edgesIgnoringSafeArea(.all)
-            
+                .ignoresSafeArea()
+
             VStack(spacing: 0) {
-                // TERMINAL WINDOW
                 VStack(spacing: 0) {
-                    // TERMINAL HEADER (macOS style)
                     HStack {
-                        HStack(spacing: 6) {
-                            Circle().fill(Color.red).frame(width: 12, height: 12)
-                            Circle().fill(Color.yellow).frame(width: 12, height: 12)
-                            Circle().fill(Color.green).frame(width: 12, height: 12)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Konvertierungsprotokoll").font(.headline)
+                            Text(session.conversionPhase)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Text("hb_kloeppler — zsh")
-                            .font(.system(size: 13, weight: .bold, design: .monospaced))
-                            .foregroundColor(Color(NSColor.lightGray))
-                        Spacer()
-                        // Copy Log Button
-                        Button(action: {
+                        Button {
                             let pasteboard = NSPasteboard.general
                             pasteboard.clearContents()
                             pasteboard.setString(session.logString, forType: .string)
-                        }) {
-                            Image(systemName: "doc.on.doc")
-                                .foregroundColor(.gray)
+                        } label: {
+                            Label("Protokoll kopieren", systemImage: "doc.on.doc")
                         }
-                        .buttonStyle(.plain)
-                        .help("Gesamtes Log kopieren")
+                        .disabled(session.logString.isEmpty)
                     }
                     .padding(.horizontal, 16)
-                    .frame(height: 38)
-                    .background(Color(NSColor.windowBackgroundColor))
-                    
-                    // TERMINAL BODY
+                    .padding(.vertical, 8)
+                    .background(Color(nsColor: .windowBackgroundColor))
+
                     ScrollViewReader { proxy in
                         ScrollView {
                             VStack(alignment: .leading, spacing: 6) {
-                                // HISTORIE (Logs)
                                 LogTranscriptView(entries: session.eventLogs)
                                     .equatable()
                                     .padding(.horizontal, 16)
-                                    .textSelection(.enabled)
 
-
-                                // PACMAN SEKTION (Dynamisch für parallele Tasks)
                                 if session.isConverting && !session.segmentProgress.isEmpty {
-                                    VStack(alignment: .leading, spacing: 12) {
-                                        Text(">>> PROCESSING_SEGMENTS")
-                                            .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                            .foregroundColor(Color(NSColor.systemYellow))
-                                            .padding(.horizontal, 16)
-                                            .padding(.top, 10)
-                                        
-                                        ForEach(session.segmentProgress.sorted(by: { $0.key < $1.key }), id: \.key) { key, status in
-                                            PacmanRow(index: key + 1, filename: status.filename, progress: status.progress)
-                                                .padding(.horizontal, 16)
-                                        }
-                                    }
+                                    segmentProgress
                                 }
-                                
-                                // Anchor for auto-scroll
-                                Color.clear.frame(height: 1).id("BOTTOM_ANCHOR")
+
+                                Color.clear.frame(height: 1).id("log-end")
                             }
                             .padding(.vertical, 16)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled) // MACHT ALLES SELEKTIERBAR
+                            .textSelection(.enabled)
                         }
                         .onChange(of: session.eventLogs.count) { _ in
-                            withAnimation { proxy.scrollTo("BOTTOM_ANCHOR", anchor: .bottom) }
+                            withAnimation { proxy.scrollTo("log-end", anchor: .bottom) }
                         }
                         .onChange(of: session.segmentProgress.count) { _ in
-                            withAnimation { proxy.scrollTo("BOTTOM_ANCHOR", anchor: .bottom) }
+                            withAnimation { proxy.scrollTo("log-end", anchor: .bottom) }
                         }
                     }
-                    .background(Color.black)
+                    .background(.black)
                 }
                 .cornerRadius(12)
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.gray.opacity(0.3), lineWidth: 1))
                 .shadow(color: Color.black.opacity(0.6), radius: 20, x: 0, y: 10)
-                .frame(maxWidth: 800, maxHeight: 550) // Flexible but capped
+                .frame(maxWidth: 800, maxHeight: 550)
 
                 VStack(alignment: .leading) {
-                    Text("Phase: \(session.conversionPhase)")
                     ProgressView("Gesamtfortschritt", value: session.progress)
                     if !session.isConverting {
                         Text(session.lastConversionSucceeded == true ? "Alle Ausgaben erfolgreich" : (session.completedOutputURLs.isEmpty ? "Keine erfolgreiche Ausgabe" : "Teilerfolg: Einige Ausgaben wurden erstellt"))
@@ -108,11 +80,10 @@ struct ConversionOverlayView: View {
                         }.frame(maxHeight: 120)
                     }
                 }.frame(maxWidth: 800).padding(.top)
-                // ACTION BAR
                 HStack {
                     Spacer()
                     if session.isConverting {
-                        Button("Vorgang Abbrechen") { FFmpegWrapper.cancelConversion(session: session) }
+                        Button("Vorgang abbrechen") { FFmpegWrapper.cancelConversion(session: session) }
                             .buttonStyle(.bordered)
                             .foregroundColor(.red)
                             .controlSize(.large)
@@ -128,7 +99,34 @@ struct ConversionOverlayView: View {
             .padding(.bottom, 8)
         }
     }
-    
+
+    private var segmentProgress: some View {
+        let segments = session.segmentProgress.sorted { $0.key < $1.key }
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Segmentfortschritt")
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundStyle(Color(nsColor: .systemYellow))
+                .padding(.top, 10)
+            if segments.contains(where: { PacmanBar(progress: $0.value.progress).isAnimating }) {
+                TimelineView(.periodic(from: .now, by: 0.25)) { context in
+                    let mouthOpen = Int(context.date.timeIntervalSinceReferenceDate * 4).isMultiple(of: 2)
+                    segmentRows(segments, mouthOpen: mouthOpen)
+                }
+            } else {
+                segmentRows(segments, mouthOpen: true)
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private func segmentRows(_ segments: [(key: Int, value: SegmentStatus)], mouthOpen: Bool) -> some View {
+        ForEach(segments, id: \.key) { index, status in
+            let bar = PacmanBar(progress: status.progress)
+            PacmanRow(index: index + 1, filename: status.filename, bar: bar,
+                      mouthOpen: !bar.isAnimating || mouthOpen)
+                .equatable()
+        }
+    }
 }
 
 /// Zeigt den Logverlauf als EIGENE, vergleichbare View.
@@ -182,6 +180,10 @@ private struct LogTranscriptView: View, Equatable {
                 msgStr.foregroundColor = Color(NSColor.systemGreen)
             case .dim:
                 msgStr.foregroundColor = Color(NSColor.darkGray).opacity(0.8)
+            case .warning:
+                msgStr.foregroundColor = Color(nsColor: .systemOrange)
+            case .error:
+                msgStr.foregroundColor = Color(nsColor: .systemRed)
             }
 
             attrStr.append(timeStr)
@@ -191,85 +193,68 @@ private struct LogTranscriptView: View, Equatable {
     }
 }
 
-struct PacmanRow: View {
+struct PacmanBar: Equatable {
+    let progress: Double
+    var isAnimating: Bool { progress > 0 && progress < 1 }
+    var percentage: Int { Int(progress * 100) }
+
+    init(progress: Double) {
+        self.progress = progress.isFinite ? min(1, max(0, progress)) : 0
+    }
+
+    func text(mouthOpen: Bool) -> AttributedString {
+        let cells = 35
+        let consumed = Int(progress * Double(cells))
+        let remaining = max(0, cells - consumed - 1)
+        let brackets = Color(nsColor: .darkGray)
+        var opening = AttributedString("[")
+        opening.foregroundColor = brackets
+        var closing = AttributedString("]")
+        closing.foregroundColor = brackets
+        var dots = AttributedString(String(repeating: "·", count: remaining))
+        dots.foregroundColor = Color(nsColor: .systemGray).opacity(0.7)
+        var bar = opening
+        bar.append(AttributedString(String(repeating: " ", count: consumed)))
+        if consumed < cells {
+            var marker = AttributedString(mouthOpen ? "C" : "O")
+            marker.foregroundColor = Color(nsColor: .systemYellow)
+            bar.append(marker)
+            bar.append(dots)
+        }
+        bar.append(closing)
+        return bar
+    }
+}
+
+private struct PacmanRow: View, Equatable {
     let index: Int
     let filename: String
-    let progress: Double
-    @State private var isMouthOpen = true
-    
-    // Ein gemeinsamer Timer für ALLE Zeilen, bewusst static: Als Instanz-`let`
-    // erzeugte jeder SwiftUI-Re-Render (also jedes Fortschritts-Update) einen
-    // neuen Publisher samt neuem Timer — unnötiger Timer-Churn und die
-    // Mund-Animation wurde ständig zurückgesetzt.
-    private static let timer = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
-    
-    func shortName(_ name: String, maxLength: Int = 40) -> String {
-        if name.count <= maxLength { return name }
-        let prefixLength = maxLength / 2 - 2
-        let suffixLength = maxLength / 2 - 1
-        let prefix = String(name.prefix(prefixLength))
-        let suffix = String(name.suffix(suffixLength))
-        return "\(prefix)...\(suffix)"
-    }
-    
+    let bar: PacmanBar
+    let mouthOpen: Bool
+
     var body: some View {
         HStack(spacing: 12) {
-            // SPALTE 1: Index
             Text("CH \(String(format: "%02d", index))")
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundColor(Color(NSColor.systemCyan))
+                .fontWeight(.bold)
+                .foregroundStyle(Color(nsColor: .systemCyan))
                 .frame(width: 45, alignment: .leading)
-            
-            // SPALTE 2: Dateiname (nimmt verfügbaren Platz)
-            Text("[\(shortName(filename))]")
-                .font(.system(size: 12, design: .monospaced))
-                .foregroundColor(Color(NSColor.lightGray))
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(filename)
+                .foregroundStyle(Color(nsColor: .lightGray))
                 .lineLimit(1)
-            
-            // SPALTE 3: Pacman Balken
-            HStack(spacing: 0) {
-                let totalDots = 35
-                let filledDots = min(totalDots, max(0, Int(progress * Double(totalDots))))
-                
-                Text("[")
-                    .foregroundColor(Color(NSColor.darkGray))
-                
-                ForEach(0..<totalDots, id: \.self) { i in
-                    if i < filledDots {
-                        // Gefressener Bereich (Leerzeichen)
-                        Text(" ").frame(width: 9)
-                    } else if i == filledDots {
-                        // Der Pacman selbst
-                        Text(progress >= 1.0 ? " " : (isMouthOpen ? "ᗧ" : "○"))
-                            .foregroundColor(Color(NSColor.systemYellow)).bold()
-                            .frame(width: 9)
-                    } else {
-                        // Noch zu fressende Punkte
-                        Text("•")
-                            .foregroundColor(Color(NSColor.systemGray)).opacity(0.5)
-                            .frame(width: 9)
-                    }
-                }
-                
-                Text("]")
-                    .foregroundColor(Color(NSColor.darkGray))
-            }
-            .font(.system(size: 14, design: .monospaced))
-            .onReceive(Self.timer) { _ in
-                if progress > 0.0 && progress < 1.0 {
-                    isMouthOpen.toggle()
-                } else {
-                    isMouthOpen = true
-                }
-            }
-            
-            // SPALTE 4: Prozentzahl
-            Text(String(format: "%3d%%", Int(progress * 100)))
-                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                .foregroundColor(progress >= 1.0 ? Color(NSColor.systemGreen) : Color(NSColor.systemYellow))
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .help(filename)
+            Text(bar.text(mouthOpen: mouthOpen))
+                .font(.system(size: 14, design: .monospaced))
+                .fixedSize()
+                .accessibilityHidden(true)
+            Text("\(bar.percentage) %")
+                .fontWeight(.bold)
+                .foregroundStyle(Color(nsColor: bar.progress >= 1 ? .systemGreen : .systemYellow))
                 .frame(width: 45, alignment: .trailing)
         }
+        .font(.system(size: 12, design: .monospaced))
+        .accessibilityElement(children: .combine)
     }
 }
 

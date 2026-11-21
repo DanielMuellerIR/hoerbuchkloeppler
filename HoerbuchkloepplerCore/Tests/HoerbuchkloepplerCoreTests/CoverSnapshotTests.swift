@@ -12,7 +12,7 @@ struct CoverSnapshotTests {
         let cover = directory.appendingPathComponent("cover.jpg")
         let original = try onePixelPNGData()
         try original.write(to: cover)
-        let snapshot = try #require(FFmpegWrapper.loadCoverSnapshot(at: cover))
+        let snapshot = try #require(CoverArtwork.readFile(at: cover))
         try Data("nachher".utf8).write(to: cover)
 
         #expect(snapshot == original)
@@ -39,17 +39,17 @@ struct CoverSnapshotTests {
         if descriptor >= 0 {
             #expect(Darwin.ftruncate(
                 descriptor,
-                off_t(FFmpegWrapper.maximumCoverByteCount + 1)
+                off_t(CoverArtwork.maximumByteCount + 1)
             ) == 0)
             _ = Darwin.close(descriptor)
         }
         try Data("kein Bild".utf8).write(to: invalid)
 
         let start = Date()
-        #expect(FFmpegWrapper.loadCoverSnapshot(at: fifo) == nil)
+        #expect(CoverArtwork.readFile(at: fifo) == nil)
         #expect(Date().timeIntervalSince(start) < 1)
-        #expect(FFmpegWrapper.loadCoverSnapshot(at: oversized) == nil)
-        #expect(FFmpegWrapper.loadCoverSnapshot(at: invalid) == nil)
+        #expect(CoverArtwork.readFile(at: oversized) == nil)
+        #expect(CoverArtwork.readFile(at: invalid) == nil)
     }
 
     @Test("Cover-Snapshot verlangt den beim Klick erfassten Dateieintrag")
@@ -60,12 +60,12 @@ struct CoverSnapshotTests {
         let data = try onePixelPNGData()
         try data.write(to: cover)
         let expected = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: cover, followSymlink: true)
+            FileSystemEntry.identity(at: cover, followSymlink: true)
         )
         try FileManager.default.removeItem(at: cover)
         try data.write(to: cover)
 
-        #expect(FFmpegWrapper.loadCoverSnapshot(
+        #expect(CoverArtwork.readFile(
             at: cover,
             expectedIdentity: expected
         ) == nil)
@@ -82,7 +82,7 @@ struct CoverSnapshotTests {
         #expect(fifoResult == 0)
 
         let start = Date()
-        #expect(FFmpegWrapper.loadCoverSnapshot(
+        #expect(CoverArtwork.readFile(
             at: fifo,
             isCancelled: { true }
         ) == nil)

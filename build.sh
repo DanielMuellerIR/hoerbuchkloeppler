@@ -16,7 +16,6 @@
 # Läuft ohne GUI. Ein Fehler ergibt einen Exit-Code ungleich null.
 
 set -euo pipefail
-cd "$(dirname "$0")"
 
 BIN_DIR="HoerbuchkloepplerCore/Sources/HoerbuchkloepplerCore/Resources/bin"
 FFMPEG_VERSION="8.1.2"
@@ -38,6 +37,7 @@ for arg in "$@"; do
         *) echo "Unbekannte Option: $arg" >&2; exit 64 ;;
     esac
 done
+cd "$(dirname "$0")"
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
 

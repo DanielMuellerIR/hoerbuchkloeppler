@@ -24,13 +24,13 @@ struct OutputSafetyTests {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
-        let staged = FFmpegWrapper.stagingOutputURL(for: final, id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!)
+        let staged = OutputArtifactNames.stagingOutputURL(for: final, id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!)
         try Data("alt".utf8).write(to: final)
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let expected = FileSystemEntry.snapshot(of: final)
         try Data("neu".utf8).write(to: staged)
 
         #expect(try String(contentsOf: final, encoding: .utf8) == "alt")
-        try FFmpegWrapper.commitStagedOutput(
+        try OutputCommit.publish(
             staged,
             to: final,
             expectedDestination: expected
@@ -46,11 +46,11 @@ struct OutputSafetyTests {
         let final = directory.appendingPathComponent("Buch.m4b")
         let staged = directory.appendingPathComponent(".Buch.partial.m4b")
         try Data("behalten".utf8).write(to: final)
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let expected = FileSystemEntry.snapshot(of: final)
         try Data().write(to: staged)
 
         #expect(throws: (any Error).self) {
-            try FFmpegWrapper.commitStagedOutput(
+            try OutputCommit.publish(
                 staged,
                 to: final,
                 expectedDestination: expected
@@ -62,8 +62,8 @@ struct OutputSafetyTests {
     @Test("Staging-Dateien tragen die Besitzer-PID als Laufmarke im Namen")
     func stagingURLCarriesOwnerPID() {
         let final = URL(fileURLWithPath: "/tmp/Buch.m4b")
-        let staged = FFmpegWrapper.stagingOutputURL(for: final)
-        #expect(FFmpegWrapper.stagedOutputOwnerPID(staged) == ProcessInfo.processInfo.processIdentifier)
+        let staged = OutputArtifactNames.stagingOutputURL(for: final)
+        #expect(OutputArtifactNames.stagedOutputOwnerPID(staged) == ProcessInfo.processInfo.processIdentifier)
     }
 
     @Test("Staging-Namen bleiben auch bei langen UTF-8-Titeln unter NAME_MAX")
@@ -73,12 +73,12 @@ struct OutputSafetyTests {
         // 125 Umlaute = 250 UTF-8-Bytes; der finale Name passt gerade noch,
         // der ungekürzte Staging-Zusatz dagegen nicht.
         let final = directory.appendingPathComponent(String(repeating: "ä", count: 125) + ".m4b")
-        let staged = FFmpegWrapper.stagingOutputURL(for: final, ownerPID: 987_654)
+        let staged = OutputArtifactNames.stagingOutputURL(for: final, ownerPID: 987_654)
         #expect(staged.lastPathComponent.utf8.count <= Int(NAME_MAX))
 
-        try FFmpegWrapper.createOwnedStagingOutput(staged, ownerPID: 987_654)
+        try OutputStaging.createLegacyOutput(staged, ownerPID: 987_654)
         try Data("unvollständig".utf8).write(to: staged)
-        FFmpegWrapper.removeOrphanedStagedOutputs(for: final)
+        OutputCleanup.removeOrphans(for: final)
         #expect(!FileManager.default.fileExists(atPath: staged.path))
     }
 
@@ -87,8 +87,8 @@ struct OutputSafetyTests {
         // Alte Namen waren `.partial-<uuid>`; eine rein numerische erste
         // UUID-Gruppe darf nicht als PID fehlinterpretiert werden.
         let legacy = URL(fileURLWithPath: "/tmp/.Buch.partial-12345678-1234-1234-1234-123456789012.m4b")
-        #expect(FFmpegWrapper.stagedOutputOwnerPID(legacy) == nil)
-        #expect(FFmpegWrapper.stagedOutputOwnerPID(URL(fileURLWithPath: "/tmp/Buch.m4b")) == nil)
+        #expect(OutputArtifactNames.stagedOutputOwnerPID(legacy) == nil)
+        #expect(OutputArtifactNames.stagedOutputOwnerPID(URL(fileURLWithPath: "/tmp/Buch.m4b")) == nil)
     }
 
     @Test("Verwaiste Partial-Dateien toter Prozesse werden vor dem nächsten Lauf entfernt")
@@ -97,19 +97,19 @@ struct OutputSafetyTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
         // Oberhalb von macOS' PID_MAX (99999) — sicher kein lebender Prozess.
-        let orphan = FFmpegWrapper.stagingOutputURL(for: final, ownerPID: 987_654)
-        let alive = FFmpegWrapper.stagingOutputURL(for: final)
+        let orphan = OutputArtifactNames.stagingOutputURL(for: final, ownerPID: 987_654)
+        let alive = OutputArtifactNames.stagingOutputURL(for: final)
         let legacy = directory.appendingPathComponent(".Buch.partial-\(UUID().uuidString).m4b")
         let otherTarget = directory.appendingPathComponent(".Anderes.partial-987654-\(UUID().uuidString).m4b")
-        try FFmpegWrapper.createOwnedStagingOutput(orphan, ownerPID: 987_654)
-        try FFmpegWrapper.createOwnedStagingOutput(alive)
+        try OutputStaging.createLegacyOutput(orphan, ownerPID: 987_654)
+        try OutputStaging.createLegacyOutput(alive)
         try Data("unvollständig".utf8).write(to: orphan)
         try Data("unvollständig".utf8).write(to: alive)
         for url in [legacy, otherTarget] {
             try Data("unvollständig".utf8).write(to: url)
         }
 
-        FFmpegWrapper.removeOrphanedStagedOutputs(for: final)
+        OutputCleanup.removeOrphans(for: final)
 
         #expect(!FileManager.default.fileExists(atPath: orphan.path))
         // Der eigene (lebende) Prozess, Altformat-Namen und fremde Ziele
@@ -125,11 +125,11 @@ struct OutputSafetyTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let uppercaseFinal = directory.appendingPathComponent("BUCH.M4B")
         let lowercaseFinal = directory.appendingPathComponent("buch.m4b")
-        let orphan = FFmpegWrapper.stagingOutputURL(for: uppercaseFinal, ownerPID: 987_654)
-        try FFmpegWrapper.createOwnedStagingOutput(orphan, ownerPID: 987_654)
+        let orphan = OutputArtifactNames.stagingOutputURL(for: uppercaseFinal, ownerPID: 987_654)
+        try OutputStaging.createLegacyOutput(orphan, ownerPID: 987_654)
         try Data("unvollständig".utf8).write(to: orphan)
 
-        FFmpegWrapper.removeOrphanedStagedOutputs(
+        OutputCleanup.removeOrphans(
             for: lowercaseFinal,
             caseSensitiveNames: false
         )
@@ -143,11 +143,11 @@ struct OutputSafetyTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let uppercaseFinal = directory.appendingPathComponent("BUCH.M4B")
         let lowercaseFinal = directory.appendingPathComponent("buch.m4b")
-        let orphan = FFmpegWrapper.stagingOutputURL(for: uppercaseFinal, ownerPID: 987_654)
-        try FFmpegWrapper.createOwnedStagingOutput(orphan, ownerPID: 987_654)
+        let orphan = OutputArtifactNames.stagingOutputURL(for: uppercaseFinal, ownerPID: 987_654)
+        try OutputStaging.createLegacyOutput(orphan, ownerPID: 987_654)
         try Data("unvollständig".utf8).write(to: orphan)
 
-        FFmpegWrapper.removeOrphanedStagedOutputs(
+        OutputCleanup.removeOrphans(
             for: lowercaseFinal,
             caseSensitiveNames: true
         )
@@ -163,21 +163,21 @@ struct OutputSafetyTests {
         // Titel ist also über `--output` und den GUI-Speicherdialog erreichbar.
         let final = directory.appendingPathComponent("Mein.partial-Buch.m4b")
         // Oberhalb von macOS' PID_MAX (99999) — sicher kein lebender Prozess.
-        let orphan = FFmpegWrapper.stagingOutputURL(for: final, ownerPID: 987_654)
-        let alive = FFmpegWrapper.stagingOutputURL(for: final)
+        let orphan = OutputArtifactNames.stagingOutputURL(for: final, ownerPID: 987_654)
+        let alive = OutputArtifactNames.stagingOutputURL(for: final)
 
         // Erzeugen und Parsen müssen zusammenpassen: Nur der letzte Marker zählt.
         #expect(orphan.lastPathComponent.hasPrefix(".Mein.partial-Buch.partial-"))
-        #expect(FFmpegWrapper.stagedOutputOwnerPID(orphan) == 987_654)
-        #expect(FFmpegWrapper.stagedOutputOwnerPID(alive) == ProcessInfo.processInfo.processIdentifier)
+        #expect(OutputArtifactNames.stagedOutputOwnerPID(orphan) == 987_654)
+        #expect(OutputArtifactNames.stagedOutputOwnerPID(alive) == ProcessInfo.processInfo.processIdentifier)
 
-        try FFmpegWrapper.createOwnedStagingOutput(orphan, ownerPID: 987_654)
-        try FFmpegWrapper.createOwnedStagingOutput(alive)
+        try OutputStaging.createLegacyOutput(orphan, ownerPID: 987_654)
+        try OutputStaging.createLegacyOutput(alive)
         for url in [orphan, alive] {
             try Data("unvollständig".utf8).write(to: url)
         }
 
-        FFmpegWrapper.removeOrphanedStagedOutputs(for: final)
+        OutputCleanup.removeOrphans(for: final)
 
         #expect(!FileManager.default.fileExists(atPath: orphan.path))
         #expect(FileManager.default.fileExists(atPath: alive.path))
@@ -190,13 +190,13 @@ struct OutputSafetyTests {
         let final = directory.appendingPathComponent("Buch.m4b")
         // Gleicher Name wie eine verwaiste Partial-Datei, aber ein Ordner mit
         // Inhalt — der darf auf keinen Fall mitsamt Inhalt verschwinden.
-        let decoyDirectory = FFmpegWrapper.stagingOutputURL(for: final, ownerPID: 987_654)
+        let decoyDirectory = OutputArtifactNames.stagingOutputURL(for: final, ownerPID: 987_654)
         try FileManager.default.createDirectory(at: decoyDirectory, withIntermediateDirectories: true)
         let payload = decoyDirectory.appendingPathComponent("wichtig.txt")
         try Data("nicht anfassen".utf8).write(to: payload)
 
         let logs = ThreadSafeLogProbe()
-        FFmpegWrapper.removeOrphanedStagedOutputs(for: final, log: logs.append)
+        OutputCleanup.removeOrphans(for: final, log: logs.append)
 
         #expect(FileManager.default.fileExists(atPath: decoyDirectory.path))
         #expect(FileManager.default.fileExists(atPath: payload.path))
@@ -208,13 +208,13 @@ struct OutputSafetyTests {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
-        let orphan = FFmpegWrapper.stagingOutputURL(for: final, ownerPID: 987_654)
-        try FFmpegWrapper.createOwnedStagingOutput(orphan, ownerPID: 987_654)
+        let orphan = OutputArtifactNames.stagingOutputURL(for: final, ownerPID: 987_654)
+        try OutputStaging.createLegacyOutput(orphan, ownerPID: 987_654)
         try Data("unvollständig".utf8).write(to: orphan)
         var replacementError: (any Error)?
         let payload = orphan.appendingPathComponent("wichtig.txt")
 
-        FFmpegWrapper.removeOrphanedStagedOutputs(for: final, beforeUnlink: { checkedURL in
+        OutputCleanup.removeOrphans(for: final, beforeUnlink: { checkedURL in
             do {
                 try FileManager.default.removeItem(at: checkedURL)
                 try FileManager.default.createDirectory(
@@ -238,10 +238,10 @@ struct OutputSafetyTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let audiobook = directory.appendingPathComponent("Buch.m4b")
         let textFile = directory.appendingPathComponent("Buch.txt")
-        let decoy = FFmpegWrapper.stagingOutputURL(for: textFile, ownerPID: 987_654)
+        let decoy = OutputArtifactNames.stagingOutputURL(for: textFile, ownerPID: 987_654)
         try Data("nicht anfassen".utf8).write(to: decoy)
 
-        FFmpegWrapper.removeOrphanedStagedOutputs(for: audiobook)
+        OutputCleanup.removeOrphans(for: audiobook)
 
         #expect(FileManager.default.fileExists(atPath: decoy.path))
     }
@@ -281,11 +281,11 @@ struct OutputSafetyTests {
 
     @Test("Der finale ffmpeg-Fehler enthält dessen stderr-Ursache")
     @MainActor
-    func finalProcessFailureIncludesStderr() async {
+    func finalProcessFailureIncludesStderr() async throws {
         let session = ConversionSession(settings: AudioSettings())
         let context = session.beginConversionRun()
 
-        let succeeded = FFmpegWrapper.runFinalProcess(
+        let succeeded = FFmpegMuxer.run(
             args: ["-nostdin", "-definitely-not-an-option"],
             session: session,
             context: context,
@@ -293,7 +293,8 @@ struct OutputSafetyTests {
             progressWeight: 1,
             phaseDuration: 1,
             logMessage: "Testlauf",
-            pacmanTitle: "Test"
+            pacmanTitle: "Test",
+            executableURL: try #require(ToolLocator.binaryURL(name: "ffmpeg"))
         )
         for _ in 0..<10 where !session.eventLogs.contains(where: {
             $0.message.contains("Exit-Code")
@@ -335,7 +336,7 @@ struct OutputSafetyTests {
         session.logSink = { _ in }
         let context = session.beginConversionRun()
 
-        let succeeded = FFmpegWrapper.runFinalProcess(
+        let succeeded = FFmpegMuxer.run(
             args: [childPIDFile.path],
             session: session,
             context: context,
@@ -380,7 +381,7 @@ struct OutputSafetyTests {
         session.logSink = { _ in }
         let context = session.beginConversionRun()
 
-        let succeeded = FFmpegWrapper.runFinalProcess(
+        let succeeded = FFmpegMuxer.run(
             args: [childPIDFile.path],
             session: session,
             context: context,
@@ -451,12 +452,12 @@ struct StagingTransactionTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
         let staged = directory.appendingPathComponent(".staged.m4b")
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let expected = FileSystemEntry.snapshot(of: final)
         try Data("fremd".utf8).write(to: final)
         try Data("neu".utf8).write(to: staged)
 
         #expect(throws: ConversionOutputError.self) {
-            try FFmpegWrapper.commitStagedOutput(
+            try OutputCommit.publish(
                 staged,
                 to: final,
                 expectedDestination: expected
@@ -479,27 +480,29 @@ struct StagingTransactionTests {
         let final = outputDirectory.appendingPathComponent("Buch.m4b")
         let staged = outputDirectory.appendingPathComponent(".staged.m4b")
         try Data("neu".utf8).write(to: staged)
-        let expectedDirectory = FFmpegWrapper.captureSnapshot(
+        let expectedDirectory = FileSystemEntry.snapshot(
             of: outputDirectory,
             followSymlink: true
         )
 
         #expect(throws: ConversionOutputError.self) {
-            try FFmpegWrapper.commitStagedOutput(
+            try OutputCommit.publish(
                 staged,
                 to: final,
                 expectedDestination: .missing,
                 expectedDestinationDirectory: expectedDirectory,
-                beforeRename: {
-                    try? FileManager.default.moveItem(
-                        at: outputDirectory,
-                        to: parkedDirectory
-                    )
-                    try? FileManager.default.createDirectory(
-                        at: outputDirectory,
-                        withIntermediateDirectories: false
-                    )
-                }
+                operations: .init(
+                    beforeDestinationCheck: {
+                        try? FileManager.default.moveItem(
+                            at: outputDirectory,
+                            to: parkedDirectory
+                        )
+                        try? FileManager.default.createDirectory(
+                            at: outputDirectory,
+                            withIntermediateDirectories: false
+                        )
+                    }
+                )
             )
         }
         #expect(!FileManager.default.fileExists(atPath: final.path))
@@ -516,13 +519,13 @@ struct StagingTransactionTests {
         let final = directory.appendingPathComponent("Buch.m4b")
         let staged = directory.appendingPathComponent(".staged.m4b")
         try Data("bestätigt".utf8).write(to: final)
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let expected = FileSystemEntry.snapshot(of: final)
         try FileManager.default.removeItem(at: final)
         try Data("inzwischen neu".utf8).write(to: final)
         try Data("Konvertierung".utf8).write(to: staged)
 
         #expect(throws: ConversionOutputError.self) {
-            try FFmpegWrapper.commitStagedOutput(
+            try OutputCommit.publish(
                 staged,
                 to: final,
                 expectedDestination: expected
@@ -542,17 +545,19 @@ struct StagingTransactionTests {
         try Data("bestätigtes Ziel".utf8).write(to: final)
         try Data("eigene Ausgabe".utf8).write(to: staged)
         try Data("fremder Ersatz".utf8).write(to: replacement)
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let expected = FileSystemEntry.snapshot(of: final)
 
         #expect(throws: ConversionOutputError.self) {
-            try FFmpegWrapper.commitStagedOutput(
+            try OutputCommit.publish(
                 staged,
                 to: final,
                 expectedDestination: expected,
-                beforeRename: {
-                    try? FileManager.default.removeItem(at: staged)
-                    try? FileManager.default.moveItem(at: replacement, to: staged)
-                }
+                operations: .init(
+                    beforeDestinationCheck: {
+                        try? FileManager.default.removeItem(at: staged)
+                        try? FileManager.default.moveItem(at: replacement, to: staged)
+                    }
+                )
             )
         }
         #expect(try String(contentsOf: final, encoding: .utf8) == "bestätigtes Ziel")
@@ -564,16 +569,16 @@ struct StagingTransactionTests {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
-        let staged = FFmpegWrapper.stagingOutputURL(for: final)
+        let staged = OutputArtifactNames.stagingOutputURL(for: final)
         try Data("bestätigtes Ziel".utf8).write(to: final)
-        let expectedDestination = FFmpegWrapper.captureSnapshot(of: final)
-        let ownership = try FFmpegWrapper.createOwnedStagingOutput(staged)
+        let expectedDestination = FileSystemEntry.snapshot(of: final)
+        let ownership = try OutputStaging.createLegacyOutput(staged)
         try Data("eigene Ausgabe".utf8).write(to: staged)
         try FileManager.default.removeItem(at: staged)
         try Data("fremder Ersatz".utf8).write(to: staged)
 
         #expect(throws: ConversionOutputError.self) {
-            try FFmpegWrapper.commitStagedOutput(
+            try OutputCommit.publish(
                 staged,
                 to: final,
                 expectedDestination: expectedDestination,
@@ -592,7 +597,7 @@ struct StagingTransactionTests {
         let final = directory.appendingPathComponent("Buch.m4b")
         let sentinel = directory.appendingPathComponent("wichtig.txt")
         try Data("nicht verändern".utf8).write(to: sentinel)
-        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        let staging = try OutputStaging.createProtectedOutput(for: final)
         try FileManager.default.removeItem(at: staging.url)
         try FileManager.default.createSymbolicLink(
             at: staging.url,
@@ -601,7 +606,7 @@ struct StagingTransactionTests {
         let session = ConversionSession(settings: AudioSettings())
         let context = session.beginConversionRun()
 
-        let succeeded = FFmpegWrapper.runFinalProcess(
+        let succeeded = FFmpegMuxer.run(
             args: ["-version"],
             session: session,
             context: context,
@@ -610,8 +615,8 @@ struct StagingTransactionTests {
             phaseDuration: 1,
             logMessage: "Testlauf",
             pacmanTitle: "Test",
-            stagingURL: staging.url,
-            expectedStagingOwnership: staging.ownership
+            staging: staging,
+            executableURL: try #require(ToolLocator.binaryURL(name: "ffmpeg"))
         )
 
         #expect(!succeeded)
@@ -624,7 +629,7 @@ struct StagingTransactionTests {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
-        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        let staging = try OutputStaging.createProtectedOutput(for: final)
         let protectedDirectory = try #require(
             staging.ownership.protectedDirectory
         )
@@ -640,7 +645,7 @@ struct StagingTransactionTests {
         let context = session.beginConversionRun()
         var hookError: (any Error)?
 
-        let succeeded = FFmpegWrapper.runFinalProcess(
+        let succeeded = FFmpegMuxer.run(
             args: [
                 "-nostdin", "-y", "-f", "lavfi", "-i",
                 "sine=frequency=1000:duration=0.05",
@@ -653,9 +658,7 @@ struct StagingTransactionTests {
             phaseDuration: 0.05,
             logMessage: "Testlauf",
             pacmanTitle: "Test",
-            stagingURL: staging.url,
-            expectedStagingOwnership: staging.ownership,
-            stagingHandle: staging,
+            staging: staging,
             beforeProcessStart: {
                 do {
                     try FileManager.default.moveItem(
@@ -669,13 +672,14 @@ struct StagingTransactionTests {
                 } catch {
                     hookError = error
                 }
-            }
+            },
+            executableURL: try #require(ToolLocator.binaryURL(name: "ffmpeg"))
         )
 
         #expect(hookError == nil)
         #expect(succeeded)
         #expect(try String(contentsOf: decoy, encoding: .utf8) == "nicht verändern")
-        #expect(FFmpegWrapper.regularFileSize(
+        #expect(FileSystemEntry.nonemptyFileSize(
             parkedDirectory.appendingPathComponent("entry.m4b")
         ) != nil)
     }
@@ -685,11 +689,11 @@ struct StagingTransactionTests {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
-        let staged = FFmpegWrapper.stagingOutputURL(for: final)
-        let ownership = try FFmpegWrapper.createOwnedStagingOutput(staged)
+        let staged = OutputArtifactNames.stagingOutputURL(for: final)
+        let ownership = try OutputStaging.createLegacyOutput(staged)
         try Data("Ausgabe".utf8).write(to: staged)
 
-        _ = try FFmpegWrapper.commitStagedOutput(
+        _ = try OutputCommit.publish(
             staged,
             to: final,
             expectedDestination: .missing,
@@ -697,7 +701,7 @@ struct StagingTransactionTests {
         )
 
         let identity = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: final, followSymlink: false)
+            FileSystemEntry.identity(at: final, followSymlink: false)
         )
         #expect(identity.mode & mode_t(0o777) == mode_t(0o644))
     }
@@ -709,13 +713,13 @@ struct StagingTransactionTests {
         let file = directory.appendingPathComponent("Quelle.m4b")
         try Data("Inhalt".utf8).write(to: file)
         let baseline = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: file, followSymlink: false)
+            FileSystemEntry.identity(at: file, followSymlink: false)
         )
 
         // Ein `chmod` ändert Rechte und Statuszeit, nicht den Inhalt.
         #expect(chmod(file.path, 0o600) == 0)
         let afterChmod = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: file, followSymlink: false)
+            FileSystemEntry.identity(at: file, followSymlink: false)
         )
         #expect(baseline.matchesContentSnapshot(afterChmod))
         #expect(baseline.matchesDisplacedEntry(afterChmod))
@@ -732,7 +736,7 @@ struct StagingTransactionTests {
             0
         ) == 0)
         let afterTag = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: file, followSymlink: false)
+            FileSystemEntry.identity(at: file, followSymlink: false)
         )
         #expect(afterChmod.matchesContentSnapshot(afterTag))
         #expect(afterChmod.matchesDisplacedEntry(afterTag))
@@ -741,7 +745,7 @@ struct StagingTransactionTests {
         // Neuer Inhalt schlägt in allen drei Prädikaten durch.
         try Data("Anderer, längerer Inhalt".utf8).write(to: file)
         let afterWrite = try #require(
-            FFmpegWrapper.fileSystemIdentity(at: file, followSymlink: false)
+            FileSystemEntry.identity(at: file, followSymlink: false)
         )
         #expect(!afterTag.matchesContentSnapshot(afterWrite))
         #expect(!afterTag.matchesDisplacedEntry(afterWrite))
@@ -756,13 +760,13 @@ struct StagingTransactionTests {
         let staged = directory.appendingPathComponent(".staged.m4b")
         try Data("altes Ziel".utf8).write(to: final)
         try Data("neue Ausgabe".utf8).write(to: staged)
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let expected = FileSystemEntry.snapshot(of: final)
 
-        let removed = try FFmpegWrapper.commitStagedOutput(
+        let removed = try OutputCommit.publish(
             staged,
             to: final,
             expectedDestination: expected,
-            beforeRename: { #expect(chmod(final.path, 0o600) == 0) }
+            operations: .init(beforeDestinationCheck: { #expect(chmod(final.path, 0o600) == 0) })
         )
 
         #expect(removed)
@@ -776,8 +780,8 @@ struct StagingTransactionTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
         try Data("alt".utf8).write(to: final)
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
-        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        let expected = FileSystemEntry.snapshot(of: final)
+        let staging = try OutputStaging.createProtectedOutput(for: final)
         try Data("fertiges Hörbuch".utf8).write(to: staging.url)
 
         // Spotlight, Time Machine oder ein Finder-Tag fassen die Altdatei
@@ -793,7 +797,7 @@ struct StagingTransactionTests {
             0
         ) == 0)
 
-        _ = try FFmpegWrapper.commitStagedOutput(
+        _ = try OutputCommit.publish(
             staging.url,
             to: final,
             expectedDestination: expected,
@@ -809,8 +813,8 @@ struct StagingTransactionTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
         try Data("alt".utf8).write(to: final)
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
-        let staging = try FFmpegWrapper.createProtectedStagingOutput(for: final)
+        let expected = FileSystemEntry.snapshot(of: final)
+        let staging = try OutputStaging.createProtectedOutput(for: final)
         try Data("neu".utf8).write(to: staging.url)
         let context = ConversionContext()
         context.registerStagedOutput(
@@ -818,7 +822,7 @@ struct StagingTransactionTests {
             ownership: staging.ownership
         )
 
-        let removed = try FFmpegWrapper.commitStagedOutput(
+        let removed = try OutputCommit.publish(
             staging.url,
             to: final,
             expectedDestination: expected,
@@ -837,10 +841,10 @@ struct StagingTransactionTests {
     func unsupportedStagingMarkerFallsBackToRuntimeIdentity() throws {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let staged = FFmpegWrapper.stagingOutputURL(
+        let staged = OutputArtifactNames.stagingOutputURL(
             for: directory.appendingPathComponent("Buch.m4b")
         )
-        let ownership = try FFmpegWrapper.createOwnedStagingOutput(
+        let ownership = try OutputStaging.createLegacyOutput(
             staged,
             setOwnershipMarker: { _, _ in
                 errno = ENOTSUP
@@ -861,14 +865,14 @@ struct StagingTransactionTests {
     func stagingMarkerFailurePreservesReplacement() throws {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let staged = FFmpegWrapper.stagingOutputURL(
+        let staged = OutputArtifactNames.stagingOutputURL(
             for: directory.appendingPathComponent("Buch.m4b")
         )
         let movedCreation = directory.appendingPathComponent("eigener-inode.m4b")
         var hookError: (any Error)?
 
         #expect(throws: POSIXError.self) {
-            try FFmpegWrapper.createOwnedStagingOutput(
+            try OutputStaging.createLegacyOutput(
                 staged,
                 setOwnershipMarker: { _, _ in
                     do {
@@ -896,25 +900,27 @@ struct StagingTransactionTests {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let final = directory.appendingPathComponent("Buch.m4b")
-        let staged = FFmpegWrapper.stagingOutputURL(for: final)
+        let staged = OutputArtifactNames.stagingOutputURL(for: final)
         let replacement = directory.appendingPathComponent("fremd.m4b")
         try Data("bestätigtes Ziel".utf8).write(to: final)
-        try FFmpegWrapper.createOwnedStagingOutput(staged)
+        try OutputStaging.createLegacyOutput(staged)
         try Data("eigene Ausgabe".utf8).write(to: staged)
         try Data("fremder Ersatz".utf8).write(to: replacement)
-        let expected = FFmpegWrapper.captureSnapshot(of: final)
+        let expected = FileSystemEntry.snapshot(of: final)
         let context = ConversionContext()
         context.registerStagedOutput(staged)
 
         do {
-            _ = try FFmpegWrapper.commitStagedOutput(
+            _ = try OutputCommit.publish(
                 staged,
                 to: final,
                 expectedDestination: expected,
-                beforeRename: {
-                    try? FileManager.default.removeItem(at: staged)
-                    try? FileManager.default.moveItem(at: replacement, to: staged)
-                }
+                operations: .init(
+                    beforeDestinationCheck: {
+                        try? FileManager.default.removeItem(at: staged)
+                        try? FileManager.default.moveItem(at: replacement, to: staged)
+                    }
+                )
             )
             Issue.record("Staging-Austausch blieb unentdeckt")
         } catch {

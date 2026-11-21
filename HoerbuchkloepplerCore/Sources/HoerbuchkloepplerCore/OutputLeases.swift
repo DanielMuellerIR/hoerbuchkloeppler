@@ -35,8 +35,12 @@ enum OutputLeases {
         for output: URL,
         caseSensitiveNames: Bool? = nil
     ) -> String {
-        let path = FFmpegWrapper.canonicalPath(output).precomposedStringWithCanonicalMapping
-        let parent = output.deletingLastPathComponent()
+        leaseKey(for: FileSystemEntry.canonicalPath(output),
+                 parent: output.deletingLastPathComponent(), caseSensitiveNames: caseSensitiveNames)
+    }
+
+    private static func leaseKey(for path: String, parent: URL, caseSensitiveNames: Bool? = nil) -> String {
+        let path = path.precomposedStringWithCanonicalMapping
         let caseSensitive = caseSensitiveNames
             ?? (try? parent.resourceValues(
                 forKeys: [.volumeSupportsCaseSensitiveNamesKey]
@@ -70,7 +74,16 @@ enum OutputLeases {
 
     static func acquire(for outputs: [URL]) throws -> OutputLeaseSet {
         let targets = Dictionary(
-            outputs.map { (outputLeaseKey(for: $0), $0) },
+            outputs.flatMap { output in
+                let standardized = output.standardizedFileURL
+                let parent = standardized.deletingLastPathComponent()
+                let directory = URL(fileURLWithPath: FileSystemEntry.canonicalPath(parent), isDirectory: true)
+                let entry = directory.appendingPathComponent(standardized.lastPathComponent).path
+                // Behalte den bisherigen Schlüssel für ältere App-/CLI-Versionen.
+                // Den Eintrag zusätzlich sperren, damit ein Swap des finalen
+                // Symlinks den laufenden Export unter derselben URL nicht entsperrt.
+                return [(outputLeaseKey(for: output), output), (leaseKey(for: entry, parent: parent), output)]
+            },
             uniquingKeysWith: { first, _ in first }
         ).sorted { $0.key < $1.key }
         let keys = targets.map(\.key)

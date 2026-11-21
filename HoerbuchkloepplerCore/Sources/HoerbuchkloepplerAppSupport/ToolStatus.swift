@@ -1,10 +1,10 @@
-struct ToolStatus {
-    enum Availability: Equatable {
+public struct ToolStatus {
+    public enum Availability: Equatable {
         case checking
         case available(version: String)
         case unavailable
 
-        var text: String {
+        public var text: String {
             switch self {
             case .checking: "Prüfe …"
             case .available(let version): "OK (\(version))"
@@ -13,16 +13,21 @@ struct ToolStatus {
         }
     }
 
-    enum ExportAvailability: Equatable {
+    public enum ExportAvailability: Equatable {
         case checking
         case available
         case unavailable(message: String)
     }
 
-    var ffmpeg = Availability.checking
-    var mediaInfo = Availability.checking
+    public let ffmpeg: Availability
+    public let mediaInfo: Availability
 
-    var exportAvailability: ExportAvailability {
+    public init(ffmpeg: Availability = .checking, mediaInfo: Availability = .checking) {
+        self.ffmpeg = ffmpeg
+        self.mediaInfo = mediaInfo
+    }
+
+    public var exportAvailability: ExportAvailability {
         guard ffmpeg != .checking, mediaInfo != .checking else { return .checking }
         let tools = [("FFmpeg", ffmpeg), ("MediaInfo", mediaInfo)]
         let unavailable = tools.filter { $0.1 == .unavailable }.map { $0.0 }

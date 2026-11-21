@@ -100,7 +100,7 @@ public struct AudiobookProject: Codable, Sendable {
               project.sources.allSatisfy({ $0.location.isWellFormed && $0.readLocation.isWellFormed }),
               Set(project.sections.map(\.id)).count == project.sections.count,
               project.sections.allSatisfy({ ids.contains($0.sourceID) }),
-              (project.coverData?.count ?? 0) <= 32 * 1024 * 1024 else {
+              (project.coverData?.count ?? 0) <= CoverArtwork.maximumByteCount else {
             throw ProjectError.invalid("Ungültige Quellen, Abschnitte oder Coverdaten im Projekt.")
         }
         guard sectionsHaveRepresentableTimes(project.sections) else {

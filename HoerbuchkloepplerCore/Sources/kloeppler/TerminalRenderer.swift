@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import os
 
 private struct TerminalSize: Equatable {
     let columns: Int
@@ -9,19 +10,13 @@ private struct TerminalSize: Equatable {
 
 /// Auch ein Schrumpfen und anschließendes Vergrößern auf dieselben Maße
 /// entwertet die frühere Cursorposition. SIGWINCH hält diese Information fest.
-private final class TerminalGeometry: @unchecked Sendable {
-    private let lock = NSLock()
-    private var revision: UInt = 0
+private final class TerminalGeometry {
+    private let revision = OSAllocatedUnfairLock<UInt>(initialState: 0)
     private let source: DispatchSourceSignal
 
     init() {
         source = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .global())
-        source.setEventHandler { [weak self] in
-            guard let self else { return }
-            lock.lock()
-            revision &+= 1
-            lock.unlock()
-        }
+        source.setEventHandler { [revision] in revision.withLock { $0 &+= 1 } }
         source.resume()
     }
 
@@ -30,11 +25,9 @@ private final class TerminalGeometry: @unchecked Sendable {
     func size(fileDescriptor: Int32) -> TerminalSize {
         var size = winsize()
         _ = ioctl(fileDescriptor, TIOCGWINSZ, &size)
-        lock.lock()
-        defer { lock.unlock() }
         return TerminalSize(columns: size.ws_col > 0 ? Int(size.ws_col) : 80,
                             rows: size.ws_row > 0 ? Int(size.ws_row) : 24,
-                            revision: revision)
+                            revision: revision.withLock { $0 })
     }
 }
 
@@ -79,6 +72,8 @@ final class TerminalRenderer {
         self.outputFileDescriptor = outputFileDescriptor
         geometry = isatty(outputFileDescriptor) != 0 ? TerminalGeometry() : nil
     }
+
+    var isInteractive: Bool { geometry != nil }
 
     func clearBlock() {
         guard let geometry, blockLines > 0 else { return }

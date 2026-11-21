@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 """Prüft das ANSI-Endbild der CLI maschinell.
 
-`docs/build-and-test.md` beschreibt dieses Rezept bisher nur von Hand: Die CLI
-zeichnet den Pacman-Statusblock per Cursor-Sprüngen neu, und einer rohen
-Mitschrift sieht man nicht an, ob eine Logzeile am Ende noch dasteht. Das Skript
-lässt die CLI an einem Pseudoterminal laufen, unterbricht sie mit SIGINT und
-spielt den Strom durch einen Mini-Emulator nach.
-
-Erfolgskriterium: Jede geschriebene Logzeile steht im Endbild noch vollständig
-da — einschließlich der Abbruchmeldung.
+Die CLI läuft an einem Pseudoterminal. Ein Terminalmodell prüft, ob das
+Neuzeichnen des Statusblocks alle Logs und die Abbruchmeldung erhält. Die
+Überschreibfrage muss vor der Eingabe sichtbar sein und Ablehnung,
+Bestätigung sowie SIGINT richtig behandeln.
 """
 import atexit
 import os
@@ -143,3 +139,61 @@ assert "SIGINT empfangen" in flat, "Abbruchmeldung wurde vom Statusblock übersc
 assert exit_code == 130, f"SIGINT muss Exit 130 liefern, war {exit_code}"
 
 print(f"VERIFIED {len(written)} Logzeilen im Endbild, Exit {exit_code}", flush=True)
+
+
+short_source = root / "kurz.wav"
+subprocess.run(
+    [str(FF), "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono",
+     "-t", "0.25", str(short_source)],
+    check=True,
+)
+existing_output = root / "Vorhanden.m4b"
+original_bytes = b"Vorhandene Datei"
+
+
+def verify_overwrite(answer: bytes | None, expected_exit: int) -> None:
+    existing_output.write_bytes(original_bytes)
+    master, slave = pty.openpty()
+    child = subprocess.Popen(
+        [str(CLI), "--file", str(short_source), "--output", str(existing_output),
+         "--no-cover", "--bitrate", "24k", "--samplerate", "8000"],
+        stdin=slave, stdout=slave, stderr=slave, close_fds=True,
+    )
+    os.close(slave)
+    try:
+        transcript = bytearray()
+        answered = False
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if select.select([master], [], [], 0.05)[0]:
+                try:
+                    transcript.extend(os.read(master, 4096))
+                except OSError:
+                    child.wait(timeout=5)
+                    break
+            if not answered and b"(j/N): " in transcript:
+                if answer is None:
+                    child.send_signal(signal.SIGINT)
+                else:
+                    os.write(master, answer)
+                answered = True
+            if child.poll() is not None:
+                break
+        result = child.poll()
+        assert answered and result == expected_exit, (result, transcript)
+        result_data = existing_output.read_bytes()
+        if expected_exit == 0:
+            assert result_data[4:8] == b"ftyp", result_data[:20]
+        else:
+            assert result_data == original_bytes
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+        os.close(master)
+
+
+verify_overwrite(b"n\n", 2)
+verify_overwrite(b"j\n", 0)
+verify_overwrite(None, 130)
+print("VERIFIED sichtbare Überschreibfrage, Ablehnung, Bestätigung und SIGINT", flush=True)

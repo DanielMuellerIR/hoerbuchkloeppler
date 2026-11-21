@@ -84,7 +84,7 @@ struct ProcessPipeReaderTests {
         try writeExecutable(failing, "#!/bin/sh\nprintf 'diagnose'\nexit 3\n")
 
         let start = Date()
-        let timed = FFmpegWrapper.runCapturedProcess(
+        let timed = ProcessRunner.capture(
             executableURL: hanging,
             arguments: [],
             timeout: 0.05
@@ -95,7 +95,7 @@ struct ProcessPipeReaderTests {
         }
         #expect(Date().timeIntervalSince(start) < 2)
 
-        let failed = FFmpegWrapper.runCapturedProcess(
+        let failed = ProcessRunner.capture(
             executableURL: failing,
             arguments: [],
             // Dieser Teil prüft Exit-Code und Ausgabe, nicht eine knappe
@@ -123,7 +123,7 @@ struct ProcessPipeReaderTests {
         print(child.pid, flush=True)
         """
         let start = Date()
-        let result = FFmpegWrapper.runCapturedProcess(
+        let result = ProcessRunner.capture(
             executableURL: URL(fileURLWithPath: "/usr/bin/python3"),
             arguments: ["-c", script],
             timeout: 2
@@ -200,8 +200,9 @@ struct ProcessGroupOwnershipTests {
         let slowTool = directory.appendingPathComponent("chapter-tool")
         try writeExecutable(slowTool, """
         #!/bin/sh
-        printf '%s' "$$" > "$1"
         trap 'exit 0' TERM INT
+        printf '%s' "$$" > "$1.pending"
+        mv "$1.pending" "$1"
         while :; do /bin/sleep 1; done
         """)
         let source = directory.appendingPathComponent("Buch.m4b")

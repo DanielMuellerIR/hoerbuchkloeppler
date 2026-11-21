@@ -30,23 +30,6 @@
 # Bei Erfolg lautet die letzte Zeile maschinenlesbar:
 #   RELEASE OK: <pfad-zum-dmg> (<version>)
 set -euo pipefail
-cd "$(dirname "$0")"
-
-APP_NAME="Hörbuchklöppler"
-APP="./${APP_NAME}.app"
-VOLNAME="$APP_NAME"
-# shellcheck source=script-helpers.sh
-source "./script-helpers.sh"
-VERSION="$(hoerbuchkloeppler_read_version)"
-# dist/ liegt bewusst AUSSERHALB von build/: build.sh löscht build/ bei jedem
-# App-Build komplett — ein früher notarisiertes DMG unter build/dmg verschwand
-# damit schon beim Start des nächsten Release-Versuchs.
-DIST="dist"
-DMG="$DIST/${APP_NAME}-${VERSION}.dmg"
-# Unfertige Zwischenstände tragen eigene Namen; der endgültige DMG-Pfad
-# entsteht erst nach bestandener Signatur-/Notary-/Gatekeeper-Prüfung durch
-# atomares Umbenennen. So bleibt ein früheres gutes DMG bei einem Fehlversuch
-# erhalten, und unter dem Erfolgsnamen liegt nie ein ungeprüftes Image.
 
 FINDER_LAYOUT=1
 for arg in "$@"; do
@@ -57,6 +40,21 @@ for arg in "$@"; do
        echo "Aufruf: ./release.sh [--no-finder-layout] [--help]" >&2; exit 64 ;;
   esac
 done
+cd "$(dirname "$0")"
+
+APP_NAME="Hörbuchklöppler"
+APP="./${APP_NAME}.app"
+VOLNAME="$APP_NAME"
+# shellcheck source=script-helpers.sh
+source "./script-helpers.sh"
+VERSION="$(hoerbuchkloeppler_read_version)"
+# build.sh leert build/ bei jedem App-Build. Fertige Images liegen in dist/.
+DIST="dist"
+DMG="$DIST/${APP_NAME}-${VERSION}.dmg"
+# Unfertige Zwischenstände tragen eigene Namen; der endgültige DMG-Pfad
+# entsteht erst nach bestandener Signatur-/Notary-/Gatekeeper-Prüfung durch
+# atomares Umbenennen. So bleibt ein früheres gutes DMG bei einem Fehlversuch
+# erhalten, und unter dem Erfolgsnamen liegt nie ein ungeprüftes Image.
 
 log() { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
 

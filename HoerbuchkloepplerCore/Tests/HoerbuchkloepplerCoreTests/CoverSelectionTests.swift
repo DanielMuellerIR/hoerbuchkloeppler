@@ -9,8 +9,8 @@ private func writeAudioWithEmbeddedCover(
 ) throws {
     let cover = directory.appendingPathComponent("cover-\(UUID().uuidString).png")
     try coverData.write(to: cover)
-    let ffmpeg = try #require(FFmpegWrapper.getBinaryURL(name: "ffmpeg"))
-    let generated = FFmpegWrapper.runCapturedProcess(
+    let ffmpeg = try #require(ToolLocator.binaryURL(name: "ffmpeg"))
+    let generated = ProcessRunner.capture(
         executableURL: ffmpeg,
         arguments: [
             "-nostdin", "-v", "error",
@@ -103,7 +103,7 @@ struct CoverSelectionTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(await probe.snapshot().started)
-        session.audioFiles.removeAll()
+        session.removeAllChapters()
         session.undoChapterEdit()
         for _ in 0..<200 {
             if session.embeddedCoverData != nil { break }
@@ -154,7 +154,7 @@ struct CoverSelectionTests {
         let session = ConversionSession(settings: AudioSettings())
         session.logSink = { _ in }
         let token = session.beginImport()
-        let found = try #require(ConversionSession.foundFile(at: audio))
+        let found = try #require(SourceDiscovery.foundFile(at: audio))
         let loaded = await session.loadAudioFiles(from: found, importToken: token)
         session.stageAudioLoadResult(loaded, importToken: token)
         await session.finishImport(token)
@@ -442,7 +442,7 @@ struct CoverSelectionTests {
             probeState = await probe.snapshot()
         }
         #expect(probeState.started)
-        session.audioFiles.removeAll(where: { $0.id == first.id })
+        session.removeChapter(id: first.id)
         await probe.releaseFirstCall()
 
         attempts = 0
@@ -454,11 +454,33 @@ struct CoverSelectionTests {
         #expect(probeState.calls == [firstURL, secondURL])
         #expect(session.embeddedCoverData == secondArtwork)
     }
-}
+    @Test("Cover bleibt verfügbar, wenn ein weiteres Kapitel derselben Datei erhalten ist")
+    func artworkStillBelongsToRemainingChapterOfTheSameFile() async throws {
+        let source = URL(fileURLWithPath: "/tmp/gemeinsame-quelle.m4b")
+        let cover = try onePixelPNGData()
+        let probe = ArtworkLoaderProbe(dataByURL: [source: cover])
+        let session = ConversionSession(settings: AudioSettings())
+        session.logSink = { _ in }
+        session.bookMetadata.title = "Titel"
+        session.bookMetadata.author = "Autor"
+        session.embeddedArtworkLoader = { url in await probe.load(url) }
+        let first = AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Erstes")
+        let second = AudioFile(url: source, startTime: 1, duration: 1, chapterTitle: "Zweites")
 
-// Diese Tests decken die reine Kernlogik ab — also alles, was ohne echte
-// Audiodateien, ohne ffmpeg-Prozess und ohne Oberfläche prüfbar ist:
-// FFMETADATA-Escaping/Parsing, Kapitel-Arithmetik, Auto-Split, Zeit-Parsing.
-//
-// Bewusst NICHT hier: der ffmpeg-Aufruf selbst und das Encoding-Ergebnis.
-// Dafür gibt es das End-to-End-Rezept in docs/build-and-test.md.
+        await session.processIncomingFiles([first, second])
+        for _ in 0..<200 {
+            if await probe.snapshot().started { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try #require(await probe.snapshot().started)
+        session.removeChapter(id: first.id)
+        await probe.releaseFirstCall()
+        for _ in 0..<200 {
+            if !session.isPreparingArtwork { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(session.audioFiles == [second])
+        #expect(session.embeddedCoverData == cover)
+        #expect(await probe.snapshot().calls == [source])
+    }
+}

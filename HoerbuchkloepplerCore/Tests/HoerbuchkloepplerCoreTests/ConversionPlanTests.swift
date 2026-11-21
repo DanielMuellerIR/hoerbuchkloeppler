@@ -3,7 +3,7 @@ import Testing
 @testable import HoerbuchkloepplerCore
 import Darwin
 
-@Suite("FFmpegWrapper – splitAudioFilesIfNeeded")
+@Suite("Ausgabeplanung – Kapitel gruppieren")
 struct SplitAudioFilesTests {
 
     private func file(_ hours: Double) -> AudioFile {
@@ -12,21 +12,21 @@ struct SplitAudioFilesTests {
 
     @Test("Ohne Maximaldauer bleibt alles eine Gruppe")
     func noMaxDuration() {
-        let groups = FFmpegWrapper.splitAudioFilesIfNeeded([file(1), file(1)], maxDurationHours: nil)
+        let groups = ConversionPlanner.splitAudioFilesIfNeeded([file(1), file(1)], maxDurationHours: nil)
         #expect(groups.count == 1)
         #expect(groups[0].count == 2)
     }
 
     @Test("Maximaldauer 0 bedeutet unbegrenzt")
     func zeroMeansUnlimited() {
-        let groups = FFmpegWrapper.splitAudioFilesIfNeeded([file(1), file(1)], maxDurationHours: 0)
+        let groups = ConversionPlanner.splitAudioFilesIfNeeded([file(1), file(1)], maxDurationHours: 0)
         #expect(groups.count == 1)
     }
 
     @Test("Wird die Maximaldauer überschritten, entsteht eine neue Gruppe")
     func splitsWhenExceeded() {
         // 3 x 4h bei max 10h -> [4h+4h], [4h]
-        let groups = FFmpegWrapper.splitAudioFilesIfNeeded([file(4), file(4), file(4)], maxDurationHours: 10)
+        let groups = ConversionPlanner.splitAudioFilesIfNeeded([file(4), file(4), file(4)], maxDurationHours: 10)
         #expect(groups.count == 2)
         #expect(groups[0].count == 2)
         #expect(groups[1].count == 1)
@@ -34,8 +34,75 @@ struct SplitAudioFilesTests {
 
     @Test("Passt genau auf die Grenze, bleibt es eine Gruppe")
     func exactFitStaysOneGroup() {
-        let groups = FFmpegWrapper.splitAudioFilesIfNeeded([file(5), file(5)], maxDurationHours: 10)
+        let groups = ConversionPlanner.splitAudioFilesIfNeeded([file(5), file(5)], maxDurationHours: 10)
         #expect(groups.count == 1)
+    }
+
+    @Test("Kapitelzeiten außerhalb der FFmetadata-Skala stoppen den Start")
+    @MainActor
+    func invalidEncodingTimelineDoesNotStart() throws {
+        let directory = try makeTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("Quelle.wav")
+        try Data([0]).write(to: source)
+        let output = directory.appendingPathComponent("Buch.m4b")
+        let session = ConversionSession(settings: AudioSettings())
+        session.audioFiles = [AudioFile(url: source, startTime: 0, duration: Double(Int64.max) / 1_000,
+                                        chapterTitle: "Zu lang")]
+
+        #expect(FFmpegWrapper.convert(session: session, outputURL: output)
+            == .rejected("Die Kapitelzeiten können nicht ausgegeben werden: Quelle.wav"))
+        #expect(!session.isConverting)
+        #expect(!FileManager.default.fileExists(atPath: output.path))
+    }
+
+    @Test("Beide Starteinstiege prüfen den Projektlink nochmals unter der Zielsperre", arguments: [false, true])
+    @MainActor
+    func startRejectsProjectLinkChangedWhileReservingOutput(asynchronous: Bool) async throws {
+        let directory = try makeTestDirectory().resolvingSymlinksInPath()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let original = directory.appendingPathComponent("Original.wav")
+        let replacement = directory.appendingPathComponent("Ersatz.wav")
+        try writeSilentWAV(to: original)
+        try writeSilentWAV(to: replacement, duration: 0.5)
+        let link = directory.appendingPathComponent("Quelle.wav")
+        let manager = FileManager.default
+        try manager.createSymbolicLink(at: link, withDestinationURL: original)
+        let session = ConversionSession(settings: AudioSettings())
+        await session.importFiles([link], analyzeArtwork: false)
+        try #require(session.audioFiles.count == 1)
+        try await session.saveProjectAsync(to: directory.appendingPathComponent("Probe.hkproject"))
+        try await session.verifyProjectSources()
+        let output = directory.appendingPathComponent("Ausgabe.m4b")
+        let plan = FFmpegWrapper.makeConversionPlan(files: session.audioFiles, outputURL: output, maxDurationHours: nil)
+        func replaceLink() throws {
+            try manager.removeItem(at: link)
+            try manager.createSymbolicLink(at: link, withDestinationURL: replacement)
+        }
+        let start: ConversionStartResult
+        if asynchronous {
+            var checks = 0
+            start = await FFmpegWrapper.startVerifiedConversionAsync(session: session, plan: plan) {
+                checks += 1
+                if checks == 2 {
+                    do { try replaceLink() }
+                    catch { Issue.record("Quelllink der Probe konnte nicht ersetzt werden: \(error)") }
+                }
+                return true
+            }
+        } else {
+            start = FFmpegWrapper.convert(session: session, plan: plan, measureBookLoudness: nil,
+                                          cachedProjectSourcesOnly: true) { actualPlan in
+                try ConversionPlanner.validateConversionPlan(actualPlan)
+                let leases = try OutputLeases.acquire(for: actualPlan.outputURLs)
+                try replaceLink()
+                return leases
+            }
+        }
+        #expect(start == .rejected("Projektquellen fehlen oder wurden verändert."))
+        #expect(session.projectSourceIssues.map(\.reason) == ["Verknüpfung wurde verändert"])
+        #expect(!manager.fileExists(atPath: output.path))
+        _ = try OutputLeases.acquire(for: [output])
     }
 
     @Test("Eine leere Liste ergibt mit und ohne Maximaldauer null Gruppen")
@@ -45,8 +112,8 @@ struct SplitAudioFilesTests {
         // in einen sachfremden Zielfehler („Die Zieldatei wurde seit der
         // Bestätigung verändert: /"). Beide Wege liefern jetzt `[]`, und der
         // Plan meldet dafür `noInputFiles`.
-        #expect(FFmpegWrapper.splitAudioFilesIfNeeded([], maxDurationHours: 10).isEmpty)
-        #expect(FFmpegWrapper.splitAudioFilesIfNeeded([], maxDurationHours: nil).isEmpty)
+        #expect(ConversionPlanner.splitAudioFilesIfNeeded([], maxDurationHours: 10).isEmpty)
+        #expect(ConversionPlanner.splitAudioFilesIfNeeded([], maxDurationHours: nil).isEmpty)
         // Ohne das Guard in `convert()` liefe die Gruppen-Schleife sonst null Mal
         // durch und der Lauf meldete Erfolg, ohne je eine Datei erzeugt zu haben.
         let empty = ConversionPlan(
@@ -57,7 +124,7 @@ struct SplitAudioFilesTests {
             inputSnapshots: [:]
         )
         #expect {
-            try FFmpegWrapper.validateConversionPlan(empty)
+            try ConversionPlanner.validateConversionPlan(empty)
         } throws: { error in
             (error as? ConversionOutputError)?.errorDescription
                 == "Keine Audiodateien zum Konvertieren vorhanden."
@@ -72,7 +139,7 @@ struct SplitAudioFilesTests {
             inputSnapshots: [:]
         )
         #expect {
-            try FFmpegWrapper.validateConversionPlan(mixed)
+            try ConversionPlanner.validateConversionPlan(mixed)
         } throws: { error in
             (error as? ConversionOutputError)?.errorDescription
                 == "Keine Audiodateien zum Konvertieren vorhanden."
@@ -87,20 +154,20 @@ struct ResolveOutputURLTests {
 
     @Test("Ohne Split bleibt der Name unverändert")
     func singleGroupUnchanged() {
-        #expect(FFmpegWrapper.resolveOutputURL(base, groupIndex: 0, splitGroupsCount: 1) == base)
+        #expect(ConversionPlanner.resolveOutputURL(base, groupIndex: 0, splitGroupsCount: 1) == base)
     }
 
     @Test("Mit Split werden -01, -02 angehängt")
     func splitGetsSuffix() {
-        let first = FFmpegWrapper.resolveOutputURL(base, groupIndex: 0, splitGroupsCount: 3)
-        let second = FFmpegWrapper.resolveOutputURL(base, groupIndex: 1, splitGroupsCount: 3)
+        let first = ConversionPlanner.resolveOutputURL(base, groupIndex: 0, splitGroupsCount: 3)
+        let second = ConversionPlanner.resolveOutputURL(base, groupIndex: 1, splitGroupsCount: 3)
         #expect(first.lastPathComponent == "Buch-01.m4b")
         #expect(second.lastPathComponent == "Buch-02.m4b")
     }
 
     @Test("Endung und Ordner bleiben erhalten")
     func keepsExtensionAndFolder() {
-        let url = FFmpegWrapper.resolveOutputURL(base, groupIndex: 0, splitGroupsCount: 2)
+        let url = ConversionPlanner.resolveOutputURL(base, groupIndex: 0, splitGroupsCount: 2)
         #expect(url.pathExtension == "m4b")
         #expect(url.deletingLastPathComponent().path == "/tmp")
     }
@@ -122,7 +189,7 @@ struct ConversionTargetTests {
         )
 
         #expect(throws: ConversionOutputError.self) {
-            try FFmpegWrapper.validateConversionPlan(plan)
+            try ConversionPlanner.validateConversionPlan(plan)
         }
         #expect(try String(contentsOf: source, encoding: .utf8) == "Original")
     }
@@ -142,7 +209,7 @@ struct ConversionTargetTests {
         )
 
         #expect(throws: ConversionOutputError.self) {
-            try FFmpegWrapper.validateConversionPlan(plan)
+            try ConversionPlanner.validateConversionPlan(plan)
         }
     }
 
@@ -160,7 +227,7 @@ struct ConversionTargetTests {
         try Data("anderer und längerer Inhalt".utf8).write(to: source)
 
         #expect(throws: ConversionOutputError.self) {
-            try FFmpegWrapper.validateConversionPlan(plan)
+            try ConversionPlanner.validateConversionPlan(plan)
         }
     }
 
@@ -191,7 +258,7 @@ struct ConversionTargetTests {
         )
 
         #expect(throws: ConversionOutputError.self) {
-            try FFmpegWrapper.validateConversionPlan(plan)
+            try ConversionPlanner.validateConversionPlan(plan)
         }
     }
 

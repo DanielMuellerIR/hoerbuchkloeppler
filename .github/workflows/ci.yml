@@ -1,0 +1,33 @@
+name: macOS-Prüfungen
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    # Das gebündelte FFmpeg ist ein x86_64-Programm.
+    runs-on: macos-15-intel
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Swift, CLI und Lifecycle prüfen
+        run: ./tests/run.sh
+      - name: App ohne Signierung bauen
+        run: |
+          xcodebuild -project "Hörbuchklöppler.xcodeproj" -scheme "Hörbuchklöppler" \
+            -destination 'platform=macOS' -configuration Debug \
+            -derivedDataPath "$RUNNER_TEMP/Hoerbuchkloeppler" CODE_SIGNING_ALLOWED=NO build
+      - name: Python-Prüfskripte prüfen
+        run: |
+          python3 -m venv "$RUNNER_TEMP/python"
+          "$RUNNER_TEMP/python/bin/pip" install ruff
+          "$RUNNER_TEMP/python/bin/ruff" check --isolated --select E4,E7,E9,F,I \
+            tests/cli_temp.py tests/verify_cli_project.py tests/verify_cli_matrix.py \
+            tests/verify_audio_transitions.py

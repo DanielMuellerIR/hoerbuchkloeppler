@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 # shellcheck source=script-helpers.sh
 source "./script-helpers.sh"
@@ -19,7 +19,7 @@ invalid_suffix="$work_dir/version-suffix"
 invalid_path="$work_dir/version-path"
 # Syntaxprüfung aller Root-Shell-Skripte. Ergänzende Verhaltensprüfungen stehen
 # nach den gemeinsamen Versions- und Prozessidentitätsprüfungen.
-for script_path in ./*.sh; do
+for script_path in ./*.sh tests/*.sh; do
   [ -f "$script_path" ] || continue
   script="${script_path#./}"
   if [ ! -r "$script" ]; then
@@ -46,6 +46,11 @@ assert_equal() {
 }
 
 repo_name="${PWD##*/}"
+for script in build.sh install.sh release.sh; do
+  help_text="$(cd .. && bash "./$repo_name/$script" --help)"
+  [[ "$help_text" == "$script — "* ]] \
+    || { echo "Fehler: Hilfe aus dem Elternordner fehlt: $script" >&2; exit 1; }
+done
 install_help="$(cd .. && bash "./$repo_name/install.sh" --help)"
 [[ "$install_help" == "install.sh — Hörbuchklöppler"* && "$install_help" == *"./install.sh --no-install"* ]] \
   || { echo "Fehler: Installationshilfe fehlt oder ist unvollständig." >&2; exit 1; }

@@ -2,20 +2,6 @@ import Foundation
 import Combine
 import AppKit
 
-public struct TagCandidate: Identifiable, Equatable, Sendable {
-    public let id = UUID()
-    public let type: String
-    public let key: String
-    public let value: String
-    public init(type: String, key: String, value: String) { self.type = type; self.key = key; self.value = value }
-}
-
-struct MetadataResolution: Equatable, Sendable {
-    let title: String
-    let author: String
-    let shouldShowSelection: Bool
-}
-
 /// Besitzt nur die externen Prozesse des Imports (Kapitel- und Metadatenanalyse).
 /// Damit kann die CLI schon vor dem eigentlichen Konvertierungs-Context auf
 /// Ctrl-C reagieren, ohne Prozesse eines anderen Fensters anzufassen.
@@ -247,20 +233,11 @@ public final class ConversionSession: ObservableObject, Identifiable {
         }
     }
     
-    @Published public var audioFiles: [AudioFile] = [] {
-        didSet {
-            recordChapterEdit(previous: oldValue)
-            if audioFiles.isEmpty {
-                importService.clearCachedArtwork()
-                invalidateImportWork()
-                clearMetadata()
-            }
-        }
-    }
-    
-    @Published public var coverImage: NSImage?
-    @Published public var coverPath: String?
-    @Published public var isPreparingArtwork = false
+    @Published public internal(set) var audioFiles: [AudioFile] = []
+
+    @Published public internal(set) var coverImage: NSImage?
+    @Published public internal(set) var coverPath: String?
+    @Published public private(set) var isPreparingArtwork = false
     /// Meldet bewusste Cover-Änderungen und das Ersetzen des Buchzustands.
     public var coverSelectionChanges: AnyPublisher<Void, Never> {
         coverSelectionDidChange.eraseToAnyPublisher()
@@ -269,7 +246,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// NICHT als separate Bilddatei vorliegt. Wird vor der Kodierung in eine
     /// temporäre Datei geschrieben, damit ffmpeg es einbetten kann — sonst ginge
     /// ein nur eingebettetes Cover im Output verloren.
-    public var embeddedCoverData: Data?
+    public internal(set) var embeddedCoverData: Data?
     private var importGeneration = UUID()
     private var artworkRequest = UUID()
     private var artworkTask: Task<Void, Never>?
@@ -286,7 +263,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     @Published public private(set) var importCompletedItems = 0
     @Published public private(set) var importTotalItems = 0
     @Published public private(set) var importDetail = ""
-    public var canCancelImport: Bool { isImporting && (pendingImport?.remainingItems ?? 0) > 0 }
+    public var canCancelImport: Bool { isImporting && pendingImport != nil }
     @Published public var importErrorMessage: String?
     public private(set) var lastImportFailures: [AudioImportFailure] = []
     private var cliSourceFolderURL: URL?
@@ -308,29 +285,34 @@ public final class ConversionSession: ObservableObject, Identifiable {
         title.isEmpty || author.isEmpty || narrator.isEmpty
             || series.isEmpty || volumeNumber.isEmpty || language.isEmpty
     }
-    @Published public var projectSourceIssues: [ProjectSourceIssue] = []
-    public var loadedProjectURL: URL?
-    var projectSources: [ProjectSource] = []
+    @Published public internal(set) var projectSourceIssues: [ProjectSourceIssue] = []
+    public internal(set) var loadedProjectURL: URL?
+    // Auch entfernte Kapitel können über Undo/Redo wieder aktiv werden.
+    var projectSourcesByOrigin: [UUID: ProjectSourceBinding] = [:]
+    var projectSourceOrigins: [UUID: [UUID]] = [:]
+    var projectSourceIssuesByID: [UUID: ProjectSourceIssue] = [:]
+    var projectSourcesBeingWritten: (operation: UUID, chapterIDs: Set<UUID>, byOrigin: [UUID: ProjectSourceBinding])?
+    var projectSourceRetentionEdits = 0
     let projectFingerprints = ProjectFingerprintStore()
     var projectOperation = UUID()
-    var undoChapters: [ChapterEditSnapshot] = []
-    var redoChapters: [ChapterEditSnapshot] = []
-    var restoringChapters = false
-    @Published public var canUndoChapters = false
-    @Published public var canRedoChapters = false
+    /// Entwertet eine Exportvorschau auch dann, wenn ein neues Projekt dieselben Kapitel enthält.
+    public var projectRevision: UUID { projectOperation }
+    var chapterHistory = ChapterHistory()
+    @Published public internal(set) var canUndoChapters = false
+    @Published public internal(set) var canRedoChapters = false
     
     // --- KONVERSION STATUS & LOGGING ---
-    @Published public var runState = ConversionRunState()
-    public var isConverting: Bool { get { runState.isConverting } set { runState.isConverting = newValue } }
-    public var showOverlay: Bool { get { runState.showOverlay } set { runState.showOverlay = newValue } }
-    public var progress: Double { get { runState.progress } set { runState.progress = newValue } }
-    public var conversionStatus: String { get { runState.status } set { runState.status = newValue } }
-    public var conversionPhase: String { get { runState.phase } set { runState.phase = newValue } }
+    @Published public internal(set) var runState = ConversionRunState()
+    public internal(set) var isConverting: Bool { get { runState.isConverting } set { runState.isConverting = newValue } }
+    public internal(set) var showOverlay: Bool { get { runState.showOverlay } set { runState.showOverlay = newValue } }
+    public internal(set) var progress: Double { get { runState.progress } set { runState.progress = newValue } }
+    var conversionStatus: String { get { runState.status } set { runState.status = newValue } }
+    public internal(set) var conversionPhase: String { get { runState.phase } set { runState.phase = newValue } }
     public internal(set) var completedOutputURLs: [URL] { get { runState.completedOutputs } set { runState.completedOutputs = newValue } }
     /// Ergebnis des letzten Konvertierungslaufs (nil = noch nicht beendet,
     /// true = erfolgreich, false = mit Fehler/abgebrochen). Erlaubt der CLI
     /// einen korrekten Exit-Code statt blind "Erfolg" zu melden.
-    public var lastConversionSucceeded: Bool? { get { runState.succeeded } set { runState.succeeded = newValue } }
+    public internal(set) var lastConversionSucceeded: Bool? { get { runState.succeeded } set { runState.succeeded = newValue } }
 
     private nonisolated let conversionCoordinator = ConversionCoordinator()
     private nonisolated let conversionEventQueue = ConversionEventQueue()
@@ -352,7 +334,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     }
 
     private nonisolated func preparationCancellationRequested() -> Bool {
-        AudioFile.taskCancellationRequested()
+        Task.isCancelled
             || currentPreparationContext()?.isCancelled == true
     }
 
@@ -549,7 +531,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     func beginConversionRun() -> ConversionContext {
         let queue = conversionEventQueue
         return conversionCoordinator.begin { runID, message in
-            queue.send(.log(message, .highlight, runID))
+            queue.send(.log(message, .warning, runID))
         }
     }
 
@@ -572,7 +554,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     // Strukturierte Logs für GUI und Terminal
     @Published public var eventLogs: [LogEntry] = []
     @Published public var logString: String = "" // Für Legacy/Fallback
-    public var segmentProgress: [Int: SegmentStatus] { get { runState.segments } set { runState.segments = newValue } }
+    public internal(set) var segmentProgress: [Int: SegmentStatus] { get { runState.segments } set { runState.segments = newValue } }
 
     @Published public var titleCandidates: [TagCandidate] = []
     @Published public var authorCandidates: [TagCandidate] = []
@@ -619,10 +601,15 @@ public final class ConversionSession: ObservableObject, Identifiable {
         let appendedText = logString.isEmpty ? message : "\n\(message)"
         logString.append(contentsOf: appendedText)
         let timeStr = ConversionSession.logDateFormatter.string(from: entry.date)
-        emit("[\(timeStr)] \(message)")
+        let prefix = switch type {
+        case .warning: "Warnung: "
+        case .error: "Fehler: "
+        default: ""
+        }
+        emit("[\(timeStr)] \(prefix)\(message)")
     }
 
-    public func logVerbose(_ message: String) {
+    private func logVerbose(_ message: String) {
         guard settings.isVerbose else { return }
         // Verbose-Zeilen gehen bewusst nur ins Terminal, nicht ins UI-Log — sonst
         // wird die Oberfläche zugemüllt. Die Ausgabe läuft trotzdem über den
@@ -672,13 +659,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
         conversionEventQueue.send(.progress(value, segmentIndex, segmentProgress, runID))
     }
 
-    /// Übernimmt das Endergebnis des Workers in genau EINER Main-Actor-Nachricht,
-    /// inklusive der erfolgreich erzeugten Ziel-URLs. Früher meldete eine
-    /// separate Task jede fertige Datei einzeln; unstrukturierte Tasks haben
-    /// aber keine garantierte Reihenfolge — lief der Abschluss zuerst, entfernte
-    /// `endConversion` den Kontext und die Ausgabe-Meldung fiel am
-    /// `isCurrentConversion`-Guard durch (die CLI meldete dann fälschlich,
-    /// es sei keine gültige Datei erzeugt worden).
+    /// Abschluss und übernommene Zielpfade kommen gemeinsam an, weil der
+    /// Abschluss den Laufkontext entwertet und spätere Ereignisse verwirft.
     nonisolated func enqueueConversionFinished(
         success: Bool,
         cancelled: Bool,
@@ -746,8 +728,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
             } else {
                 conversionStatus = success ? "Erfolgreich abgeschlossen" : "Mit Fehlern beendet"
                 addLog(
-                    success ? "🏁 Alle Vorgänge beendet." : "🏁 Vorgang mit Fehlern beendet.",
-                    type: .highlight
+                    success ? "Alle Vorgänge beendet." : "Vorgang mit Fehlern beendet.",
+                    type: success ? .highlight : .error
                 )
             }
             endConversion(runID)
@@ -755,7 +737,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         case let .cancellationStarted(runID):
             guard isCurrentConversion(runID) else { return }
             conversionStatus = "Abbruch läuft …"
-            addLog("🛑 Vorgang wird abgebrochen und bereinigt.", type: .info)
+            addLog("Vorgang wird abgebrochen und bereinigt.", type: .info)
 
         case let .barrier(continuation):
             continuation.resume()
@@ -763,12 +745,13 @@ public final class ConversionSession: ObservableObject, Identifiable {
     }
     
     public func logCurrentSettings() {
-        addLog("⚙️ Aktuelle Einstellungen (geladen aus Speicher):", type: .info)
+        addLog("Aktuelle Einstellungen (geladen aus Speicher):", type: .info)
         addLog("   - Mono: \(settings.isMono ? "Ja" : "Nein")", type: .info)
         addLog("   - Bitrate: \(settings.bitrate)", type: .info)
         addLog("   - Abtastrate: \(settings.sampleRate) Hz", type: .info)
-        addLog("   - Max Duration: \(settings.maxDurationHours == nil ? "Unlimitiert" : "\(settings.maxDurationHours!) Std")", type: .info)
-        addLog("   - Parallel Mode: \(settings.useParallelEncoding ? "Aktiviert" : "Deaktiviert")", type: .info)
+        let maximumDuration = settings.maxDurationHours.map { "\($0) Std." } ?? "Unbegrenzt"
+        addLog("   - Maximale Dauer: \(maximumDuration)", type: .info)
+        addLog("   - Parallelmodus: \(settings.useParallelEncoding ? "Aktiviert" : "Deaktiviert")", type: .info)
     }
 
     private func initSegmentProgress(index: Int, filename: String, runID: UUID? = nil) {
@@ -793,15 +776,21 @@ public final class ConversionSession: ObservableObject, Identifiable {
 
     public func resetSession() {
         projectOperation = UUID()
-        invalidateImportWork()
-        self.audioFiles.removeAll()
+        applyChapterList([])
         // Den ganzen Laufzustand ersetzen statt Feld für Feld: Phase und
         // fertige Ausgaben des Vorlaufs blieben sonst stehen.
         self.runState = ConversionRunState()
         self.eventLogs = []
         self.logString = ""
-        loadedProjectURL = nil; projectSources = []; projectSourceIssues = []
-        undoChapters = []; redoChapters = []; updateHistoryAvailability()
+        loadedProjectURL = nil
+        projectSourcesByOrigin = [:]
+        projectSourceOrigins = [:]
+        projectSourceIssuesByID = [:]
+        projectSourcesBeingWritten = nil
+        projectSourceRetentionEdits = 0
+        projectSourceIssues = []
+        chapterHistory = ChapterHistory()
+        updateHistoryAvailability()
     }
 
     /// Kennung der zuletzt gestarteten Info-Abfrage. Der neue Werkzeugkontext
@@ -813,7 +802,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// Regressionstest. Produktiv wird weiterhin das aufgelöste MediaInfo
     /// verwendet.
     var mediaInfoExecutableProvider: @Sendable () -> URL? = {
-        FFmpegWrapper.getBinaryURL(name: "mediainfo")
+        ToolLocator.binaryURL(name: "mediainfo")
     }
 
     /// Nur auf dem Main Actor aufrufen (setzt @Published-State).
@@ -828,12 +817,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
         let fileURL = file.url
         let executableProvider = mediaInfoExecutableProvider
         Task { [weak self] in
-            // Gebündeltes mediainfo bevorzugen (getBinaryURL: Bundle -> PATH ->
-            // Homebrew-Fallback). Vorher fest verdrahtete Homebrew-Pfade ließen
-            // den Info-Dialog in der verteilten App ohne Homebrew scheitern,
-            // obwohl mediainfo mitgeliefert wird.
             let text = await Task.detached {
-                Self.readRawMediaInfo(
+                MediaInfoService.readText(
                     for: fileURL,
                     executableURL: executableProvider(),
                     context: context
@@ -860,48 +845,9 @@ public final class ConversionSession: ObservableObject, Identifiable {
         isFetchingInfo = false
     }
 
-    private nonisolated static func readRawMediaInfo(
-        for fileURL: URL,
-        executableURL: URL?,
-        context: ToolProcessContext
-    ) -> String {
-        guard let executableURL else {
-            return "❌ MediaInfo wurde auf diesem System nicht gefunden."
-        }
-        switch FFmpegWrapper.runCapturedProcess(
-            executableURL: executableURL,
-            arguments: [fileURL.path],
-            context: context,
-            timeout: 10
-        ) {
-        case .completed(let status, let data) where status == 0:
-            guard !data.isEmpty else {
-                return "MediaInfo hat keine Informationen geliefert."
-            }
-            return decodeMediaInfoText(from: data) ?? "Dekodierung fehlgeschlagen."
-        case .timedOut:
-            return "MediaInfo wurde nach 10 Sekunden beendet."
-        case .cancelled:
-            return "MediaInfo-Abfrage wurde abgebrochen."
-        case .completed(let status, _):
-            return "MediaInfo endete mit Exit-Code \(status)."
-        case .failed(let reason):
-            return "Fehler: \(reason)"
-        }
-    }
-
-    nonisolated static func decodeMediaInfoText(from data: Data) -> String? {
-        let bytes = [UInt8](data.prefix(2))
-        let hasUTF16BOM = bytes == [0xFF, 0xFE] || bytes == [0xFE, 0xFF]
-        let encodings: [String.Encoding] = hasUTF16BOM
-            ? [.utf16, .utf8, .macOSRoman, .isoLatin1]
-            : [.utf8, .macOSRoman, .isoLatin1]
-        return encodings.lazy.compactMap { String(data: data, encoding: $0) }.first
-    }
-
     public var totalDuration: TimeInterval { audioFiles.reduce(0) { $0 + $1.duration } }
 
-    public func clearMetadata() {
+    func clearMetadata() {
         self.title = ""; self.author = ""; self.genre = "Hörbuch"
         narrator = ""; series = ""; volumeNumber = ""; language = ""
         self.coverImage = nil; self.coverPath = nil; self.embeddedCoverData = nil
@@ -913,7 +859,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
     }
 
     /// Markiert einen neuen GUI-Import und entwertet Antworten des Vorgängers.
-    public func beginImport(
+    func beginImport(
         expectedItemCount: Int = 1,
         allowsSelectionUI: Bool = true
     ) -> ImportToken {
@@ -1030,18 +976,17 @@ public final class ConversionSession: ObservableObject, Identifiable {
         analyzeArtwork: Bool = true
     ) async {
         var files: [FoundFile] = []
-        for url in urls {
+        let inputs = await SourceDiscovery.classify(urls, allowFolders: fileOrder == nil)
+        for input in inputs {
             guard hasPendingImport(token), !Task.isCancelled else { return }
-            var isDirectory: ObjCBool = false
-            if fileOrder == nil,
-               FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
-               isDirectory.boolValue {
+            switch input {
+            case .folder(let url):
                 let scanned = await scanFolder(url, importToken: token)
                 stageScannedFolder(scanned, importToken: token)
                 await finishImport(token)
-            } else if let found = SourceDiscovery.foundFile(at: url) {
+            case .file(let found):
                 files.append(found)
-            } else {
+            case .unreadable(let url):
                 stageAudioLoadResult(.failure(AudioImportFailure(sourceURL: url, reason: .analysisFailed)),
                                      importToken: token)
                 await finishImport(token)
@@ -1068,7 +1013,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         await finishImport(token, completed: results.count, countingProgress: false, fileOrder: fileOrder)
     }
 
-    public func finishImport(_ token: ImportToken, countingProgress: Bool = true) async {
+    func finishImport(_ token: ImportToken, countingProgress: Bool = true) async {
         await finishImport(token, completed: 1, countingProgress: countingProgress)
     }
 
@@ -1089,19 +1034,28 @@ public final class ConversionSession: ObservableObject, Identifiable {
         }
         if !batch.failures.isEmpty {
             batch.warnings.forEach { addLog($0) }
-            batch.failures.forEach { addLog($0.logMessage, type: .highlight) }
+            batch.failures.forEach { addLog($0.logMessage, type: .error) }
             lastImportFailures = batch.failures
             importErrorMessage = Self.importFailureMessage(batch.failures)
             abandonPendingImport()
             return
         }
 
+        let artwork = await prepareImportArtwork(
+            embedded: batch.embeddedArtwork, imageURLs: batch.imageURLs,
+            coverRevision: token.coverRevision
+        )
+        guard hasPendingImport(token) else { return }
+        guard !preparationCancellationRequested() else {
+            abandonPendingImport()
+            return
+        }
         importDetail = "Metadaten übernehmen …"
         pendingImport = nil
         let first = applyScannedFolderContents(
             audioFiles: batch.audioFiles,
-            imageURLs: batch.imageURLs,
-            embeddedArtwork: batch.embeddedArtwork,
+            artwork: artwork,
+            expectedCoverRevision: token.coverRevision,
             warnings: batch.warnings,
             importToken: token,
             sourceFolderForCLI: batch.sourceFolder,
@@ -1155,6 +1109,17 @@ public final class ConversionSession: ObservableObject, Identifiable {
         if let total { importTotalItems += max(0, total) }
         if let filename { importDetail = filename }
         if completed { importCompletedItems += 1 }
+    }
+
+    func applyChapterList(_ files: [AudioFile]) {
+        audioFiles = files
+        compactProjectSourceHistoryIfNeeded()
+        updateActiveProjectSourceIssues()
+        if files.isEmpty {
+            importService.clearCachedArtwork()
+            invalidateImportWork()
+            clearMetadata()
+        }
     }
 
     private func invalidateImportWork() {
@@ -1236,28 +1201,27 @@ public final class ConversionSession: ObservableObject, Identifiable {
         sourceFolderForCLI: URL?,
         fileOrder: [URL: Int]? = nil
     ) -> AudioFile? {
-        // Eine leere Zuweisung würde als „Alle löschen“ den Import entwerten.
         guard !newFiles.isEmpty else { return nil }
         let canRepresentFolder = audioFiles.isEmpty && sourceFolderForCLI != nil
         let sourceCount = Set(newFiles.map { $0.sourceURL.standardizedFileURL.path }).count
         let sourceLabel = sourceCount == 1 ? "Audiodatei" : "Audiodateien"
         if sourceCount == newFiles.count {
-            addLog("📥 Importiere \(sourceCount) \(sourceLabel)...")
+            addLog("Importiere \(sourceCount) \(sourceLabel)...")
         } else {
-            addLog("📥 Importiere \(sourceCount) \(sourceLabel) mit \(newFiles.count) Kapiteln...")
+            addLog("Importiere \(sourceCount) \(sourceLabel) mit \(newFiles.count) Kapiteln...")
         }
         let deduplicated = SourceDiscovery.deduplicateAudioFiles(audioFiles + newFiles)
         let existingIDs = Set(audioFiles.map(\.id))
         let orderedFiles = deduplicated.files.filter { existingIDs.contains($0.id) }
             + deduplicated.files.filter { !existingIDs.contains($0.id) }.sorted(by: SourceDiscovery.audioFileComesBefore)
         if let fileOrder {
-            audioFiles = orderedFiles.sorted {
+            editChapters(orderedFiles.sorted {
                 let left = fileOrder[$0.sourceURL.standardizedFileURL] ?? Int.max
                 let right = fileOrder[$1.sourceURL.standardizedFileURL] ?? Int.max
                 return left == right ? $0.startTime < $1.startTime : left < right
-            }
+            })
         } else {
-            audioFiles = orderedFiles
+            editChapters(orderedFiles)
         }
         for duplicate in deduplicated.discardedSources {
             // Derselbe Pfad in beiden Feldern heißt: Ein Drop hat diese Datei
@@ -1265,12 +1229,12 @@ public final class ConversionSession: ObservableObject, Identifiable {
             // Zwei-Namen-Meldung nennte hier zweimal denselben Namen.
             if duplicate.discarded == duplicate.kept {
                 addLog(
-                    "⚠️ \(duplicate.kept.lastPathComponent) wurde mehrfach übergeben; "
+                    "\(duplicate.kept.lastPathComponent) wurde mehrfach übergeben; "
                     + "importiert wird nur ein Exemplar."
                 )
             } else {
                 addLog(
-                    "⚠️ \(duplicate.discarded.lastPathComponent) und \(duplicate.kept.lastPathComponent) "
+                    "\(duplicate.discarded.lastPathComponent) und \(duplicate.kept.lastPathComponent) "
                     + "lesen dieselbe Audiodatei; importiert wird nur \(duplicate.kept.lastPathComponent)."
                 )
             }
@@ -1305,7 +1269,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         let artworkLoader = embeddedArtworkLoader
         isPreparingArtwork = true
         artworkTask = Task { [weak self] in
-            var foundArtwork: (image: NSImage, data: Data)?
+            var foundArtwork: PreparedEmbeddedArtwork?
             for file in Self.uniqueArtworkCandidates(filesToSearch) {
                 guard !Task.isCancelled, self?.artworkRequest == request else { return }
                 let artworkData = await artworkLoader(file.url)
@@ -1314,20 +1278,21 @@ public final class ConversionSession: ObservableObject, Identifiable {
                     // Manche Container deklarieren beliebige Binärdaten als
                     // Artwork. Nur tatsächlich dekodierbare Bilder dürfen in
                     // den späteren ffmpeg-Auftrag gelangen.
-                    guard let image = CoverArtwork.preview(from: artworkData) else { continue }
-                    guard let self, self.artworkRequest == request else { return }
+                    let candidate = await Task.detached { PreparedEmbeddedArtwork(artworkData) }.value
+                    guard let candidate else { continue }
+                    guard !Task.isCancelled, let self, self.artworkRequest == request else { return }
                     guard self.coverRevision == expectedCoverRevision,
                           !self.isCoverSuppressed,
                           importToken.map(self.isCurrentImport) ?? true,
                           self.coverImage == nil,
                           self.coverPath == nil else { return }
-                    // Wurde genau diese Datei während ihrer Analyse entfernt,
-                    // sucht derselbe Lauf bei den verbleibenden Kandidaten
-                    // weiter, statt sein Ergebnis nur zu verwerfen.
-                    guard self.audioFiles.contains(where: { $0.id == file.id }) else {
+                    // Das Cover gehört der Datei. Ein weiteres Kapitel aus
+                    // demselben Container darf es weiterhin übernehmen.
+                    let source = file.url.standardizedFileURL
+                    guard self.audioFiles.contains(where: { $0.url.standardizedFileURL == source }) else {
                         continue
                     }
-                    foundArtwork = (image, artworkData)
+                    foundArtwork = candidate
                     break
                 }
             }
@@ -1359,25 +1324,11 @@ public final class ConversionSession: ObservableObject, Identifiable {
         // fehlen), kann er nichts mehr beitragen und entfällt — sonst öffnete
         // ein fehlgeschlagener Lauf eine leere Auswahl in der GUI.
         let needsTitleAuthorCandidates = title.isEmpty || author.isEmpty
-        let candidates = await Task.detached {
-            var result: (titles: [TagCandidate], authors: [TagCandidate])?
-            if needsTitleAuthorCandidates,
-               preparation?.isCancelled != true,
-               let miURL = FFmpegWrapper.getBinaryURL(name: "mediainfo") {
-                let processResult = FFmpegWrapper.runCapturedProcess(
-                    executableURL: miURL,
-                    arguments: ["--Output=JSON", fileURL.path],
-                    context: preparation,
-                    timeout: 10
-                )
-                if case .completed(let status, let data) = processResult,
-                   status == 0,
-                   preparation?.isCancelled != true,
-                   let general = Self.decodeMediaInfoGeneralTrack(from: data) {
-                    result = Self.metadataCandidates(from: general)
-                }
-            }
-            return result
+        let importService = self.importService
+        let (candidates, metadata) = await Task.detached {
+            let candidates = needsTitleAuthorCandidates
+                ? MediaInfoService.readTitleAndAuthor(for: fileURL, context: preparation) : nil
+            return (candidates, importService.metadata(for: fileURL))
         }.value
 
         guard !Task.isCancelled,
@@ -1386,7 +1337,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
               preparation?.isCancelled != true else {
             return
         }
-        if let metadata = importService.metadata(for: file.url) {
+        if let metadata {
             if narrator.isEmpty { narrator = metadata["narrator"] ?? "" }
             if series.isEmpty { series = metadata["series"] ?? "" }
             if volumeNumber.isEmpty { volumeNumber = metadata["volume_number"] ?? "" }
@@ -1412,7 +1363,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         authorCandidates = candidates.authors
         // Der Token bezeichnet einen Batch, nicht das Frontend. Die CLI nutzt
         // für `--file` ebenfalls einen Token und sperrt die Auswahl ausdrücklich.
-        let resolution = Self.resolveMetadata(
+        let resolution = MediaInfoService.resolveMetadata(
             currentTitle: title,
             currentAuthor: author,
             titleCandidates: candidates.titles,
@@ -1422,89 +1373,6 @@ public final class ConversionSession: ObservableObject, Identifiable {
         title = resolution.title
         author = resolution.author
         showSelectionUI = resolution.shouldShowSelection
-    }
-
-    nonisolated static func decodeMediaInfoGeneralTrack(from data: Data) -> [String: Any]? {
-        // Pro Zeichensatz erst den JSON-Parse prüfen. MacRoman/Latin-1 können
-        // fast jede Bytefolge als Text darstellen und dürfen einen später
-        // tatsächlich passenden UTF-16-Versuch nicht vorzeitig verdrängen.
-        for encoding in [String.Encoding.utf8, .utf16, .macOSRoman, .isoLatin1] {
-            guard let text = String(data: data, encoding: encoding),
-                  let start = text.firstIndex(of: "{"),
-                  let end = text.lastIndex(of: "}"),
-                  start <= end,
-                  let jsonData = String(text[start...end]).data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: jsonData),
-                  let root = object as? [String: Any],
-                  let media = root["media"] as? [String: Any],
-                  let tracks = media["track"] as? [[String: Any]],
-                  let general = tracks.first(where: { $0["@type"] as? String == "General" }) else {
-                continue
-            }
-            return general
-        }
-        return nil
-    }
-
-    private nonisolated static func metadataCandidates(
-        from general: [String: Any]
-    ) -> (titles: [TagCandidate], authors: [TagCandidate]) {
-        func value(for key: String) -> String? {
-            general[key] as? String ?? (general[key] as? [String])?.first
-        }
-        var titles: [TagCandidate] = []
-        var authors: [TagCandidate] = []
-        if let album = value(for: "Album") {
-            titles.append(TagCandidate(type: "MediaInfo", key: "Album", value: album))
-        }
-        if let title = value(for: "Title") {
-            titles.append(TagCandidate(type: "MediaInfo", key: "Title", value: title))
-        }
-        if let performer = value(for: "Performer") {
-            authors.append(TagCandidate(type: "MediaInfo", key: "Performer", value: performer))
-        }
-        if let albumPerformer = value(for: "Album_Performer") {
-            authors.append(TagCandidate(type: "MediaInfo", key: "Album_Performer", value: albumPerformer))
-        }
-        return (titles, authors)
-    }
-
-    /// `allowsSelectionUI: false` ist der headless-Pfad (CLI): Bei mehrdeutigen
-    /// Kandidaten gewinnt der erste in Listenreihenfolge — also Album vor Title
-    /// bzw. Performer vor Album_Performer (siehe `metadataCandidates`) — statt
-    /// den Wert leer zu lassen und auf eine SwiftUI-Auswahl zu warten, die die
-    /// CLI nie anzeigt. Das stellt die frühere Erst-Kandidaten-Priorität wieder
-    /// her; die GUI (`true`) öffnet weiterhin die manuelle Auswahl.
-    nonisolated static func resolveMetadata(
-        currentTitle: String,
-        currentAuthor: String,
-        titleCandidates: [TagCandidate],
-        authorCandidates: [TagCandidate],
-        allowsSelectionUI: Bool = true
-    ) -> MetadataResolution {
-        func resolve(current: String, candidates: [TagCandidate]) -> (String, Bool) {
-            guard current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return (current, false)
-            }
-            let values = candidates
-                .map { $0.value.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            let uniqueValues = Array(Set(values)).sorted()
-            if uniqueValues.count == 1 { return (uniqueValues[0], false) }
-            guard allowsSelectionUI else {
-                // Headless: erster nichtleerer Kandidat oder unverändert leer.
-                return (values.first ?? current, false)
-            }
-            return (current, true)
-        }
-
-        let resolvedTitle = resolve(current: currentTitle, candidates: titleCandidates)
-        let resolvedAuthor = resolve(current: currentAuthor, candidates: authorCandidates)
-        return MetadataResolution(
-            title: resolvedTitle.0,
-            author: resolvedAuthor.0,
-            shouldShowSelection: resolvedTitle.1 || resolvedAuthor.1
-        )
     }
 
     /// Schwerer Teil des Ordner-Imports: rekursiv scannen, m4b-Kapitel via ffmpeg
@@ -1547,7 +1415,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
                 audioFiles: [],
                 imageURLs: [],
                 embeddedArtwork: nil,
-                warnings: ["❌ Ordner konnte nicht vollständig gelesen werden: \(failure)"],
+                warnings: ["Ordner konnte nicht vollständig gelesen werden: \(failure)"],
                 failures: [AudioImportFailure(sourceURL: url, reason: .analysisFailed)]
             )
         }
@@ -1562,7 +1430,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
                 $0.resolved.standardizedFileURL.path == target
             }
             warnings.append(
-                "⚠️ Mehrere Ordner-Einträge zeigen auf \(discarded.resolved.lastPathComponent); "
+                "Mehrere Ordner-Einträge zeigen auf \(discarded.resolved.lastPathComponent); "
                 + "importiert wird nur \(kept?.source.lastPathComponent ?? discarded.source.lastPathComponent)."
             )
         }
@@ -1614,8 +1482,12 @@ public final class ConversionSession: ObservableObject, Identifiable {
         )
     }
 
-    public nonisolated static func foundFile(at url: URL) -> FoundFile? {
-        SourceDiscovery.foundFile(at: url)
+    public nonisolated static func areReadableAudioFiles(_ urls: [URL]) async -> Bool {
+        let inputs = await SourceDiscovery.classify(urls, allowFolders: false)
+        return !Task.isCancelled && inputs.allSatisfy { input in
+            guard case .file(let file) = input else { return false }
+            return file.kind == .audio
+        }
     }
 
     /// Ein m4b liefert mehrere Kapitel mit derselben physischen URL. Seine
@@ -1647,7 +1519,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
             if preparationCancellationRequested() { return .cancelled }
             if let artworkData = await importService.artwork(at: audioFile.url) {
                 if preparationCancellationRequested() { return .cancelled }
-                if CoverArtwork.preview(from: artworkData) != nil { return .found(artworkData) }
+                if PreparedEmbeddedArtwork(artworkData) != nil { return .found(artworkData) }
             }
         }
         return preparationCancellationRequested() ? .cancelled : .none
@@ -1674,20 +1546,27 @@ public final class ConversionSession: ObservableObject, Identifiable {
         _ scanned: ScannedFolder,
         importToken: ImportToken? = nil
     ) async {
-        if AudioFile.taskCancellationRequested() { return }
+        if Task.isCancelled { return }
         if let importToken, !isCurrentImport(importToken) { return }
         guard !scanned.wasCancelled else { return }
         guard scanned.failures.isEmpty else {
             scanned.warnings.forEach { addLog($0) }
-            scanned.failures.forEach { addLog($0.logMessage, type: .highlight) }
+            scanned.failures.forEach { addLog($0.logMessage, type: .error) }
             lastImportFailures = scanned.failures
             importErrorMessage = Self.importFailureMessage(scanned.failures)
             return
         }
+        let generation = importGeneration
+        let revision = importToken?.coverRevision ?? coverRevision
+        let artwork = await prepareImportArtwork(
+            embedded: scanned.embeddedArtwork, imageURLs: scanned.imageURLs,
+            coverRevision: revision
+        )
+        guard generation == importGeneration, !preparationCancellationRequested() else { return }
         let first = applyScannedFolderContents(
             audioFiles: scanned.audioFiles,
-            imageURLs: scanned.imageURLs,
-            embeddedArtwork: scanned.embeddedArtwork,
+            artwork: artwork,
+            expectedCoverRevision: revision,
             warnings: scanned.warnings,
             importToken: importToken,
             sourceFolderForCLI: scanned.folderURL,
@@ -1698,10 +1577,18 @@ public final class ConversionSession: ObservableObject, Identifiable {
         }
     }
 
+    private func prepareImportArtwork(
+        embedded: Data?, imageURLs: [URL], coverRevision revision: UInt
+    ) async -> PreparedImportArtwork {
+        guard revision == coverRevision, !isCoverSuppressed else { return PreparedImportArtwork() }
+        let mayUseEmbedded = coverImage == nil && coverPath == nil
+        return await PreparedImportArtwork.load(embedded: mayUseEmbedded ? embedded : nil, images: imageURLs)
+    }
+
     private func applyScannedFolderContents(
         audioFiles: [AudioFile],
-        imageURLs: [URL],
-        embeddedArtwork: Data?,
+        artwork: PreparedImportArtwork,
+        expectedCoverRevision: UInt,
         warnings: [String],
         importToken: ImportToken?,
         sourceFolderForCLI: URL?,
@@ -1709,16 +1596,11 @@ public final class ConversionSession: ObservableObject, Identifiable {
         fileOrder: [URL: Int]? = nil
     ) -> AudioFile? {
         for warning in warnings { addLog(warning) }
-        let expectedCoverRevision = importToken?.coverRevision ?? coverRevision
         if coverRevision == expectedCoverRevision, !isCoverSuppressed,
-           coverImage == nil, coverPath == nil,
-           let artworkData = embeddedArtwork,
-           let image = CoverArtwork.preview(from: artworkData) {
-            coverImage = image
+           coverImage == nil, coverPath == nil, let embedded = artwork.embedded {
+            coverImage = embedded.image
             coverPath = nil
-            // Rohdaten merken: Nur so landet ein
-            // eingebettetes Cover ohne separate Bilddatei auch im Output.
-            embeddedCoverData = artworkData
+            embeddedCoverData = embedded.data
             isCoverSuppressed = false
         }
         let first = commitAudioFiles(audioFiles, sourceFolderForCLI: sourceFolderForCLI,
@@ -1727,9 +1609,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
         if importToken.map(isCurrentImport) ?? true,
            coverRevision == expectedCoverRevision,
            !isCoverSuppressed,
-           !imageURLs.isEmpty,
-           let url = findLargestImage(from: imageURLs) {
-            applyCover(url: url)
+           let cover = artwork.loose {
+            applyCover(cover)
         }
         return first
     }
@@ -1742,39 +1623,43 @@ public final class ConversionSession: ObservableObject, Identifiable {
         await applyScannedFolder(scanned)
     }
 
-    private func findLargestImage(from urls: [URL]) -> URL? {
-        var maxFileSize = -1; var largestURL: URL?
-        for url in urls {
-            if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size > maxFileSize {
-                maxFileSize = size; largestURL = url
-            }
+    public struct PreparedCover: Sendable {
+        fileprivate let url: URL
+        fileprivate let data: Data
+        fileprivate let thumbnail: CGImage
+
+        /// Das Original bleibt mit der Auswahl verbunden, auch wenn sich die
+        /// Datei danach ändert. Ein Worker kann Lesen und Dekodieren übernehmen.
+        public init?(url: URL) {
+            guard let data = CoverArtwork.readFile(at: url, isCancelled: { Task.isCancelled }),
+                  let thumbnail = CoverArtwork.thumbnail(from: data, maximumDimension: 2_000),
+                  !Task.isCancelled else { return nil }
+            self.url = url
+            self.data = data
+            self.thumbnail = thumbnail
         }
-        return largestURL
     }
 
     @discardableResult
     public func selectCover(url: URL) -> Bool {
-        guard applyCover(url: url) else { return false }
-        notifyCoverSelectionChange()
+        guard let cover = PreparedCover(url: url) else { return false }
+        selectCover(cover)
         return true
     }
 
-    @discardableResult
-    private func applyCover(url: URL) -> Bool {
-        // Auswahl bedeutet Besitz eines unveränderlichen Inhalts-Snapshots,
-        // nicht nur Merken eines später erneut gelesenen Pfads. Dadurch kann ein
-        // gelöschtes oder ausgetauschtes Bild zwischen Auswahl und Start weder
-        // das ausdrücklich gewählte Cover verlieren noch fremde Daten einsetzen.
-        guard let data = FFmpegWrapper.loadCoverSnapshot(at: url),
-              let image = CoverArtwork.preview(from: data) else { return false }
+    public func selectCover(_ cover: PreparedCover) {
+        applyCover(cover)
+        notifyCoverSelectionChange()
+    }
+
+    private func applyCover(_ cover: PreparedCover) {
         coverRevision &+= 1
         invalidateArtworkWork()
-        self.coverImage = image
-        self.coverPath = url.path
-        // Gewählte Datei hat Vorrang vor eingebettetem Artwork.
-        self.embeddedCoverData = data
-        self.isCoverSuppressed = false
-        return true
+        coverImage = NSImage(cgImage: cover.thumbnail,
+                             size: NSSize(width: cover.thumbnail.width, height: cover.thumbnail.height))
+        coverPath = cover.url.path
+        embeddedCoverData = cover.data
+        isCoverSuppressed = false
     }
 
     public func removeCover() {

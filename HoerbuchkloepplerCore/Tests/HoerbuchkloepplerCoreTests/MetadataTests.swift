@@ -12,7 +12,7 @@ struct MetadataTests {
             TagCandidate(type: "Tag", key: "Album", value: "A"),
             TagCandidate(type: "Tag", key: "Title", value: "B")
         ]
-        let resolution = ConversionSession.resolveMetadata(
+        let resolution = MediaInfoService.resolveMetadata(
             currentTitle: "",
             currentAuthor: "",
             titleCandidates: ambiguous,
@@ -28,7 +28,7 @@ struct MetadataTests {
         // Kandidaten-Reihenfolge aus `metadataCandidates`: Album vor Title,
         // Performer vor Album_Performer. Die CLI hat keine Auswahl-UI und muss
         // deshalb selbst entscheiden.
-        let resolution = ConversionSession.resolveMetadata(
+        let resolution = MediaInfoService.resolveMetadata(
             currentTitle: "",
             currentAuthor: "",
             titleCandidates: [
@@ -48,7 +48,7 @@ struct MetadataTests {
 
     @Test("Headless ohne brauchbare Kandidaten bleibt leer und verlangt keine Auswahl")
     func headlessWithoutCandidatesStaysEmpty() {
-        let resolution = ConversionSession.resolveMetadata(
+        let resolution = MediaInfoService.resolveMetadata(
             currentTitle: "",
             currentAuthor: "",
             titleCandidates: [],
@@ -62,7 +62,7 @@ struct MetadataTests {
 
     @Test("Metadatenwerte werden vor der Entscheidung bereinigt")
     func metadataValuesAreNormalized() {
-        let resolution = ConversionSession.resolveMetadata(
+        let resolution = MediaInfoService.resolveMetadata(
             currentTitle: "",
             currentAuthor: "",
             titleCandidates: [
@@ -80,7 +80,7 @@ struct MetadataTests {
 
     @Test("Je ein eindeutiger Tag wird automatisch übernommen")
     func uniqueMetadataIsFilled() {
-        let resolution = ConversionSession.resolveMetadata(
+        let resolution = MediaInfoService.resolveMetadata(
             currentTitle: "",
             currentAuthor: "",
             titleCandidates: [TagCandidate(type: "Tag", key: "Album", value: "Buch")],
@@ -97,7 +97,7 @@ struct MetadataTests {
         {"media":{"track":[{"@type":"General","Album":"Buch","Performer":"Autor"}]}}
         """
         let data = try #require(json.data(using: .utf16))
-        let general = try #require(ConversionSession.decodeMediaInfoGeneralTrack(from: data))
+        let general = try #require(MediaInfoService.decodeGeneralTrack(from: data))
 
         #expect(general["Album"] as? String == "Buch")
         #expect(general["Performer"] as? String == "Autor")
@@ -108,7 +108,7 @@ struct MetadataTests {
         let text = "Titel: Hörbuch"
         let data = try #require(text.data(using: .utf16))
 
-        #expect(ConversionSession.decodeMediaInfoText(from: data) == text)
+        #expect(MediaInfoService.decodeText(from: data) == text)
     }
 
     @Test("Eine neue Dateiinfo beendet den alten MediaInfo-Prozess")
