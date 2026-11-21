@@ -56,7 +56,7 @@ public struct InspectionReport: Codable, Sendable {
         chapters = files.map { InspectedChapter(source: $0.sourceURL.path, readSource: $0.url.path, start: $0.startTime, duration: $0.duration, title: $0.chapterTitle) }
         sourceIssues = await session.projectSourceIssues
         self.outputs = outputs.map(\.path)
-        hasCover = await session.coverImage != nil
+        hasCover = await MainActor.run { session.coverImage != nil }
     }
 }
 public struct InspectedChapter: Codable, Sendable {
