@@ -1,6 +1,5 @@
 import Foundation
 import AVFoundation
-import ImageIO
 import Darwin
 
 enum ChapterExtractionResult: Sendable {
@@ -362,11 +361,7 @@ extension AudioFile {
     ) -> (data: Data, exceededLimit: Bool, timedOut: Bool, readFailed: Bool) {
         let limit = max(0, maximumByteCount)
         let boundedTimeout = timeout.isFinite ? min(max(0, timeout), 3_600) : chapterExtractionTimeout
-        let timeoutNanoseconds = UInt64(boundedTimeout * 1_000_000_000)
-        let start = DispatchTime.now().uptimeNanoseconds
-        let deadline = start > UInt64.max - timeoutNanoseconds
-            ? UInt64.max
-            : start + timeoutNanoseconds
+        let deadline = ProcessDeadline(seconds: boundedTimeout)
         var data = Data()
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         while true {
@@ -374,45 +369,29 @@ extension AudioFile {
                 onAbort()
                 return (data, false, false, true)
             }
-            let now = DispatchTime.now().uptimeNanoseconds
-            guard now < deadline else {
+            let wait = deadline.nextPollMilliseconds
+            guard wait > 0 else {
                 onAbort()
                 return (data, false, true, false)
             }
-            let remainingNanoseconds = deadline - now
-            let roundedMilliseconds = remainingNanoseconds / 1_000_000
-                + (remainingNanoseconds % 1_000_000 == 0 ? 0 : 1)
-            let remainingMilliseconds = max(
-                1,
-                min(50, Int(roundedMilliseconds))
-            )
-            var candidate = pollfd(
-                fd: handle.fileDescriptor,
-                events: Int16(POLLIN | POLLHUP | POLLERR),
-                revents: 0
-            )
-            let pollResult = Darwin.poll(&candidate, 1, Int32(remainingMilliseconds))
-            if pollResult == 0 { continue }
-            if pollResult < 0 {
-                if errno == EINTR { continue }
+            let count: Int
+            switch ProcessPipeRead.poll(
+                descriptor: handle.fileDescriptor,
+                timeoutMilliseconds: wait,
+                buffer: &buffer
+            ) {
+            case .retry: continue
+            case .endOfFile: return (data, false, false, false)
+            case .failed:
                 onAbort()
                 return (data, false, false, true)
+            case .bytes(let byteCount): count = byteCount
             }
-            let count = buffer.withUnsafeMutableBytes { storage in
-                Darwin.read(handle.fileDescriptor, storage.baseAddress, storage.count)
-            }
-            if count == 0 { return (data, false, false, false) }
-            if count < 0 {
-                if errno == EINTR || errno == EAGAIN { continue }
-                onAbort()
-                return (data, false, false, true)
-            }
-            let byteCount = Int(count)
-            guard byteCount <= limit - data.count else {
+            guard count <= limit - data.count else {
                 onAbort()
                 return (data, true, false, false)
             }
-            data.append(contentsOf: buffer.prefix(byteCount))
+            data.append(contentsOf: buffer.prefix(count))
         }
     }
 }

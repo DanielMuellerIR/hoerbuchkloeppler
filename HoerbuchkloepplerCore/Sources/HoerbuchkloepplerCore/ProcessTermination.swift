@@ -1,5 +1,56 @@
 import Foundation
 import Darwin
+import os
+
+struct ProcessDeadline {
+    private let expiresAt: UInt64
+
+    init(seconds: TimeInterval) {
+        let bounded = seconds.isFinite ? min(max(0, seconds), 86_400) : 0
+        let nanoseconds = UInt64(bounded * 1_000_000_000)
+        let now = DispatchTime.now().uptimeNanoseconds
+        let sum = now.addingReportingOverflow(nanoseconds)
+        expiresAt = sum.overflow ? UInt64.max : sum.partialValue
+    }
+
+    var hasExpired: Bool { DispatchTime.now().uptimeNanoseconds >= expiresAt }
+
+    /// Kurze Intervalle lassen die Leser auch zwischen zwei Werkzeugausgaben abbrechen.
+    var nextPollMilliseconds: Int32 {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < expiresAt else { return 0 }
+        let remaining = min(expiresAt - now, 50_000_000)
+        return Int32((remaining + 999_999) / 1_000_000)
+    }
+}
+
+enum ProcessPipeRead {
+    case retry
+    case endOfFile
+    case failed
+    case bytes(Int)
+
+    static func poll(
+        descriptor: Int32,
+        timeoutMilliseconds: Int32 = 50,
+        buffer: inout [UInt8]
+    ) -> Self {
+        var candidate = pollfd(
+            fd: descriptor,
+            events: Int16(POLLIN | POLLHUP | POLLERR),
+            revents: 0
+        )
+        let readiness = Darwin.poll(&candidate, 1, timeoutMilliseconds)
+        if readiness == 0 { return .retry }
+        if readiness < 0 { return errno == EINTR ? .retry : .failed }
+        let count = buffer.withUnsafeMutableBytes { storage in
+            Darwin.read(descriptor, storage.baseAddress, storage.count)
+        }
+        if count == 0 { return .endOfFile }
+        if count < 0 { return errno == EINTR || errno == EAGAIN ? .retry : .failed }
+        return .bytes(count)
+    }
+}
 
 // Prozess-Lebenszyklus: eigene Werkzeugprozesse starten, ihre Ausgabe lesen und
 // sie zweistufig beenden. Bewusst getrennt von der Kodierpipeline — hier steht
@@ -24,8 +75,7 @@ enum ProcessTerminator {
         attributes: .concurrent
     )
     static let defaultGraceInterval: TimeInterval = 0.5
-    private static let groupLock = NSLock()
-    private nonisolated(unsafe) static var ownedGroups: [ObjectIdentifier: pid_t] = [:]
+    private static let ownedGroups = OSAllocatedUnfairLock(initialState: [ObjectIdentifier: pid_t]())
 
     /// `Process` startet sein Kind auf macOS als Leiter einer neuen Prozessgruppe.
     /// Die Gruppen-ID wird direkt nach `run()` festgehalten, solange der direkte
@@ -41,46 +91,30 @@ enum ProcessTerminator {
         guard liveGroup == pid || (liveGroup == -1 && Darwin.kill(-pid, 0) == 0) else {
             return
         }
-        groupLock.lock()
-        ownedGroups[ObjectIdentifier(process)] = pid
-        groupLock.unlock()
+        let identifier = ObjectIdentifier(process)
+        ownedGroups.withLock { $0[identifier] = pid }
     }
 
     static func forgetOwnedProcessGroup(_ process: Process) {
-        groupLock.lock()
-        ownedGroups.removeValue(forKey: ObjectIdentifier(process))
-        groupLock.unlock()
+        let identifier = ObjectIdentifier(process)
+        _ = ownedGroups.withLock { $0.removeValue(forKey: identifier) }
     }
 
     private static func ownedGroup(for process: Process) -> pid_t? {
-        groupLock.lock()
-        defer { groupLock.unlock() }
-        return ownedGroups[ObjectIdentifier(process)]
+        let identifier = ObjectIdentifier(process)
+        return ownedGroups.withLock { $0[identifier] }
     }
 
     /// Wartet höchstens `seconds` darauf, dass `isPending()` falsch wird, und
     /// prüft dabei im 10-Millisekunden-Takt. Liefert `true`, wenn die Bedingung
     /// vor Ablauf der Frist erfüllt war.
-    ///
-    /// Vier Stellen im Projekt warteten so auf ein Prozessende, jede mit
-    /// eigener Deadline-Arithmetik. Die Frist selbst bleibt bewusst beim
-    /// Aufrufer — sie reicht von einer halben Sekunde Schonfrist bis zu einer
-    /// Stunde Kapitelanalyse. Gemeinsam sind nur die Fallstricke: eine
-    /// nichtendliche oder negative Sekundenangabe wird auf 0 geklemmt, und die
-    /// Deadline wird überlaufsicher gebildet, weil `uptimeNanoseconds` plus
-    /// eine sehr große Frist sonst überliefe und die Schleife sofort endete.
     @discardableResult
     static func wait(
         upTo seconds: TimeInterval,
         while isPending: () -> Bool
     ) -> Bool {
-        let bounded = seconds.isFinite ? max(0, seconds) : 0
-        let nanoseconds = UInt64(min(bounded, 86_400) * 1_000_000_000)
-        let start = DispatchTime.now().uptimeNanoseconds
-        let deadline = start > UInt64.max - nanoseconds
-            ? UInt64.max
-            : start + nanoseconds
-        while isPending(), DispatchTime.now().uptimeNanoseconds < deadline {
+        let deadline = ProcessDeadline(seconds: seconds)
+        while isPending(), !deadline.hasExpired {
             Thread.sleep(forTimeInterval: 0.01)
         }
         return !isPending()
@@ -228,8 +262,10 @@ final class ProcessPipeReader: @unchecked Sendable {
     private let maximumBytes: Int
     private let requiresCompleteOutput: Bool
     private var exceeded = false
+    private var readFailed = false
 
     var exceededOutputLimit: Bool { queue.sync { exceeded } }
+    var failedToReadOutput: Bool { queue.sync { readFailed } }
 
     /// Wahr, wenn der begrenzte Join abgelaufen ist, bevor die Pipe EOF
     /// meldete. Die gelesene Ausgabe ist dann still gekürzt — ohne dieses
@@ -247,13 +283,22 @@ final class ProcessPipeReader: @unchecked Sendable {
     }
 
     func start(onChunk: @escaping @Sendable (Data) -> Void = { _ in }) {
+        start(state: ()) { _, data in onChunk(data) }
+    }
+
+    func start<State: Sendable>(
+        state initialState: State,
+        onChunk: @escaping @Sendable (inout State, Data) -> Void
+    ) {
         stateLock.lock()
         precondition(!started, "ProcessPipeReader darf nur einmal gestartet werden")
         started = true
         completion.enter()
         stateLock.unlock()
         queue.async { [self] in
+            defer { completion.leave() }
             let descriptor = handle.fileDescriptor
+            var state = initialState
             var buffer = [UInt8](repeating: 0, count: 64 * 1024)
             while true {
                 stateLock.lock()
@@ -261,24 +306,14 @@ final class ProcessPipeReader: @unchecked Sendable {
                 stateLock.unlock()
                 if shouldStop { break }
 
-                var candidate = pollfd(
-                    fd: descriptor,
-                    events: Int16(POLLIN | POLLHUP | POLLERR),
-                    revents: 0
-                )
-                let pollResult = Darwin.poll(&candidate, 1, 50)
-                if pollResult == 0 { continue }
-                if pollResult < 0 {
-                    if errno == EINTR { continue }
-                    break
-                }
-                let count = buffer.withUnsafeMutableBytes { storage in
-                    Darwin.read(descriptor, storage.baseAddress, storage.count)
-                }
-                if count == 0 { break }
-                if count < 0 {
-                    if errno == EINTR || errno == EAGAIN { continue }
-                    break
+                let count: Int
+                switch ProcessPipeRead.poll(descriptor: descriptor, buffer: &buffer) {
+                case .retry: continue
+                case .endOfFile: return
+                case .failed:
+                    readFailed = true
+                    return
+                case .bytes(let bytes): count = bytes
                 }
                 let chunk = Data(buffer.prefix(count))
                 // Fortschritt erhält weiterhin jedes Byte; nur die gespeicherte Diagnose ist begrenzt.
@@ -293,9 +328,8 @@ final class ProcessPipeReader: @unchecked Sendable {
                         exceeded = true
                     }
                 }
-                onChunk(chunk)
+                onChunk(&state, chunk)
             }
-            completion.leave()
         }
     }
 
@@ -482,6 +516,7 @@ extension FFmpegWrapper {
             if timedOut || !exited || reader.joinTimedOut {
                 return .timedOut(output: output)
             }
+            if reader.failedToReadOutput { return .failed("Werkzeugausgabe konnte nicht vollständig gelesen werden.") }
             if reader.exceededOutputLimit { return .failed("Werkzeugausgabe überschreitet 32 MiB; vollständige Analyse nicht möglich.") }
             return .completed(status: process.terminationStatus, output: output)
         } catch {

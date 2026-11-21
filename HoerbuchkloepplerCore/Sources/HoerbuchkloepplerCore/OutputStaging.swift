@@ -14,12 +14,6 @@ private let tempOwnerFilename = ".owner-pid"
 private let cleanupEntryIdentityFilename = ".entry-identity.json"
 /// Extended Attribute, das die Besitzer-PID am Inode der Staging-Datei hält.
 private let stagingOwnerAttribute = "com.hoerbuchkloeppler.staging-owner"
-/// Prozessinterne Belegung der Ausgabeziele. Die dateibasierte `fcntl`-Sperre
-/// wirkt zwischen Prozessen; innerhalb eines Prozesses meldet dieses Register
-/// ein zweites Fenster auf dasselbe Ziel ab.
-private let outputLeaseRegistryLock = NSLock()
-private nonisolated(unsafe) var leasedOutputPaths = Set<String>()
-
 /// Identifiziert genau einen Verzeichniseintrag. Neben Inode und Volume werden
 /// Größe sowie Änderungs-/Statuszeit festgehalten, damit auch eine in-place
 /// geänderte Zieldatei nicht mehr als die vom Nutzer bestätigte Datei gilt.
@@ -249,27 +243,6 @@ enum ConversionOutputError: LocalizedError {
     }
 }
 
-/// Hält pro Ziel eine prozessübergreifende `fcntl`-Sperre. Die kleine versteckte
-/// Lock-Datei bleibt absichtlich liegen: Würde ein Prozess sie beim Freigeben
-/// löschen, könnte ein zweiter Prozess schon einen neuen Inode sperren, während
-/// ein dritter noch den alten hält.
-final class OutputLeaseSet: @unchecked Sendable {
-    private var descriptors: [Int32]
-    private let canonicalPaths: [String]
-
-    init(descriptors: [Int32], canonicalPaths: [String]) {
-        self.descriptors = descriptors
-        self.canonicalPaths = canonicalPaths
-    }
-
-    deinit {
-        for descriptor in descriptors {
-            FFmpegWrapper.releaseOutputLock(descriptor)
-        }
-        FFmpegWrapper.releaseInProcessOutputPaths(canonicalPaths)
-    }
-}
-
 extension FFmpegWrapper {
     static func fileSystemIdentity(
         at url: URL,
@@ -330,122 +303,6 @@ extension FFmpegWrapper {
         url.resolvingSymlinksInPath().standardizedFileURL.path
     }
 
-    /// Auf case-insensitiven Volumes müssen Schreibvarianten denselben
-    /// Registry- und Lock-Schlüssel erhalten. Die explizite Variante hält die
-    /// Normalisierung ohne besonderes Test-Volume prüfbar.
-    static func outputLeaseKey(
-        for output: URL,
-        caseSensitiveNames: Bool? = nil
-    ) -> String {
-        let path = canonicalPath(output).precomposedStringWithCanonicalMapping
-        let parent = output.deletingLastPathComponent()
-        let caseSensitive = caseSensitiveNames
-            ?? (try? parent.resourceValues(
-                forKeys: [.volumeSupportsCaseSensitiveNamesKey]
-            ))?.volumeSupportsCaseSensitiveNames
-            ?? false
-        guard !caseSensitive else { return path }
-        return path.folding(
-            options: [.caseInsensitive],
-            locale: Locale(identifier: "en_US_POSIX")
-        )
-    }
-
-    /// Stabiler Hash für kurze Lock-Dateinamen. Die Sperrdatei liegt im selben
-    /// Zielordner; dadurch gelten Zugriffsrechte und Volume-Semantik des Ziels.
-    static func outputLockURL(
-        for output: URL,
-        caseSensitiveNames: Bool? = nil
-    ) -> URL {
-        var hash: UInt64 = 14_695_981_039_346_656_037
-        for byte in outputLeaseKey(
-            for: output,
-            caseSensitiveNames: caseSensitiveNames
-        ).utf8 {
-            hash ^= UInt64(byte)
-            hash &*= 1_099_511_628_211
-        }
-        let name = String(format: ".hoerbuchkloeppler-%016llx.lock", hash)
-        return output.deletingLastPathComponent().appendingPathComponent(name)
-    }
-
-    static func acquireOutputLeases(for outputs: [URL]) throws -> OutputLeaseSet {
-        let uniqueOutputs = Dictionary(
-            outputs.map { (outputLeaseKey(for: $0), $0) },
-            uniquingKeysWith: { first, _ in first }
-        ).values.sorted { outputLeaseKey(for: $0) < outputLeaseKey(for: $1) }
-        let canonicalPaths = uniqueOutputs.map { outputLeaseKey(for: $0) }
-        outputLeaseRegistryLock.lock()
-        if let busyPath = canonicalPaths.first(where: { leasedOutputPaths.contains($0) }) {
-            outputLeaseRegistryLock.unlock()
-            let output = uniqueOutputs.first {
-                outputLeaseKey(for: $0) == busyPath
-            } ?? uniqueOutputs[0]
-            throw ConversionOutputError.destinationBusy(output)
-        }
-        leasedOutputPaths.formUnion(canonicalPaths)
-        outputLeaseRegistryLock.unlock()
-
-        var descriptors: [Int32] = []
-
-        func releaseAcquiredDescriptors() {
-            for descriptor in descriptors {
-                releaseOutputLock(descriptor)
-            }
-            descriptors.removeAll()
-            releaseInProcessOutputPaths(canonicalPaths)
-        }
-
-        for output in uniqueOutputs {
-            let lockURL = outputLockURL(for: output)
-            let descriptor = lockURL.withUnsafeFileSystemRepresentation { path -> Int32 in
-                guard let path else {
-                    errno = EINVAL
-                    return -1
-                }
-                return Darwin.open(
-                    path,
-                    O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW,
-                    mode_t(0o600)
-                )
-            }
-            guard descriptor >= 0 else {
-                let errorNumber = errno
-                releaseAcquiredDescriptors()
-                throw ConversionOutputError.lockFailed(output, errorNumber)
-            }
-            var fileLock = flock()
-            fileLock.l_type = Int16(F_WRLCK)
-            fileLock.l_whence = Int16(SEEK_SET)
-            guard Darwin.fcntl(descriptor, F_SETLK, &fileLock) == 0 else {
-                let errorNumber = errno
-                _ = Darwin.close(descriptor)
-                releaseAcquiredDescriptors()
-                if errorNumber == EWOULDBLOCK || errorNumber == EAGAIN {
-                    throw ConversionOutputError.destinationBusy(output)
-                }
-                throw ConversionOutputError.lockFailed(output, errorNumber)
-            }
-            descriptors.append(descriptor)
-        }
-        return OutputLeaseSet(
-            descriptors: descriptors,
-            canonicalPaths: canonicalPaths
-        )
-    }
-
-    /// Gibt eine `fcntl`-Sperre frei und schließt ihren Deskriptor. Der
-    /// Rückzug nach einem misslungenen Sperrsatz und das reguläre Ende über
-    /// `OutputLeaseSet.deinit` müssen exakt dasselbe tun; sonst bliebe auf einem
-    /// der beiden Wege eine Sperre oder ein Deskriptor stehen.
-    static func releaseOutputLock(_ descriptor: Int32) {
-        var fileLock = flock()
-        fileLock.l_type = Int16(F_UNLCK)
-        fileLock.l_whence = Int16(SEEK_SET)
-        _ = Darwin.fcntl(descriptor, F_SETLK, &fileLock)
-        _ = Darwin.close(descriptor)
-    }
-
     /// Öffnet genau den benannten Ordner als Deskriptor. `O_DIRECTORY` weist
     /// eine untergeschobene Datei ab, `O_NOFOLLOW` einen untergeschobenen
     /// Symlink — an dieser Flagkombination hängt die gesamte gebundene
@@ -469,12 +326,6 @@ extension FFmpegWrapper {
         url.withUnsafeFileSystemRepresentation { path in
             path.map(Darwin.rmdir) ?? -1
         }
-    }
-
-    static func releaseInProcessOutputPaths(_ paths: [String]) {
-        outputLeaseRegistryLock.lock()
-        leasedOutputPaths.subtract(paths)
-        outputLeaseRegistryLock.unlock()
     }
 
     /// Versteckte Staging-Datei neben dem Ziel. Der Dateiname trägt die

@@ -1,8 +1,6 @@
 import Foundation
-import AVFoundation
-import CoreMedia
-import ImageIO
 import Darwin
+import os
 
 // Kodierpipeline und Laufsteuerung: Ausgabeplan, laufbezogener Besitz von
 // Prozessen und Zwischendateien, Segment- und Muxing-Schritte. Die
@@ -497,10 +495,10 @@ private struct ConversionJob: Sendable {
 /// Behält genug Byte-Kontext, um einen ffmpeg-Zeitwert auch dann zu erkennen,
 /// wenn die Pipe ihn zwischen zwei Chunks trennt. Bei mehreren Statuszeilen
 /// gewinnt der neueste statt des ersten Werts.
-final class FFmpegProgressParser: @unchecked Sendable {
+struct FFmpegProgressParser: Sendable {
     private var tail = Data()
 
-    func consume(_ chunk: Data) -> TimeInterval? {
+    mutating func consume(_ chunk: Data) -> TimeInterval? {
         var combined = tail
         combined.append(chunk)
         let text = String(decoding: combined, as: UTF8.self)
@@ -511,46 +509,44 @@ final class FFmpegProgressParser: @unchecked Sendable {
     }
 }
 
-final class ParallelProgressTracker: @unchecked Sendable {
-    private let lock = NSLock()
-    private var progresses: [Int: Double] = [:]
+final class ParallelProgressTracker: Sendable {
+    private let progressByIndex = OSAllocatedUnfairLock(initialState: [Int: Double]())
     private let durations: [Double]
-    init(durations: [Double]) { self.durations = durations }
+    private let totalDuration: Double
 
-    /// Gesamtfortschritt nach Dauer gewichtet; die Anzahl der Segmente
-    /// spielt seit der Umstellung auf Dauergewichtung keine Rolle mehr.
+    init(durations: [Double]) {
+        self.durations = durations
+        totalDuration = durations.reduce(0, +)
+    }
+
+    /// Der Fortschritt eines langen Kapitels trägt mehr zum Buchfortschritt bei.
     func update(index: Int, progress: Double) -> Double {
-        lock.lock()
-        progresses[index] = max(progresses[index] ?? 0, min(1, max(0, progress)))
-        let duration = durations.reduce(0, +)
-        let total = duration > 0 ? progresses.reduce(0.0) { sum, item in
-            sum + item.value * durations[item.key] / duration
-        } : 0
-        lock.unlock()
-        return total
+        guard totalDuration > 0 else { return 0 }
+        return progressByIndex.withLock { progresses in
+            progresses[index] = max(progresses[index] ?? 0, min(1, max(0, progress)))
+            return progresses.reduce(0.0) { sum, item in
+                sum + item.value * durations[item.key] / totalDuration
+            }
+        }
     }
 }
 
-private final class ParallelResults: @unchecked Sendable {
-    private let lock = NSLock()
-    private var paths: [String]
+private final class ParallelResults: Sendable {
+    private let paths: OSAllocatedUnfairLock<[String]>
 
     init(count: Int) {
-        paths = Array(repeating: "", count: count)
+        paths = OSAllocatedUnfairLock(initialState: Array(repeating: "", count: count))
     }
 
     func store(_ path: String, at index: Int) -> Int {
-        lock.lock()
-        paths[index] = path
-        let finishedCount = paths.lazy.filter { !$0.isEmpty }.count
-        lock.unlock()
-        return finishedCount
+        paths.withLock {
+            $0[index] = path
+            return $0.lazy.filter { !$0.isEmpty }.count
+        }
     }
 
     func completedPaths() -> [String]? {
-        lock.lock()
-        defer { lock.unlock() }
-        return paths.allSatisfy { !$0.isEmpty } ? paths : nil
+        paths.withLock { $0.allSatisfy { !$0.isEmpty } ? $0 : nil }
     }
 }
 
@@ -680,7 +676,7 @@ public struct FFmpegWrapper {
         let outputLeases: OutputLeaseSet
         do {
             try validateConversionPlan(plan)
-            outputLeases = try acquireOutputLeases(for: plan.outputURLs)
+            outputLeases = try OutputLeases.acquire(for: plan.outputURLs)
         } catch {
             return reject(
                 session: session,
@@ -1045,7 +1041,7 @@ public struct FFmpegWrapper {
         }
         let maxConcurrent = max(1, min(workerLimit, group.count))
         let semaphore = DispatchSemaphore(value: maxConcurrent)
-        let groupQueue = DispatchQueue(label: "com.hoerbuchkloppler.parallel", attributes: .concurrent)
+        let groupQueue = DispatchQueue(label: "com.hoerbuchkloeppler.parallel", attributes: .concurrent)
         let completionGroup = DispatchGroup()
         
         let results = ParallelResults(count: group.count)
@@ -1112,33 +1108,22 @@ public struct FFmpegWrapper {
                 let outputReader = ProcessPipeReader(
                     handle: errorPipe.fileHandleForReading
                 )
-                let progressParser = FFmpegProgressParser()
-
-                let consumeProgress: @Sendable (Data) -> Void = { data in
-                    if let currentSeconds = progressParser.consume(data),
-                       file.duration > 0 {
-                                let p = min(1, max(0, currentSeconds / file.duration))
-                                let totalP = tracker.update(
-                                    index: idx,
-                                    progress: p
-                                )
-                                session.enqueueProgress(
-                                    mappedProgress(
-                                        base: progressBase,
-                                        weight: progressWeight,
-                                        phaseProgress: totalP
-                                    ),
-                                    segmentIndex: showIndividualPacmans ? idx : 0,
-                                    segmentProgress: showIndividualPacmans ? p : totalP,
-                                    runID: context.id
-                                )
-                    }
+                let consumeProgress: @Sendable (inout FFmpegProgressParser, Data) -> Void = { parser, data in
+                    guard let currentSeconds = parser.consume(data), file.duration > 0 else { return }
+                    let progress = min(1, max(0, currentSeconds / file.duration))
+                    let totalProgress = tracker.update(index: idx, progress: progress)
+                    session.enqueueProgress(
+                        mappedProgress(base: progressBase, weight: progressWeight, phaseProgress: totalProgress),
+                        segmentIndex: showIndividualPacmans ? idx : 0,
+                        segmentProgress: showIndividualPacmans ? progress : totalProgress,
+                        runID: context.id
+                    )
                 }
 
                 do {
                     guard try context.run(process) else { return }
                     try? errorPipe.fileHandleForWriting.close()
-                    outputReader.start(onChunk: consumeProgress)
+                    outputReader.start(state: FFmpegProgressParser(), onChunk: consumeProgress)
                     process.waitUntilExit()
                     let hadBackgroundProcesses = ProcessTerminator
                         .terminateRemainingOwnedGroup(process)
@@ -1159,7 +1144,7 @@ public struct FFmpegWrapper {
                         )
                         return
                     }
-                    if outputReader.joinTimedOut {
+                    if outputReader.joinTimedOut || outputReader.failedToReadOutput {
                         session.enqueueLog(
                             "❌ Segment \(idx+1) lieferte keine vollständige Werkzeugausgabe; der Batch wird verworfen.",
                             type: .highlight,
@@ -1219,8 +1204,9 @@ public struct FFmpegWrapper {
                             )
                         }
                     } else {
-                        let errorString = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let errorMessage = (errorString?.isEmpty == false) ? errorString! : "Unbekannter FFmpeg Fehler"
+                        let diagnostic = String(data: stderrData, encoding: .utf8)?
+                            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                        let errorMessage = diagnostic.isEmpty ? "Unbekannter FFmpeg Fehler" : diagnostic
                         session.enqueueLog(
                             "❌ Segment \(idx+1) fehlgeschlagen (Exit-Code \(process.terminationStatus)):\n\(errorMessage)",
                             type: .highlight,
@@ -1278,7 +1264,7 @@ public struct FFmpegWrapper {
         listFile: URL,
         metaFile: URL,
         coverInput: String?,
-        audioCodecArguments: [String],
+        audioMode: MuxAudioMode,
         job: ConversionJob,
         outputPath: String
     ) -> [String] {
@@ -1291,9 +1277,9 @@ public struct FFmpegWrapper {
         // je Segment neu auf und die Kapitelmarken aus der FFMETADATA-Datei
         // verschieben sich gegen den Ton. Abnahme der Kapitelstarts beider Modi:
         // tests/verify_audio_transitions.py.
-        if audioCodecArguments.contains("copy") { arguments += ["-copyts"] }
+        arguments += audioMode.timestampArguments
         if let coverInput { arguments += ["-i", coverInput] }
-        arguments += audioCodecArguments
+        arguments += audioMode.codecArguments
         arguments += [
             "-map", "0:a", "-map_metadata", "1",
             "-metadata", "title=\(job.title)",
@@ -1333,7 +1319,7 @@ public struct FFmpegWrapper {
         progressBase: Double,
         progressScale: Double,
         segmentProgressFraction: Double,
-        audioCodecArguments: [String],
+        audioMode: MuxAudioMode,
         logMessage: String,
         pacmanTitle: String,
         phase: ConversionPhase = .encoding
@@ -1358,7 +1344,7 @@ public struct FFmpegWrapper {
             listFile: listFile,
             metaFile: metaFile,
             coverInput: coverInput,
-            audioCodecArguments: audioCodecArguments,
+            audioMode: audioMode,
             job: job,
             outputPath: "/dev/fd/0"
         )
@@ -1411,12 +1397,7 @@ public struct FFmpegWrapper {
             progressBase: progressBase,
             progressScale: progressScale,
             segmentProgressFraction: 0.2,
-            audioCodecArguments: [
-                "-c:a", "aac_at", "-aac_at_mode", "cvbr",
-                "-b:a", job.settings.bitrate,
-                "-ar", "\(job.settings.sampleRate)",
-                "-ac", job.settings.isMono ? "1" : "2"
-            ] + loudnessFilterArguments(gainDB: job.loudnessGain),
+            audioMode: .encodeAAC(settings: job.settings, gainDB: job.loudnessGain),
             logMessage: "🛠️ Starte komplette Apple CVBR Kodierung...",
             pacmanTitle: "Apple AAC Encoding"
         )
@@ -1456,7 +1437,7 @@ public struct FFmpegWrapper {
             progressBase: progressBase,
             progressScale: progressScale,
             segmentProgressFraction: 0.9,
-            audioCodecArguments: ["-c:a", "copy"],
+            audioMode: .streamCopy,
             logMessage: "🛠️ Finaler Stream-Copy & MP4-Muxing gestartet...",
             pacmanTitle: "Finaler Zusammenbau",
             phase: .muxing
@@ -1541,23 +1522,16 @@ public struct FFmpegWrapper {
             beforeProcessStart?()
             guard try context.run(process) else { return false }
             let outputReader = ProcessPipeReader(handle: pipe.fileHandleForReading)
-            let progressParser = FFmpegProgressParser()
             try? pipe.fileHandleForWriting.close()
-            outputReader.start { data in
-                if let currentSeconds = progressParser.consume(data),
-                   phaseDuration > 0 {
-                            let p = min(1, max(0, currentSeconds / phaseDuration))
-                            session.enqueueProgress(
-                                mappedProgress(
-                                    base: progressBase,
-                                    weight: progressWeight,
-                                    phaseProgress: p
-                                ),
-                                segmentIndex: 0,
-                                segmentProgress: p,
-                                runID: context.id
-                            )
-                }
+            outputReader.start(state: FFmpegProgressParser()) { parser, data in
+                guard let currentSeconds = parser.consume(data), phaseDuration > 0 else { return }
+                let progress = min(1, max(0, currentSeconds / phaseDuration))
+                session.enqueueProgress(
+                    mappedProgress(base: progressBase, weight: progressWeight, phaseProgress: progress),
+                    segmentIndex: 0,
+                    segmentProgress: progress,
+                    runID: context.id
+                )
             }
             
             process.waitUntilExit()
@@ -1573,7 +1547,7 @@ public struct FFmpegWrapper {
                 )
                 return false
             }
-            if outputReader.joinTimedOut {
+            if outputReader.joinTimedOut || outputReader.failedToReadOutput {
                 session.enqueueLog(
                     "❌ KRITISCHER FEHLER: Werkzeugausgabe blieb unvollständig. Die Ausgabe wird nicht übernommen.",
                     type: .highlight,
@@ -1723,7 +1697,7 @@ extension FFmpegWrapper {
         guard let paths = runParallelTasks(group: files, tempDir: folder, session: session, context: context, progressBase: 0, progressWeight: 0, extensionStr: "wav", showIndividualPacmans: false, workerLimit: job.settings.effectiveWorkerLimit, inputSnapshots: job.plan.inputSnapshots, argsProvider: { _, file, url in
             getArgsForStandardSlicing(file: file, url: url, settings: job.settings)
         }), let executable = getBinaryURL(name: "ffmpeg") else {
-            throw NSError(domain: "Loudness", code: 2, userInfo: [NSLocalizedDescriptionKey: "Buchdekodierung fehlgeschlagen oder abgebrochen."])
+            throw LoudnessError.bookDecodingFailed
         }
         session.enqueueSegmentReset(title: "Buchlautheit messen", phase: .measuringLoudness, runID: context.id)
         let list = folder.appendingPathComponent("analysis.txt")
@@ -1744,15 +1718,11 @@ extension FFmpegWrapper {
         let background = ProcessTerminator.terminateRemainingOwnedGroup(process)
         let data = reader.waitUntilEOF(timeout: 0.25)
         if context.isCancelled { throw CancellationError() }
-        guard !reader.joinTimedOut else {
-            throw NSError(
-                domain: "Loudness",
-                code: 4,
-                userInfo: [NSLocalizedDescriptionKey: "ffmpeg-Lautheitsanalyse lieferte keine vollständige Werkzeugausgabe."]
-            )
+        guard !reader.joinTimedOut, !reader.failedToReadOutput else {
+            throw LoudnessError.incompleteToolOutput
         }
         guard process.terminationStatus == 0, !background else {
-            throw NSError(domain: "Loudness", code: 3, userInfo: [NSLocalizedDescriptionKey: "ffmpeg-Lautheitsanalyse fehlgeschlagen: \(String(decoding: data, as: UTF8.self))"])
+            throw LoudnessError.analysisFailed(diagnostic: String(decoding: data, as: UTF8.self))
         }
         try validateInputSnapshots(for: files, expected: job.plan.inputSnapshots)
         return try LoudnessMeasurement.parse(data)

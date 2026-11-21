@@ -5,6 +5,17 @@ import Darwin
 
 @Suite("FFmpegWrapper – serieller Pipe-Leser")
 struct ProcessPipeReaderTests {
+    @Test("Fehlerhaftes Pipe-Ende gilt nicht als EOF")
+    func distinguishesReadFailureFromEOF() throws {
+        let pipe = Pipe()
+        try pipe.fileHandleForReading.close()
+        let reader = ProcessPipeReader(handle: pipe.fileHandleForWriting)
+        reader.start()
+        #expect(reader.waitUntilEOF(timeout: 1).isEmpty)
+        #expect(!reader.joinTimedOut)
+        #expect(reader.failedToReadOutput)
+    }
+
     @Test("Ein nie gestarteter Reader wird ohne offene Group freigegeben")
     func unstartedReaderIsReleased() {
         weak var releasedReader: ProcessPipeReader?
@@ -45,12 +56,12 @@ struct ProcessPipeReaderTests {
     func parsesSplitAndLatestProgress() {
         let bytes = Data("frame=1 time=00:00:01.23 speed=1x".utf8)
         for split in 1..<bytes.count {
-            let parser = FFmpegProgressParser()
+            var parser = FFmpegProgressParser()
             _ = parser.consume(Data(bytes[..<split]))
             #expect(parser.consume(Data(bytes[split...])) == 1.23)
         }
 
-        let parser = FFmpegProgressParser()
+        var parser = FFmpegProgressParser()
         let newest = parser.consume(
             Data("time=00:00:01.00\rtime=00:00:02.50\r".utf8)
         )

@@ -1,5 +1,25 @@
 import Foundation
 
+enum LoudnessError: LocalizedError, Equatable {
+    case noFiniteMeasurement
+    case bookDecodingFailed
+    case analysisFailed(diagnostic: String)
+    case incompleteToolOutput
+
+    var errorDescription: String? {
+        switch self {
+        case .noFiniteMeasurement:
+            "Keine endliche Buchlautheit messbar (z. B. Stille oder zu kurzer Inhalt)."
+        case .bookDecodingFailed:
+            "Buchdekodierung fehlgeschlagen oder abgebrochen."
+        case .analysisFailed(let diagnostic):
+            "ffmpeg-Lautheitsanalyse fehlgeschlagen: \(diagnostic)"
+        case .incompleteToolOutput:
+            "ffmpeg-Lautheitsanalyse lieferte keine vollständige Werkzeugausgabe."
+        }
+    }
+}
+
 /// Ein konstanter Buchpegel erhält die Dynamik zwischen Kapiteln und Split-Dateien.
 /// LUFS bezeichnet die wahrgenommene Lautheit; dBTP den geschätzten True Peak.
 struct LoudnessMeasurement: Sendable {
@@ -17,7 +37,7 @@ struct LoudnessMeasurement: Sendable {
               let integrated = object["input_i"].flatMap(Double.init),
               let peak = object["input_tp"].flatMap(Double.init),
               integrated.isFinite, peak.isFinite else {
-            throw NSError(domain: "Loudness", code: 1, userInfo: [NSLocalizedDescriptionKey: "Keine endliche Buchlautheit messbar (z. B. Stille oder zu kurzer Inhalt)."])
+            throw LoudnessError.noFiniteMeasurement
         }
         return Self(integratedLUFS: integrated, truePeakDB: peak)
     }

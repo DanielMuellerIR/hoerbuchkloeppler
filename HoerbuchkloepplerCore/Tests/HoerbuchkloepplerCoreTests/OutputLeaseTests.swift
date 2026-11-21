@@ -10,14 +10,14 @@ struct OutputLeaseTests {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let output = directory.appendingPathComponent("Buch.m4b")
-        var first: OutputLeaseSet? = try FFmpegWrapper.acquireOutputLeases(for: [output])
+        var first: OutputLeaseSet? = try OutputLeases.acquire(for: [output])
         _ = withExtendedLifetime(first) {
             #expect(throws: ConversionOutputError.self) {
-                _ = try FFmpegWrapper.acquireOutputLeases(for: [output])
+                _ = try OutputLeases.acquire(for: [output])
             }
         }
         first = nil
-        _ = try FFmpegWrapper.acquireOutputLeases(for: [output])
+        _ = try OutputLeases.acquire(for: [output])
     }
 
     @Test("Case-insensitive Zielschreibweisen teilen Lease und Lock-Datei")
@@ -25,28 +25,28 @@ struct OutputLeaseTests {
         let upper = URL(fileURLWithPath: "/tmp/Buch.m4b")
         let lower = URL(fileURLWithPath: "/tmp/buch.m4b")
         #expect(
-            FFmpegWrapper.outputLeaseKey(
+            OutputLeases.outputLeaseKey(
                 for: upper,
                 caseSensitiveNames: false
-            ) == FFmpegWrapper.outputLeaseKey(
+            ) == OutputLeases.outputLeaseKey(
                 for: lower,
                 caseSensitiveNames: false
             )
         )
         #expect(
-            FFmpegWrapper.outputLockURL(
+            OutputLeases.outputLockURL(
                 for: upper,
                 caseSensitiveNames: false
-            ).lastPathComponent == FFmpegWrapper.outputLockURL(
+            ).lastPathComponent == OutputLeases.outputLockURL(
                 for: lower,
                 caseSensitiveNames: false
             ).lastPathComponent
         )
         #expect(
-            FFmpegWrapper.outputLeaseKey(
+            OutputLeases.outputLeaseKey(
                 for: upper,
                 caseSensitiveNames: true
-            ) != FFmpegWrapper.outputLeaseKey(
+            ) != OutputLeases.outputLeaseKey(
                 for: lower,
                 caseSensitiveNames: true
             )
@@ -58,8 +58,8 @@ struct OutputLeaseTests {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let output = directory.appendingPathComponent("Buch.m4b")
-        var lease: OutputLeaseSet? = try FFmpegWrapper.acquireOutputLeases(for: [output])
-        let lockPath = FFmpegWrapper.outputLockURL(for: output).path
+        var lease: OutputLeaseSet? = try OutputLeases.acquire(for: [output])
+        let lockPath = OutputLeases.outputLockURL(for: output).path
         let script = """
         import fcntl, sys
         handle = open(sys.argv[1], 'a')

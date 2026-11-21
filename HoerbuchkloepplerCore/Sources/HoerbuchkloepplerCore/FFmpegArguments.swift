@@ -1,5 +1,26 @@
 import Foundation
 
+enum MuxAudioMode {
+    case streamCopy
+    case encodeAAC(settings: AudioSettings, gainDB: Double)
+
+    var timestampArguments: [String] {
+        switch self {
+        case .streamCopy: ["-copyts"]
+        case .encodeAAC: []
+        }
+    }
+
+    var codecArguments: [String] {
+        switch self {
+        case .streamCopy:
+            ["-c:a", "copy"]
+        case let .encodeAAC(settings, gainDB):
+            FFmpegWrapper.aacEncodingArguments(settings: settings, gainDB: gainDB)
+        }
+    }
+}
+
 extension FFmpegWrapper {
     static func ffmpegTimeArgument(_ seconds: TimeInterval) -> String {
         String(
@@ -30,7 +51,19 @@ extension FFmpegWrapper {
         settings: AudioSettings,
         gainDB: Double = 0
     ) -> [String] {
-        return ["-nostdin", "-y", "-ss", ffmpegTimeArgument(file.startTime), "-t", ffmpegTimeArgument(file.duration), "-i", file.url.path, "-vn", "-c:a", "aac_at", "-aac_at_mode", "cvbr", "-b:a", settings.bitrate, "-ar", "\(settings.sampleRate)", "-ac", settings.isMono ? "1" : "2"] + loudnessFilterArguments(gainDB: gainDB) + [url.path]
+        [
+            "-nostdin", "-y", "-ss", ffmpegTimeArgument(file.startTime),
+            "-t", ffmpegTimeArgument(file.duration), "-i", file.url.path, "-vn"
+        ] + aacEncodingArguments(settings: settings, gainDB: gainDB) + [url.path]
+    }
+
+    static func aacEncodingArguments(settings: AudioSettings, gainDB: Double) -> [String] {
+        [
+            "-c:a", "aac_at", "-aac_at_mode", "cvbr",
+            "-b:a", settings.bitrate,
+            "-ar", "\(settings.sampleRate)",
+            "-ac", settings.isMono ? "1" : "2"
+        ] + loudnessFilterArguments(gainDB: gainDB)
     }
 
     static func loudnessFilterArguments(gainDB: Double) -> [String] {

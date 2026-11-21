@@ -34,7 +34,7 @@ struct LoudnessTests {
         #expect(result.gainDB == 2)
         #expect(LoudnessMeasurement(integratedLUFS: -14, truePeakDB: -2).gainDB == -4)
         #expect(LoudnessMeasurement(integratedLUFS: -18, truePeakDB: -2).gainDB == 0)
-        #expect(throws: (any Error).self) {
+        #expect(throws: LoudnessError.noFiniteMeasurement) {
             try LoudnessMeasurement.parse(Data("{\"input_i\":\"-inf\",\"input_tp\":\"-inf\"}".utf8))
         }
     }
