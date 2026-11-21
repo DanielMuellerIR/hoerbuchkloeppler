@@ -90,7 +90,8 @@ Symbolnamen als Anker (bewusst **ohne** Zeilennummern — die driften bei jeder
 | `CoverArtwork.swift` | ImageIO-Validierung und Thumbnail-Vorschau ohne vorherigen NSImage-Voll-Decode | `thumbnail` · `preview` |
 | `AudioSettings.swift` | Einstellungs-Struct (`Codable`) | Felder → [settings.md](settings.md) |
 | `SettingsManager.swift` | Laden/Speichern `~/.Hoerbuchkloeppler/settings.json` | `shared` · `loadSettings` · `saveSettings` |
-| `AudioFile+Extensions.swift` | Begrenzte ffmpeg-Artwork-Extraktion; Kapitel-Extraktion via **gebündeltem ffmpeg** (`-f ffmetadata`) auf eigener Utility-Queue mit Task-/Importabbruch | `extractEmbeddedArtwork` · `extractChapters` · `parseFFMetadataChapters` |
+| `AudioFile+Extensions.swift` | Begrenzte ffmpeg-Artwork-Extraktion; Kapitel-Extraktion via **gebündeltem ffmpeg** (`-f ffmetadata`) auf eigener Utility-Queue mit Task-/Importabbruch | `extractEmbeddedArtwork` · `extractChapters` |
+| `FFMetadata.swift` | Kapitelblöcke lesen und schreiben, Titel maskieren und Kapitelgrenzen an die Dateidauer anpassen | `decodeChapters` · `encodeChapters` · `normalizedChapters` |
 | `KloepplerCLI.swift` | AsyncParsableCommand-CLI: erwarteter Import, TTY-abhängige ANSI-Animation, Klartextstatus in Pipes, SIGINT-Phasen, ASCII-Cover — Optionen siehe [build-and-test.md](build-and-test.md) | `KloepplerCLI` (`@main`) · `execute(_:)` · `validate()` · `resolveOutputFile` · `sanitizeFilename` · `buildPacmanBar` · `generateAsciiArt` |
 | `TerminalRenderer.swift` | Physische Statuszeilen, Unicode-Anzeigebreite und sichere Neuzeichnung bei Terminal-Größenwechseln | `TerminalRenderer` · `TerminalGeometry` |
 

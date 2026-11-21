@@ -533,32 +533,33 @@ struct EscapeFFMetadataTests {
     @Test("Gleichheitszeichen wird escaped")
     func escapesEqualsSign() {
         // "=" trennt im FFMETADATA1-Format Schlüssel von Wert.
-        #expect(FFmpegWrapper.escapeFFMetadata("a=b") == "a\\=b")
+        #expect(FFMetadata.escape("a=b") == "a\\=b")
     }
 
     @Test("Semikolon wird escaped")
     func escapesSemicolon() {
         // ";" leitet einen Kommentar ein — unescaped würde der Rest verschluckt.
-        #expect(FFmpegWrapper.escapeFFMetadata("a;b") == "a\\;b")
+        #expect(FFMetadata.escape("a;b") == "a\\;b")
     }
 
     @Test("Raute wird escaped")
     func escapesHash() {
         // "#" leitet ebenfalls einen Kommentar ein.
-        #expect(FFmpegWrapper.escapeFFMetadata("a#b") == "a\\#b")
+        #expect(FFMetadata.escape("a#b") == "a\\#b")
     }
 
     @Test("Backslash in der Mitte wird verdoppelt")
     func escapesBackslash() {
-        #expect(FFmpegWrapper.escapeFFMetadata("a\\b") == "a\\\\b")
+        #expect(FFMetadata.escape("a\\b") == "a\\\\b")
     }
 
     @Test("Zeilenumbruch wird zu Leerzeichen, nicht escaped")
     func newlineBecomesSpace() {
         // Ein Kapiteltitel ist einzeilig. Ein echter Umbruch — auch ein escapeter —
         // würde die chapters.txt zerreißen, deshalb wird er ersetzt statt maskiert.
-        #expect(FFmpegWrapper.escapeFFMetadata("a\nb") == "a b")
-        #expect(FFmpegWrapper.escapeFFMetadata("a\rb") == "a b")
+        #expect(FFMetadata.escape("a\nb") == "a b")
+        #expect(FFMetadata.escape("a\rb") == "a b")
+        #expect(FFMetadata.escape("a\r\nb") == "a b")
     }
 
     @Test("Backslash am Ende wird entfernt")
@@ -566,19 +567,19 @@ struct EscapeFFMetadataTests {
         // ffmpeg liest JEDEN Backslash am Zeilenende als Zeilenfortsetzung — auch
         // den maskierten. Bliebe er stehen, würde die folgende [CHAPTER]-Zeile
         // verschluckt und ein Kapitel ginge verloren.
-        #expect(FFmpegWrapper.escapeFFMetadata("Titel\\") == "Titel")
-        #expect(FFmpegWrapper.escapeFFMetadata("Titel\\\\") == "Titel")
+        #expect(FFMetadata.escape("Titel\\") == "Titel")
+        #expect(FFMetadata.escape("Titel\\\\") == "Titel")
     }
 
     @Test("Normaler Text bleibt unverändert")
     func normalTextUnchanged() {
         let normal = "Hörspiel Band 1"
-        #expect(FFmpegWrapper.escapeFFMetadata(normal) == normal)
+        #expect(FFMetadata.escape(normal) == normal)
     }
 
     @Test("Mehrere Sonderzeichen werden alle escaped")
     func multipleSonderzeichen() {
-        #expect(FFmpegWrapper.escapeFFMetadata("Titel=Wert;#") == "Titel\\=Wert\\;\\#")
+        #expect(FFMetadata.escape("Titel=Wert;#") == "Titel\\=Wert\\;\\#")
     }
 }
 
@@ -590,21 +591,21 @@ struct RoundTripTests {
     @Test("Normaler Text überlebt Round-Trip")
     func roundTripNormalText() {
         let original = "Kapitel 1 – Der Anfang"
-        let back = AudioFile.unescapeFFMetadata(FFmpegWrapper.escapeFFMetadata(original))
+        let back = FFMetadata.unescape(FFMetadata.escape(original))
         #expect(back == original)
     }
 
     @Test("Sonderzeichen überleben Round-Trip")
     func roundTripSonderzeichen() {
         let original = "Titel=Wert;#Kommentar"
-        let back = AudioFile.unescapeFFMetadata(FFmpegWrapper.escapeFFMetadata(original))
+        let back = FFMetadata.unescape(FFMetadata.escape(original))
         #expect(back == original)
     }
 
     @Test("Backslash in der Mitte überlebt Round-Trip")
     func roundTripInnerBackslash() {
         let original = "Pfad\\Datei"
-        let back = AudioFile.unescapeFFMetadata(FFmpegWrapper.escapeFFMetadata(original))
+        let back = FFMetadata.unescape(FFMetadata.escape(original))
         #expect(back == original)
     }
 
@@ -613,7 +614,7 @@ struct RoundTripTests {
         // Dokumentiert eine akzeptierte Verlustigkeit: ffmpeg kann einen
         // abschließenden Backslash ohnehin nicht verlustfrei zurücklesen.
         // Der Test hält fest, dass das Absicht ist und nicht versehentlich kippt.
-        let back = AudioFile.unescapeFFMetadata(FFmpegWrapper.escapeFFMetadata("Titel\\"))
+        let back = FFMetadata.unescape(FFMetadata.escape("Titel\\"))
         #expect(back == "Titel")
     }
 }
@@ -629,12 +630,12 @@ struct BuildChapterMetadataTests {
 
     @Test("Leere Gruppe ergibt nur den Header")
     func emptyGroup() {
-        #expect(FFmpegWrapper.buildChapterMetadata(group: []) == ";FFMETADATA1\n")
+        #expect(FFMetadata.encodeChapters(group: []) == ";FFMETADATA1\n")
     }
 
     @Test("Ein Kapitel bekommt START=0 und END=Dauer in Millisekunden")
     func singleChapter() {
-        let meta = FFmpegWrapper.buildChapterMetadata(group: [file("Kapitel 1", 10)])
+        let meta = FFMetadata.encodeChapters(group: [file("Kapitel 1", 10)])
         #expect(meta.contains("START=0\n"))
         #expect(meta.contains("END=10000\n"))
         #expect(meta.contains("title=Kapitel 1\n"))
@@ -645,14 +646,14 @@ struct BuildChapterMetadataTests {
     func chaptersAreSequential() {
         // Zweites Kapitel muss exakt dort beginnen, wo das erste endet — sonst
         // entstehen Lücken oder Überlappungen in der Kapitelnavigation.
-        let meta = FFmpegWrapper.buildChapterMetadata(group: [file("Eins", 10), file("Zwei", 5)])
+        let meta = FFMetadata.encodeChapters(group: [file("Eins", 10), file("Zwei", 5)])
         #expect(meta.contains("START=0\nEND=10000"))
         #expect(meta.contains("START=10000\nEND=15000"))
     }
 
     @Test("Kapiteltitel mit Sonderzeichen wird escaped")
     func titleIsEscaped() {
-        let meta = FFmpegWrapper.buildChapterMetadata(group: [file("A=B;C", 1)])
+        let meta = FFMetadata.encodeChapters(group: [file("A=B;C", 1)])
         #expect(meta.contains("title=A\\=B\\;C"))
     }
 
@@ -660,7 +661,7 @@ struct BuildChapterMetadataTests {
     func zeroDurationChapter() {
         // Hält das reale Verhalten fest: die Filterung solcher Dateien passiert
         // erst beim Kodieren, nicht hier.
-        let meta = FFmpegWrapper.buildChapterMetadata(group: [file("Leer", 0)])
+        let meta = FFMetadata.encodeChapters(group: [file("Leer", 0)])
         #expect(meta.contains("START=0\nEND=0"))
     }
 }
@@ -696,7 +697,7 @@ struct ParseFFMetadataChaptersTests {
         END=20000
         title=Kapitel 2
         """
-        let chapters = AudioFile.parseFFMetadataChapters(text)
+        let chapters = FFMetadata.decodeChapters(text)
         #expect(chapters.count == 2)
         #expect(chapters[0].start == 0)
         #expect(chapters[0].end == 10)
@@ -712,7 +713,7 @@ struct ParseFFMetadataChaptersTests {
         // gelesen werden — sonst überschriebe ein Titel das echte END.
         let text = "[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1000\n"
             + "title=Vorwort\\\nEND=180000\n"
-        let chapters = AudioFile.parseFFMetadataChapters(text)
+        let chapters = FFMetadata.decodeChapters(text)
         #expect(chapters.count == 1)
         #expect(chapters[0].end == 1)
         #expect(chapters[0].title == "Vorwort\nEND=180000")
@@ -721,7 +722,7 @@ struct ParseFFMetadataChaptersTests {
     @Test("Viele Fortsetzungszeilen werden vollständig zusammengefügt")
     func manyMetadataContinuationLines() throws {
         let pieces = Array(repeating: "x\\", count: 10_000) + ["Ende"]
-        let lines = AudioFile.ffMetadataLines(pieces.joined(separator: "\n"))
+        let lines = FFMetadata.logicalLines(pieces.joined(separator: "\n"))
         try #require(lines.count == 1)
         #expect(lines[0].hasSuffix("\nEnde"))
         #expect(lines[0].filter { $0 == "\n" }.count == 10_000)
@@ -733,7 +734,7 @@ struct ParseFFMetadataChaptersTests {
         // handgepflegten CRLF-Datei kein einziges Kapitel übrig.
         let text = "[CHAPTER]\r\nTIMEBASE=1/1000\r\nSTART=0\r\nEND=1000\r\ntitle=Eins\r\n"
             + "[CHAPTER]\r\nSTART=1000\r\nEND=2000\r\ntitle=Zwei\r\n"
-        let chapters = AudioFile.parseFFMetadataChapters(text)
+        let chapters = FFMetadata.decodeChapters(text)
         try #require(chapters.count == 2)
         #expect(chapters[0].start == 0)
         #expect(chapters[0].end == 1)
@@ -764,11 +765,42 @@ struct ParseFFMetadataChaptersTests {
         END=12000
         title=Drei
         """
-        let chapters = AudioFile.parseFFMetadataChapters(text)
+        let chapters = FFMetadata.decodeChapters(text)
         try #require(chapters.count == 3)
         #expect(chapters[1].start == 4)
         #expect(chapters[1].end == 2)
-        #expect(!AudioFile.chaptersAreValid(chapters, totalDuration: 12))
+        #expect(!FFMetadata.chaptersAreValid(chapters, totalDuration: 12))
+    }
+
+    @Test("Ein explizites END auf START bleibt ungültig")
+    func doesNotRepairZeroLengthChapter() throws {
+        let text = """
+        [CHAPTER]
+        START=0
+        END=0
+        title=Leer
+        [CHAPTER]
+        START=5000
+        END=9000
+        title=Zwei
+        """
+        let chapters = FFMetadata.decodeChapters(text)
+        try #require(chapters.count == 2)
+        #expect(chapters[0].end == 0)
+        #expect(!FFMetadata.chaptersAreValid(chapters, totalDuration: 9))
+    }
+
+    @Test("Nur ein fehlendes letztes END wird durch die Dateidauer ergänzt")
+    func fillsOnlyMissingFinalEnd() throws {
+        let text = "[CHAPTER]\nSTART=0\nEND=5000\n[CHAPTER]\nSTART=5000\n"
+        let chapters = FFMetadata.decodeChapters(text)
+        let resolved = try #require(FFMetadata.normalizedChapters(chapters, totalDuration: 9))
+        #expect(resolved.last?.end == 9)
+
+        for end in ["5000", "4000", "ungueltig"] {
+            let badChapters = FFMetadata.decodeChapters(text + "END=\(end)\n")
+            #expect(FFMetadata.normalizedChapters(badChapters, totalDuration: 9) == nil)
+        }
     }
 
     @Test("TIMEBASE wird korrekt skaliert")
@@ -781,7 +813,7 @@ struct ParseFFMetadataChaptersTests {
         END=15
         title=Sekunden
         """
-        let chapters = AudioFile.parseFFMetadataChapters(text)
+        let chapters = FFMetadata.decodeChapters(text)
         #expect(chapters.count == 1)
         #expect(chapters[0].start == 5)
         #expect(chapters[0].end == 15)
@@ -801,7 +833,7 @@ struct ParseFFMetadataChaptersTests {
         END=2000
         title=Zwei
         """
-        let chapters = AudioFile.parseFFMetadataChapters(text)
+        let chapters = FFMetadata.decodeChapters(text)
         #expect(chapters.count == 2)
         #expect(chapters[1].start == 1)
         #expect(chapters[1].end == 2)
@@ -821,7 +853,7 @@ struct ParseFFMetadataChaptersTests {
         END=9000
         title=Zwei
         """
-        let chapters = AudioFile.parseFFMetadataChapters(text)
+        let chapters = FFMetadata.decodeChapters(text)
         #expect(chapters.count == 2)
         #expect(chapters[0].end == 5)
     }
@@ -835,38 +867,38 @@ struct ParseFFMetadataChaptersTests {
         END=1000
         title=A\\=B\\;C
         """
-        let chapters = AudioFile.parseFFMetadataChapters(text)
+        let chapters = FFMetadata.decodeChapters(text)
         #expect(chapters.count == 1)
         #expect(chapters[0].title == "A=B;C")
     }
 
     @Test("Leerer Text ergibt keine Kapitel")
     func emptyText() {
-        #expect(AudioFile.parseFFMetadataChapters("").isEmpty)
+        #expect(FFMetadata.decodeChapters("").isEmpty)
     }
 
     @Test("Text ohne [CHAPTER] ergibt keine Kapitel")
     func noChapterBlocks() {
-        #expect(AudioFile.parseFFMetadataChapters(";FFMETADATA1\ntitle=Buch\n").isEmpty)
+        #expect(FFMetadata.decodeChapters(";FFMETADATA1\ntitle=Buch\n").isEmpty)
     }
 
     @Test("Kaputte Pflichtwerte werden nicht als plausible Nullwerte übernommen")
     func malformedRequiredValuesStayInvalid() {
-        let malformedStart = AudioFile.parseFFMetadataChapters("""
+        let malformedStart = FFMetadata.decodeChapters("""
         [CHAPTER]
         TIMEBASE=1/1000
         START=keine-zahl
         END=10000
         title=Kaputt
         """)
-        let malformedEnd = AudioFile.parseFFMetadataChapters("""
+        let malformedEnd = FFMetadata.decodeChapters("""
         [CHAPTER]
         TIMEBASE=1/1000
         START=0
         END=keine-zahl
         title=Kaputt
         """)
-        let malformedTimebase = AudioFile.parseFFMetadataChapters("""
+        let malformedTimebase = FFMetadata.decodeChapters("""
         [CHAPTER]
         TIMEBASE=1/0
         START=0
@@ -874,9 +906,9 @@ struct ParseFFMetadataChaptersTests {
         title=Kaputt
         """)
 
-        #expect(!AudioFile.chaptersAreValid(malformedStart, totalDuration: 10))
-        #expect(!AudioFile.chaptersAreValid(malformedEnd, totalDuration: 10))
-        #expect(!AudioFile.chaptersAreValid(malformedTimebase, totalDuration: 10))
+        #expect(!FFMetadata.chaptersAreValid(malformedStart, totalDuration: 10))
+        #expect(!FFMetadata.chaptersAreValid(malformedEnd, totalDuration: 10))
+        #expect(!FFMetadata.chaptersAreValid(malformedTimebase, totalDuration: 10))
     }
 
     @Test("Der ffmetadata-Leser behält nie Daten oberhalb seiner Grenze")

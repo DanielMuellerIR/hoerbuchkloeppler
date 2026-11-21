@@ -10,7 +10,7 @@ enum ChapterExtractionResult: Sendable {
 }
 
 private enum ChapterMetadataResult: Sendable {
-    case chapters([AudioFile.FFChapter])
+    case chapters([FFMetadata.Chapter])
     case fallback(String)
     case failed(AudioImportFailure.Reason)
     case cancelled
@@ -275,7 +275,7 @@ extension AudioFile {
                     guard let text = String(data: output.data, encoding: .utf8) else {
                         return .fallback("⚠️ FFMETADATA von \(visibleURL.lastPathComponent) nicht lesbar. Nutze die Datei als ein Kapitel.")
                     }
-                    let chapters = parseFFMetadataChapters(text)
+                    let chapters = FFMetadata.decodeChapters(text)
                     guard !chapters.isEmpty else {
                         return .fallback("⚠️ Keine Kapitel in \(visibleURL.lastPathComponent) gefunden. Nutze die Datei als ein Kapitel.")
                     }
@@ -287,7 +287,7 @@ extension AudioFile {
                 }
             }
             guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
-            let parsedChapters: [FFChapter]
+            let parsedChapters: [FFMetadata.Chapter]
             switch metadata {
             case .chapters(let chapters): parsedChapters = chapters
             case .fallback(let message):
@@ -308,29 +308,9 @@ extension AudioFile {
             guard !shouldCancel(), !taskCancellationRequested() else { return .cancelled }
             let resolvedChapters: [AudioFile]? = await AudioAnalysisExecutor.perform {
                 guard !shouldCancel(), !cancellation.isCancelled else { return nil }
-                var chapters = parsedChapters
-                // Das LETZTE Kapitel hat in FFMETADATA oft keine END-Zeit — es gibt kein
-                // Folgekapitel, aus dem sie (wie in parseFFMetadataChapters) abgeleitet
-                // werden könnte. Ohne Korrektur bliebe es ein Null-Dauer-Kapitel, das ein
-                // leeres Segment erzeugt und die GANZE Konvertierung scheitern lässt.
-                // Deshalb die fehlende letzte END-Zeit aus der Gesamtdauer der Datei ableiten.
-                if let last = chapters.indices.last, chapters[last].end <= chapters[last].start {
-                    if totalDuration.isFinite, totalDuration > chapters[last].start {
-                        chapters[last].end = totalDuration
-                    }
-                }
-
-                // Eine teilweise kaputte Kapitelliste nicht in garantiert leere
-                // `ffmpeg -t 0`-Segmente übersetzen. Der sichere Fallback ist die
-                // komplette Datei als ein Kapitel; so scheitert nicht das ganze Buch.
-                guard chaptersAreValid(chapters, totalDuration: totalDuration) else { return nil }
-                // Rundungsdifferenzen im FFMETADATA-Container lückenlos an die
-                // tatsächliche Dateidauer anlegen.
-                chapters[0].start = 0
-                for index in chapters.indices.dropFirst() {
-                    chapters[index].start = chapters[index - 1].end
-                }
-                if let last = chapters.indices.last { chapters[last].end = totalDuration }
+                guard let chapters = FFMetadata.normalizedChapters(
+                    parsedChapters, totalDuration: totalDuration
+                ) else { return nil }
 
                 var audioFiles: [AudioFile] = []
                 for (index, ch) in chapters.enumerated() {
@@ -434,157 +414,5 @@ extension AudioFile {
             }
             data.append(contentsOf: buffer.prefix(byteCount))
         }
-    }
-
-    /// Ein aus FFMETADATA gelesenes Kapitel (Zeiten bereits in Sekunden).
-    struct FFChapter: Sendable { var start: TimeInterval = 0; var end: TimeInterval = 0; var title: String = "" }
-
-    /// Parst die `[CHAPTER]`-Blöcke aus einer FFMETADATA-Ausgabe.
-    /// ffmpeg schreibt TIMEBASE in jeden Block (Default 1/1000); zur Robustheit
-    /// gegen ungewöhnliche/handgepflegte Dateien wird die TIMEBASE NICHT pro
-    /// Kapitel hart zurückgesetzt, sondern vom Header bzw. vorherigen Kapitel
-    /// geerbt. Fehlende END-Zeiten werden aus dem Start des Folgekapitels
-    /// abgeleitet (sonst entstünde ein stilles Null-Dauer-Kapitel).
-    static func parseFFMetadataChapters(_ text: String) -> [FFChapter] {
-        var chapters: [FFChapter] = []
-        var current: FFChapter?
-        var tbNum: Double = 1, tbDen: Double = 1000
-        var rawStart: Double?
-        var rawEnd: Double?
-        var sawEnd = false
-
-        func parseTimebase(_ value: String) {
-            let parts = value.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "/")
-            guard parts.count == 2,
-                  let numerator = Double(parts[0]), numerator.isFinite, numerator > 0,
-                  let denominator = Double(parts[1]), denominator.isFinite, denominator > 0 else {
-                // Ein vorhandener, aber kaputter Wert darf nicht still wie eine
-                // fehlende TIMEBASE behandelt werden. NaN lässt die spätere
-                // Kapitelvalidierung kontrolliert auf die ganze Datei zurückfallen.
-                tbNum = .nan
-                tbDen = 1
-                return
-            }
-            tbNum = numerator
-            tbDen = denominator
-        }
-
-        func flush() {
-            guard var c = current else { return }
-            let factor = tbNum / tbDen
-            c.start = (rawStart ?? .nan) * factor
-            c.end = sawEnd ? (rawEnd ?? .nan) * factor : c.start
-            chapters.append(c)
-        }
-
-        for line in ffMetadataLines(text) {
-            if line.trimmingCharacters(in: .whitespacesAndNewlines) == "[CHAPTER]" {
-                flush()
-                current = FFChapter()
-                rawStart = nil
-                rawEnd = nil
-                sawEnd = false   // TIMEBASE bewusst geerbt
-                continue
-            }
-            guard let eq = line.firstIndex(of: "=") else { continue }
-            let key = String(line[..<eq]).trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-            let value = String(line[line.index(after: eq)...])
-            // Vor dem ersten [CHAPTER]: nur ein evtl. globales TIMEBASE übernehmen.
-            if current == nil {
-                if key == "TIMEBASE" { parseTimebase(value) }
-                continue
-            }
-            switch key {
-            case "TIMEBASE": parseTimebase(value)
-            case "START": rawStart = Double(value.trimmingCharacters(in: .whitespacesAndNewlines))
-            case "END":
-                sawEnd = true
-                rawEnd = Double(value.trimmingCharacters(in: .whitespacesAndNewlines))
-            case "TITLE":
-                current?.title = unescapeFFMetadata(
-                    value.trimmingCharacters(in: .newlines)
-                )
-            default: break
-            }
-        }
-        flush()
-
-        // Fehlt END, setzt `flush` end == start. Genau diesen Fall aus dem Start
-        // des nächsten Kapitels füllen. Ein ausdrücklich widersprüchliches Paar
-        // (END VOR START) bleibt dagegen ungültig: Es zu „reparieren" erfände
-        // aus einer nachweislich kaputten Angabe ein Kapitel, statt auf das
-        // sichere Ein-Kapitel-Ergebnis zurückzufallen. Nicht parsebare Werte
-        // bleiben NaN und damit ebenfalls ungültig.
-        for i in chapters.indices where chapters[i].end == chapters[i].start && i + 1 < chapters.count {
-            chapters[i].end = chapters[i + 1].start
-        }
-        return chapters
-    }
-
-    /// Zerlegt FFMETADATA in Zeilen und hält dabei Fortsetzungszeilen zusammen.
-    /// ffmpeg escapt einen Zeilenumbruch im Wert als Backslash plus echten
-    /// Umbruch. Ohne dieses Zusammenfügen bräche ein Kapiteltitel dort ab, und
-    /// seine Fortsetzung würde als eigenes Schlüssel/Wert-Paar gelesen — ein
-    /// Titel wie „Vorwort\nEND=180000" überschriebe damit das echte Kapitelende.
-    static func ffMetadataLines(_ text: String) -> [String] {
-        var lines: [String] = []
-        for piece in text.components(separatedBy: "\n") {
-            if let last = lines.last, endsWithEscapingBackslash(last) {
-                lines[lines.count - 1].append("\n")
-                lines[lines.count - 1].append(contentsOf: piece)
-            } else {
-                lines.append(piece)
-            }
-        }
-        return lines
-    }
-
-    /// Ein Backslash escapt nur, wenn er selbst nicht escapt ist — deshalb zählt
-    /// die ungerade Anzahl am Zeilenende.
-    private static func endsWithEscapingBackslash(_ line: String) -> Bool {
-        var count = 0
-        for character in line.reversed() {
-            if character == "\\" { count += 1 } else { break }
-        }
-        return count % 2 == 1
-    }
-
-    static func chaptersAreValid(
-        _ chapters: [FFChapter],
-        totalDuration: TimeInterval,
-        tolerance: TimeInterval = 0.25
-    ) -> Bool {
-        guard !chapters.isEmpty, totalDuration.isFinite, totalDuration > 0,
-              abs(chapters[0].start) <= tolerance else { return false }
-        var previousEnd: TimeInterval = 0
-        let lastIndex = chapters.index(before: chapters.endIndex)
-        for (index, chapter) in chapters.enumerated() {
-            // Genau diese Grenzen verwendet die anschließende Normalisierung:
-            // Start wird auf das vorherige Ende, das letzte Ende auf die echte
-            // Dateidauer gesetzt. Auch dieses normalisierte Kapitel muss positiv
-            // bleiben, nicht nur die ursprüngliche FFMETADATA-Spanne.
-            let normalizedEnd = index == lastIndex ? totalDuration : chapter.end
-            guard chapter.start.isFinite, chapter.end.isFinite,
-                  chapter.start >= 0, chapter.end > chapter.start,
-                  chapter.start < totalDuration,
-                  abs(chapter.start - previousEnd) <= tolerance,
-                  normalizedEnd > previousEnd,
-                  chapter.end <= totalDuration + tolerance else { return false }
-            previousEnd = chapter.end
-        }
-        return abs(previousEnd - totalDuration) <= tolerance
-    }
-
-    /// Macht FFMETADATA-Escapes rückgängig (`\=`, `\;`, `\#`, `\\` → Klartext).
-    static func unescapeFFMetadata(_ s: String) -> String {
-        var result = ""
-        var escaped = false
-        for ch in s {
-            if escaped { result.append(ch); escaped = false }
-            else if ch == "\\" { escaped = true }
-            else { result.append(ch) }
-        }
-        if escaped { result.append("\\") }
-        return result
     }
 }

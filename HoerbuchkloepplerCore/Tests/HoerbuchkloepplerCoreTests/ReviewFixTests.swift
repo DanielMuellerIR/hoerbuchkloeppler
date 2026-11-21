@@ -1250,37 +1250,37 @@ struct ChapterValidationTests {
     @Test("Nur lückenlose Kapitel über die vollständige Dateidauer sind gültig")
     func validatesChapterRanges() {
         let valid = [
-            AudioFile.FFChapter(start: 0, end: 10, title: "Eins"),
-            AudioFile.FFChapter(start: 10, end: 20, title: "Zwei")
+            FFMetadata.Chapter(start: 0, end: 10, title: "Eins"),
+            FFMetadata.Chapter(start: 10, end: 20, title: "Zwei")
         ]
-        #expect(AudioFile.chaptersAreValid(valid, totalDuration: 20))
-        #expect(!AudioFile.chaptersAreValid([
-            AudioFile.FFChapter(start: 0, end: 0, title: "Leer")
+        #expect(FFMetadata.chaptersAreValid(valid, totalDuration: 20))
+        #expect(!FFMetadata.chaptersAreValid([
+            FFMetadata.Chapter(start: 0, end: 0, title: "Leer")
         ], totalDuration: 20))
-        #expect(!AudioFile.chaptersAreValid([
-            AudioFile.FFChapter(start: 0, end: 10, title: "Eins"),
-            AudioFile.FFChapter(start: 9, end: 20, title: "Überlappt")
+        #expect(!FFMetadata.chaptersAreValid([
+            FFMetadata.Chapter(start: 0, end: 10, title: "Eins"),
+            FFMetadata.Chapter(start: 9, end: 20, title: "Überlappt")
         ], totalDuration: 20))
-        #expect(!AudioFile.chaptersAreValid([
-            AudioFile.FFChapter(start: .nan, end: 10, title: "Ungültig")
+        #expect(!FFMetadata.chaptersAreValid([
+            FFMetadata.Chapter(start: .nan, end: 10, title: "Ungültig")
         ], totalDuration: 20))
-        #expect(!AudioFile.chaptersAreValid([
-            AudioFile.FFChapter(start: 1, end: 10, title: "Vorlauf fehlt"),
-            AudioFile.FFChapter(start: 10, end: 20, title: "Zwei")
+        #expect(!FFMetadata.chaptersAreValid([
+            FFMetadata.Chapter(start: 1, end: 10, title: "Vorlauf fehlt"),
+            FFMetadata.Chapter(start: 10, end: 20, title: "Zwei")
         ], totalDuration: 20))
-        #expect(!AudioFile.chaptersAreValid([
-            AudioFile.FFChapter(start: 0, end: 9, title: "Eins"),
-            AudioFile.FFChapter(start: 10, end: 20, title: "Lücke")
+        #expect(!FFMetadata.chaptersAreValid([
+            FFMetadata.Chapter(start: 0, end: 9, title: "Eins"),
+            FFMetadata.Chapter(start: 10, end: 20, title: "Lücke")
         ], totalDuration: 20))
-        #expect(!AudioFile.chaptersAreValid(valid, totalDuration: 25))
-        #expect(!AudioFile.chaptersAreValid(valid, totalDuration: 19))
-        #expect(!AudioFile.chaptersAreValid([
-            AudioFile.FFChapter(start: 0, end: 20.1, title: "Eins"),
-            AudioFile.FFChapter(start: 20.1, end: 20.2, title: "Nach Dateiende")
+        #expect(!FFMetadata.chaptersAreValid(valid, totalDuration: 25))
+        #expect(!FFMetadata.chaptersAreValid(valid, totalDuration: 19))
+        #expect(!FFMetadata.chaptersAreValid([
+            FFMetadata.Chapter(start: 0, end: 20.1, title: "Eins"),
+            FFMetadata.Chapter(start: 20.1, end: 20.2, title: "Nach Dateiende")
         ], totalDuration: 20))
-        #expect(!AudioFile.chaptersAreValid([
-            AudioFile.FFChapter(start: 0, end: 20.1, title: "Eins"),
-            AudioFile.FFChapter(start: 19.9, end: 20.2, title: "Würde beim Runden invertiert")
+        #expect(!FFMetadata.chaptersAreValid([
+            FFMetadata.Chapter(start: 0, end: 20.1, title: "Eins"),
+            FFMetadata.Chapter(start: 19.9, end: 20.2, title: "Würde beim Runden invertiert")
         ], totalDuration: 20))
     }
 }

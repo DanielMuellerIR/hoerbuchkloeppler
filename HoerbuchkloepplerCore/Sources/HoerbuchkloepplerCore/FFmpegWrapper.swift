@@ -1242,21 +1242,6 @@ public struct FFmpegWrapper {
         return results.completedPaths()
     }
 
-    /// Baut den FFMETADATA-Inhalt (`chapters.txt`) für eine Kapitelgruppe.
-    /// Kapitel liegen hintereinander: jedes beginnt, wo das vorherige endet.
-    ///
-    /// Bewusst eine reine Funktion ohne Datei-I/O — so ist die Kapitel-Arithmetik
-    /// (Grenzen, Escaping) testbar, ohne echte Dateien schreiben zu müssen.
-    static func buildChapterMetadata(group: [AudioFile]) -> String {
-        var metaContent = ";FFMETADATA1\n"
-        var currentTime: TimeInterval = 0
-        for file in group {
-            metaContent += "[CHAPTER]\nTIMEBASE=1/1000\nSTART=\(Int(currentTime * 1000))\nEND=\(Int((currentTime + file.duration) * 1000))\ntitle=\(escapeFFMetadata(file.chapterTitle))\n"
-            currentTime += file.duration
-        }
-        return metaContent
-    }
-
     /// Schreibt die concat-Liste (`audio_list.txt`) und die FFMETADATA-
     /// Kapiteldatei (`chapters.txt`) nach tempDir. Gibt `false` zurück, wenn ein
     /// Schreibvorgang fehlschlägt — sonst liefe ffmpeg mit fehlender Steuerdatei
@@ -1271,7 +1256,7 @@ public struct FFmpegWrapper {
         runID: UUID
     ) -> Bool {
         let fileListContent = validPaths.map { "file '\($0.replacingOccurrences(of: "'", with: "'\\''"))'" }.joined(separator: "\n")
-        let metaContent = buildChapterMetadata(group: group)
+        let metaContent = FFMetadata.encodeChapters(group: group)
         do {
             try fileListContent.write(to: listFile, atomically: true, encoding: .utf8)
             try metaContent.write(to: metaFile, atomically: true, encoding: .utf8)
@@ -1629,30 +1614,6 @@ public struct FFmpegWrapper {
             }
             return false
         }
-    }
-
-    /// Maskiert einen Wert fürs FFMETADATA-Format. `\`, `=`, `;` und `#` werden
-    /// mit Backslash escaped; Zeilenumbrüche werden zu Leerzeichen (ein
-    /// Kapiteltitel ist einzeilig). Ohne das zerstört z.B. ein Newline im
-    /// Kapiteltitel die gesamte chapters.txt.
-    ///
-    /// Sonderfall Backslash am Zeilenende: ffmpegs FFMETADATA-Leser behandelt
-    /// JEDEN Backslash am Zeilenende als Zeilenfortsetzung — auch den per `\\`
-    /// maskierten — und würde die folgende `[CHAPTER]`-Zeile verschlucken (ein
-    /// Kapitel ginge verloren). Ein FFMETADATA-Wert darf also nicht auf einen
-    /// Backslash enden; abschließende Backslashes werden daher entfernt
-    /// (ffmpeg kann sie ohnehin nicht verlustfrei zurücklesen).
-    static func escapeFFMetadata(_ value: String) -> String {
-        var out = ""
-        for ch in value {
-            switch ch {
-            case "\\", "=", ";", "#": out.append("\\"); out.append(ch)
-            case "\n", "\r": out.append(" ")
-            default: out.append(ch)
-            }
-        }
-        while out.hasSuffix("\\") { out.removeLast() }
-        return out
     }
 
     /// Schreibt den vor Workerstart aufgenommenen Cover-Snapshot in `tempDir`
