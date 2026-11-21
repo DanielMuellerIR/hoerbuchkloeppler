@@ -29,10 +29,15 @@ if [[ "$scope" != --lifecycle ]]; then
   ./build.sh --deps-only
 fi
 if [[ "$scope" == --all || "$scope" == --swift ]]; then
+  swift_test_flags=(-Xswiftc -warnings-as-errors)
+  if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+    # Parallel laufende Prozess- und Abbruchtests überschreiten auf dem Intel-Runner ihre Fristen.
+    swift_test_flags+=(--experimental-maximum-parallelization-width 1)
+  fi
   verify_timeout=0
   if [[ "$scope" == --all ]]; then verify_timeout=1; fi
   HOERBUCHKLOEPPLER_VERIFY_PROVIDER_TIMEOUT="$verify_timeout" \
-    swift test --package-path HoerbuchkloepplerCore -Xswiftc -warnings-as-errors
+    swift test --package-path HoerbuchkloepplerCore "${swift_test_flags[@]}"
   swift test --package-path tools/InstallBundle -Xswiftc -warnings-as-errors
 fi
 if [[ "$scope" == --all || "$scope" == --integration ]]; then
