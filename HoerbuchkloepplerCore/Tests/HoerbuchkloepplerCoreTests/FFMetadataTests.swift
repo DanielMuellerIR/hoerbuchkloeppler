@@ -101,13 +101,13 @@ struct BuildChapterMetadataTests {
     }
 
     @Test("Leere Gruppe ergibt nur den Header")
-    func emptyGroup() {
-        #expect(FFMetadata.encodeChapters(group: []) == ";FFMETADATA1\n")
+    func emptyGroup() throws {
+        #expect(try FFMetadata.encodeChapters(group: []) == ";FFMETADATA1\n")
     }
 
     @Test("Ein Kapitel bekommt START=0 und END=Dauer in Millisekunden")
-    func singleChapter() {
-        let meta = FFMetadata.encodeChapters(group: [file("Kapitel 1", 10)])
+    func singleChapter() throws {
+        let meta = try FFMetadata.encodeChapters(group: [file("Kapitel 1", 10)])
         #expect(meta.contains("START=0\n"))
         #expect(meta.contains("END=10000\n"))
         #expect(meta.contains("title=Kapitel 1\n"))
@@ -115,26 +115,25 @@ struct BuildChapterMetadataTests {
     }
 
     @Test("Kapitel liegen lückenlos hintereinander")
-    func chaptersAreSequential() {
+    func chaptersAreSequential() throws {
         // Zweites Kapitel muss exakt dort beginnen, wo das erste endet — sonst
         // entstehen Lücken oder Überlappungen in der Kapitelnavigation.
-        let meta = FFMetadata.encodeChapters(group: [file("Eins", 10), file("Zwei", 5)])
+        let meta = try FFMetadata.encodeChapters(group: [file("Eins", 10), file("Zwei", 5)])
         #expect(meta.contains("START=0\nEND=10000"))
         #expect(meta.contains("START=10000\nEND=15000"))
     }
 
     @Test("Kapiteltitel mit Sonderzeichen wird escaped")
-    func titleIsEscaped() {
-        let meta = FFMetadata.encodeChapters(group: [file("A=B;C", 1)])
+    func titleIsEscaped() throws {
+        let meta = try FFMetadata.encodeChapters(group: [file("A=B;C", 1)])
         #expect(meta.contains("title=A\\=B\\;C"))
     }
 
-    @Test("Kapitel mit Dauer 0 erzeugt START==END")
-    func zeroDurationChapter() {
-        // Hält das reale Verhalten fest: die Filterung solcher Dateien passiert
-        // erst beim Kodieren, nicht hier.
-        let meta = FFMetadata.encodeChapters(group: [file("Leer", 0)])
-        #expect(meta.contains("START=0\nEND=0"))
+    @Test("FFMetadata weist Kapitel ohne Millisekundenspanne ab", arguments: [0.0, 0.0005])
+    func zeroDurationChapter(duration: Double) {
+        #expect(throws: ConversionOutputError.self) {
+            _ = try FFMetadata.encodeChapters(group: [file("Leer", duration)])
+        }
     }
 }
 

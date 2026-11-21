@@ -71,7 +71,7 @@ struct ContentView: View {
                     ExportFooterView(
                         busyMessage: flow.activity?.rawValue ?? (coverDrop.isPending ? "Cover wird geladen …" : nil),
                         canExport: canExport,
-                        canOpenCLI: session.cliFolderIfRepresentable != nil && kloepplerURL != nil,
+                        canOpenCLI: !coverDrop.isPending && session.cliFolderIfRepresentable != nil && kloepplerURL != nil,
                         cliHelp: cliHandoffHelp,
                         export: saveAndExport,
                         cancelWork: {
@@ -358,6 +358,7 @@ struct ContentView: View {
     }
 
     private func copyAndOpenCLI() {
+        guard !coverDrop.isPending else { return }
         // Über `addLog` allein wäre die Meldung unsichtbar: Das Protokoll zeigt
         // nur das Konvertierungs-Overlay, und das ist beim CLI-Handoff nie offen.
         guard let folderURL = session.cliFolderIfRepresentable else {
@@ -434,6 +435,7 @@ struct ContentView: View {
     }
 
     private var cliHandoffHelp: String {
+        if coverDrop.isPending { return "Cover wird geladen …" }
         if session.cliFolderIfRepresentable == nil {
             return "Nur verfügbar, wenn die aktuelle Liste vollständig aus einem einzelnen Ordner-Import stammt."
         }

@@ -5,6 +5,20 @@ import Darwin
 
 @Suite("Besitz und Bereinigung von Arbeitsverzeichnissen")
 struct TemporaryDirectoryTests {
+    @Test("Die Besitzprüfung lehnt nicht reguläre Marker ab")
+    func ownerMarkerMustBeRegular() throws {
+        let directory = try makeTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let marker = directory.appendingPathComponent(OwnedTemporaryDirectory.tempOwnerFilename)
+        try #require(mkfifo(marker.path, 0o600) == 0)
+        let descriptor = FileSystemEntry.openDirectory(directory)
+        try #require(descriptor >= 0)
+        defer { _ = close(descriptor) }
+
+        #expect(OwnedTemporaryDirectory.ownerPID(directory) == nil)
+        #expect(OwnedTemporaryDirectory.ownerPID(descriptor: descriptor) == nil)
+    }
+
     @Test("Vorbestehendes Temp-Verzeichnis wird nicht beansprucht")
     func tempCreationIsExclusive() throws {
         let root = try makeTestDirectory()

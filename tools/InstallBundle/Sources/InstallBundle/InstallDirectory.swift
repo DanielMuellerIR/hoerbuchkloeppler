@@ -28,6 +28,7 @@ enum InstallError: LocalizedError {
     case unsuitableTarget(String)
     case changed(String)
     case occupied(String)
+    case concurrentInstallation(String)
     case previousBundleMissing
     case directoryContents
     case posix(String, Int32)
@@ -38,6 +39,7 @@ enum InstallError: LocalizedError {
         case .unsuitableTarget(let path): "Installationsziel muss ein unverlinkter App-Ordner sein: \(path)"
         case .changed(let entry): "Installationsziel oder Installationseintrag wurde inzwischen verändert: \(entry)"
         case .occupied(let entry): "Installationspfad ist bereits belegt: \(entry)"
+        case .concurrentInstallation(let destination): "Eine Installation für \(destination) läuft bereits."
         case .previousBundleMissing: "Das vorige Bundle ist an keinem Rückzugspfad eindeutig auffindbar."
         case .directoryContents: "Verzeichnisinhalt konnte nicht sicher gelesen oder entfernt werden."
         case .posix(let operation, let code): "\(operation): \(String(cString: strerror(code)))"
@@ -71,6 +73,18 @@ final class InstallDirectory {
         var information = stat()
         guard fstat(descriptor, &information) == 0 else { throw InstallError.posix("fstat", errno) }
         return FileIdentity(information)
+    }
+
+    func acquireInstallationLock(for parentPath: String) throws -> Int32 {
+        let lock = dup(descriptor)
+        guard lock >= 0 else { throw InstallError.posix(parentPath, errno) }
+        if flock(lock, LOCK_EX | LOCK_NB) != 0 {
+            let code = errno
+            close(lock)
+            if code == EWOULDBLOCK { throw InstallError.concurrentInstallation(parentPath) }
+            throw InstallError.posix(parentPath, code)
+        }
+        return lock
     }
 
     func entry(_ name: String) throws -> DirectoryEntry {

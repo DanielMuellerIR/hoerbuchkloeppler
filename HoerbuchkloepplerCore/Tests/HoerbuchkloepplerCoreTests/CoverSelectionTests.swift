@@ -75,7 +75,7 @@ struct CoverSelectionTests {
         session.logSink = { _ in }
         session.title = "Titel"; session.author = "Autor"
         session.embeddedArtworkLoader = { url in await probe.load(url) }
-        await session.processIncomingFiles(urls.map { AudioFile(url: $0, startTime: 0, duration: 1, chapterTitle: $0.lastPathComponent) })
+        await session.importAnalyzedFiles(urls.map { AudioFile(url: $0, startTime: 0, duration: 1, chapterTitle: $0.lastPathComponent) })
         for _ in 0..<200 {
             if await probe.snapshot().started { break }
             try await Task.sleep(for: .milliseconds(10))
@@ -97,7 +97,7 @@ struct CoverSelectionTests {
         session.logSink = { _ in }
         session.title = "Titel"; session.author = "Autor"
         session.embeddedArtworkLoader = { url in await probe.load(url) }
-        await session.processIncomingFiles([AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Kapitel")])
+        await session.importAnalyzedFiles([AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Kapitel")])
         for _ in 0..<200 {
             if await probe.snapshot().started { break }
             try await Task.sleep(for: .milliseconds(10))
@@ -218,7 +218,7 @@ struct CoverSelectionTests {
             chapterTitle: "Kapitel"
         )
 
-        await session.processIncomingFiles([existing])
+        await session.importAnalyzedFiles([existing])
         var probeState = await probe.snapshot()
         var attempts = 0
         while !probeState.started, attempts < 200 {
@@ -265,7 +265,7 @@ struct CoverSelectionTests {
             chapterTitle: "Kapitel"
         )
 
-        await session.processIncomingFiles([existing])
+        await session.importAnalyzedFiles([existing])
         var probeState = await probe.snapshot()
         var attempts = 0
         while !probeState.started, attempts < 200 {
@@ -309,7 +309,7 @@ struct CoverSelectionTests {
             chapterTitle: "Kapitel"
         )
 
-        await session.processIncomingFiles([existing])
+        await session.importAnalyzedFiles([existing])
         var probeState = await probe.snapshot()
         var attempts = 0
         while !probeState.started, attempts < 200 {
@@ -353,7 +353,7 @@ struct CoverSelectionTests {
             chapterTitle: "Kapitel"
         )
 
-        await session.processIncomingFiles([existing])
+        await session.importAnalyzedFiles([existing])
         var probeState = await probe.snapshot()
         var attempts = 0
         while !probeState.started, attempts < 200 {
@@ -433,7 +433,7 @@ struct CoverSelectionTests {
             chapterTitle: "Zweites"
         )
 
-        await session.processIncomingFiles([first, second])
+        await session.importAnalyzedFiles([first, second])
         var probeState = await probe.snapshot()
         var attempts = 0
         while !probeState.started, attempts < 200 {
@@ -467,7 +467,7 @@ struct CoverSelectionTests {
         let first = AudioFile(url: source, startTime: 0, duration: 1, chapterTitle: "Erstes")
         let second = AudioFile(url: source, startTime: 1, duration: 1, chapterTitle: "Zweites")
 
-        await session.processIncomingFiles([first, second])
+        await session.importAnalyzedFiles([first, second])
         for _ in 0..<200 {
             if await probe.snapshot().started { break }
             try await Task.sleep(for: .milliseconds(10))

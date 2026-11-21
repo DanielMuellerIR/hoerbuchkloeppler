@@ -17,7 +17,7 @@ struct CLIInvocationTests {
             duration: 1,
             chapterTitle: "Kapitel 1"
         )
-        await session.applyScannedFolder(.init(
+        await session.importScannedFolder(.init(
             folderURL: source,
             audioFiles: [file],
             imageURLs: [],
@@ -36,7 +36,7 @@ struct CLIInvocationTests {
         session.author = "Autor"
         let folder = URL(fileURLWithPath: "/tmp/buch")
         let chapters = ["01.mp3", "02.mp3"].map { testAudioFile(folder.appendingPathComponent($0)) }
-        await session.applyScannedFolder(.init(folderURL: folder, audioFiles: chapters,
+        await session.importScannedFolder(.init(folderURL: folder, audioFiles: chapters,
                                               imageURLs: [], embeddedArtwork: nil))
         #expect(session.cliFolderIfRepresentable == folder)
         session.moveChapters(from: IndexSet(integer: 0), to: 2)

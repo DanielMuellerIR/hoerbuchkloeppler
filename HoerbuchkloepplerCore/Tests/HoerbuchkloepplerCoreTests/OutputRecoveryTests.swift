@@ -37,6 +37,26 @@ struct OutputRecoveryTests {
         #expect(try String(contentsOf: final, encoding: .utf8) == "neu")
     }
 
+    @Test("Absturz vor der Aktualisierung des Löschbelegs erhält beide Ausgaben")
+    func crashBeforeCleanupRecordUpdatePreservesBothOutputs() throws {
+        let directory = try makeTestDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let final = directory.appendingPathComponent("Buch.m4b")
+        try Data("alt".utf8).write(to: final)
+        let staging = try OutputStaging.createProtectedOutput(for: final, ownerPID: 987_654)
+        let container = try #require(staging.ownership.protectedDirectory)
+        try Data("neu".utf8).write(to: staging.url)
+        let originalRecord = try #require(CleanupEntryRecord.read(in: container))
+        #expect(originalRecord.identity == staging.ownership.identity)
+
+        try #require(FileSystemEntry.rename(from: staging.url, to: final, flags: UInt32(RENAME_SWAP)) == 0)
+        OutputCleanup.removeOrphans(for: final)
+
+        #expect(try String(contentsOf: final, encoding: .utf8) == "neu")
+        #expect(try String(contentsOf: staging.url, encoding: .utf8) == "alt")
+        #expect(CleanupEntryRecord.read(in: container)?.identity == originalRecord.identity)
+    }
+
     @Test("Alter Export bleibt nach fehlgeschlagenem Rücktausch im geschützten Staging erhalten")
     func failedProtectedRollbackRetainsPreviousOutput() throws {
         let directory = try makeTestDirectory()

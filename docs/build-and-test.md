@@ -68,7 +68,8 @@ Dateipfad vorgibt. Standardmäßig landet die Datei im Elternordner der
 Quelle. Ohne explizite Metadaten wählt die CLI aus mehrdeutigen Tags nach
 fester Priorität (Album vor Title, Performer vor Album_Performer).
 Bei bereits vorhandenem Ziel fragt sie ohne `--force` nur nach, wenn
-stdin und stdout Terminals sind.
+stdin und der Kanal für die Frage Terminals sind (stdout im Textformat,
+stderr im JSON-Format).
 
 Die CLI meldet auf stderr, warum ein Lauf fehlschlägt. Exit `0` bedeutet
 Erfolg, Exit `64` ungültige Argumente. Ein angenommener Abbruch durch

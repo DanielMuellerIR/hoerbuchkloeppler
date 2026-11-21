@@ -117,13 +117,9 @@ enum ConversionPlanner {
         }
         let files = plan.groups.flatMap { $0 }
         for group in plan.groups {
-            var duration: TimeInterval = 0
+            var timeline = FFMetadata.Timeline()
             for file in group {
-                duration += file.duration
-                guard file.startTime.isFinite, file.startTime >= 0, file.duration.isFinite, file.duration > 0,
-                      duration * 1_000 < Double(Int64.max) else {
-                    throw ConversionOutputError.invalidChapterTime(file.sourceURL)
-                }
+                _ = try timeline.append(file)
             }
         }
         try validateInputSnapshots(for: files, expected: plan.inputSnapshots)

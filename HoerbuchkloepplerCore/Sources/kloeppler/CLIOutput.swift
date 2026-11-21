@@ -24,11 +24,14 @@ struct CLIOutput {
         else { print(message) }
     }
 
+    var showsPromptInTerminal: Bool { isatty(promptStream.fileDescriptor) != 0 }
+
+    private var promptStream: FileHandle { isJSON ? .standardError : .standardOutput }
+
     func prompt(_ message: String) {
         // Die Frage hat kein Zeilenende und muss vor dem Warten auf stdin
         // sichtbar sein. Der direkte Zugriff umgeht die stdout-Zeilenpufferung.
-        let stream = isJSON ? FileHandle.standardError : FileHandle.standardOutput
-        stream.write(Data(message.utf8))
+        promptStream.write(Data(message.utf8))
     }
 
     func log(_ message: String) {

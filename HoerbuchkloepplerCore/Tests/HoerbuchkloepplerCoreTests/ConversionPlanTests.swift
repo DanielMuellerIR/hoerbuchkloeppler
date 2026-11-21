@@ -38,17 +38,18 @@ struct SplitAudioFilesTests {
         #expect(groups.count == 1)
     }
 
-    @Test("Kapitelzeiten außerhalb der FFmetadata-Skala stoppen den Start")
+    @Test("Nicht in FFmetadata darstellbare Kapitelzeiten stoppen den Start",
+          arguments: [0.0005, Double(Int64.max) / 1_000])
     @MainActor
-    func invalidEncodingTimelineDoesNotStart() throws {
+    func invalidEncodingTimelineDoesNotStart(duration: Double) throws {
         let directory = try makeTestDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let source = directory.appendingPathComponent("Quelle.wav")
         try Data([0]).write(to: source)
         let output = directory.appendingPathComponent("Buch.m4b")
         let session = ConversionSession(settings: AudioSettings())
-        session.audioFiles = [AudioFile(url: source, startTime: 0, duration: Double(Int64.max) / 1_000,
-                                        chapterTitle: "Zu lang")]
+        session.audioFiles = [AudioFile(url: source, startTime: 0, duration: duration,
+                                        chapterTitle: "Ungültig")]
 
         #expect(FFmpegWrapper.convert(session: session, outputURL: output)
             == .rejected("Die Kapitelzeiten können nicht ausgegeben werden: Quelle.wav"))

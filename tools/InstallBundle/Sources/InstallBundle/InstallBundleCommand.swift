@@ -20,15 +20,9 @@ struct InstallBundleCommand {
     }
 
     private static func run(_ arguments: [String]) throws {
-        if arguments.count == 6, arguments[0] == "snapshot", let pid = Int32(arguments[3]) {
-            let target = try BundleInstallation.capture(parentPath: arguments[1], destination: arguments[2], runPID: pid)
-            guard target.parentIdentity.statIdentity == arguments[4] else {
-                throw InstallError.changed(target.parentPath)
-            }
-            guard (target.previousIdentity?.statIdentity ?? "missing") == arguments[5] else {
-                throw InstallError.changed(target.destination)
-            }
-            try printToken(target)
+        if arguments.count == 6, arguments[0] == "run-locked", let pid = Int32(arguments[3]) {
+            try runLocked(parentPath: arguments[1], destination: arguments[2], runPID: pid,
+                          expectedParent: arguments[4], expectedDestination: arguments[5])
             return
         }
         guard arguments.count >= 2, let operation = Operation(rawValue: arguments[1]) else {
@@ -50,6 +44,37 @@ struct InstallBundleCommand {
             let stagedIdentity = try JSONDecoder().decode(FileIdentity.self, from: Data(arguments[2].utf8))
             try apply(operation, to: target, stagedIdentity: stagedIdentity)
         }
+    }
+
+    private static func runLocked(
+        parentPath: String, destination: String, runPID: Int32,
+        expectedParent: String, expectedDestination: String
+    ) throws {
+        let parent = try InstallDirectory(path: parentPath)
+        guard try parent.identity().statIdentity == expectedParent else {
+            throw InstallError.changed(parentPath)
+        }
+        // Der Deskriptor bleibt beim exec offen und hält die Sperre bis zum
+        // Ende der Shell samt etwaigem Rollback. Der Elternordner ist auch
+        // bei einer Erstinstallation vorhanden und braucht keine Sperrdatei.
+        let lock = try parent.acquireInstallationLock(for: parentPath)
+        defer { close(lock) }
+        let target = try BundleInstallation.capture(parentPath: parentPath, destination: destination, runPID: runPID)
+        guard target.parentIdentity.statIdentity == expectedParent,
+              (target.previousIdentity?.statIdentity ?? "missing") == expectedDestination else {
+            throw InstallError.changed(target.destinationPath)
+        }
+        let token = String(decoding: try JSONEncoder().encode(target), as: UTF8.self)
+        guard setenv("INSTALL_TARGET", token, 1) == 0 else {
+            throw InstallError.posix("INSTALL_TARGET", errno)
+        }
+        let shell = "/bin/bash"
+        let arguments = [shell, "-c", "run_installation"]
+        var argv = arguments.map { strdup($0) }
+        argv.append(nil)
+        defer { for argument in argv { free(argument) } }
+        _ = execv(shell, &argv)
+        throw InstallError.posix(shell, errno)
     }
 
     private static func apply(_ operation: Operation, to target: BundleInstallation,

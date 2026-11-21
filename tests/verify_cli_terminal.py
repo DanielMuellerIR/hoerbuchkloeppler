@@ -197,3 +197,21 @@ verify_overwrite(b"n\n", 2)
 verify_overwrite(b"j\n", 0)
 verify_overwrite(None, 130)
 print("VERIFIED sichtbare Überschreibfrage, Ablehnung, Bestätigung und SIGINT", flush=True)
+
+existing_output.write_bytes(original_bytes)
+master, slave = pty.openpty()
+try:
+    with (root / "overwrite-stderr.log").open("w+") as errors:
+        result = subprocess.run(
+            [str(CLI), "--file", str(short_source), "--output", str(existing_output),
+             "--no-cover", "--format", "json"],
+            stdin=slave, stdout=slave, stderr=errors, close_fds=True, timeout=10,
+        )
+        errors.seek(0)
+        diagnostics = errors.read()
+    assert result.returncode == 1 and "--force" in diagnostics and "(j/N)" not in diagnostics, diagnostics
+    assert existing_output.read_bytes() == original_bytes
+finally:
+    os.close(slave)
+    os.close(master)
+print("VERIFIED JSON-Überschreiben wartet bei umgeleiteter Frage nicht auf Eingabe", flush=True)

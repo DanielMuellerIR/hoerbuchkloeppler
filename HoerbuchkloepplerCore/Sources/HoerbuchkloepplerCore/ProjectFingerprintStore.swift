@@ -22,7 +22,7 @@ final class ProjectFingerprintStore: Sendable {
         if let cached = entries.withLock({ $0[key] }), cached.identity == identity {
             return cached.sha256
         }
-        return try readFingerprint(at: url, identity: identity)
+        return try readFingerprint(at: url, identity: identity).sha256
     }
 
     func verify(_ url: URL, expectedSHA256: String, policy: ReadPolicy) -> Verification {
@@ -37,18 +37,21 @@ final class ProjectFingerprintStore: Sendable {
         // Eine wiederhergestellte mtime kann einen gleich großen Inhaltswechsel
         // verdecken. Nur ein erneuter Hash unterscheidet ihn von einem Finder-Tag.
         if policy == .synchronous, let cached, !cached.identity.matchesContentSnapshot(identity) { return .changed }
-        guard let sha256 = try? readFingerprint(at: url, identity: identity) else { return .unreadable }
-        return sha256 == expectedSHA256 ? .unchanged(identity) : .changed
+        guard let fingerprint = try? readFingerprint(at: url, identity: identity) else { return .unreadable }
+        return fingerprint.sha256 == expectedSHA256 ? .unchanged(fingerprint.identity) : .changed
     }
 
-    private func readFingerprint(at url: URL, identity: FileSystemIdentity) throws -> String {
+    private func readFingerprint(
+        at url: URL, identity: FileSystemIdentity
+    ) throws -> (identity: FileSystemIdentity, sha256: String) {
         let fingerprint = try ProjectSource.fingerprintSnapshot(url)
-        guard fingerprint.identity == identity, readableIdentity(at: url) == identity else {
+        guard identity.matchesContentSnapshot(fingerprint.identity),
+              readableIdentity(at: url) == fingerprint.identity else {
             throw ProjectError.invalid("Quelle wurde während der Prüfung verändert.")
         }
         let key = url.standardizedFileURL
         entries.withLock { $0[key] = fingerprint }
-        return fingerprint.sha256
+        return fingerprint
     }
 
     private func readableIdentity(at url: URL) -> FileSystemIdentity? {

@@ -158,6 +158,13 @@ extension ConversionSession {
         try Task.checkCancellation()
         guard !isConverting else { throw ProjectError.invalid("Während einer Konvertierung kann kein Projekt geöffnet werden.") }
         let operation = UUID(); projectOperation = operation
+        let previousFiles = audioFiles
+        let previousMetadata = bookMetadata
+        let previousSettings = settings
+        let previousCoverImage = coverImage
+        let previousCoverPath = coverPath
+        let previousCoverData = embeddedCoverData
+        let previousCoverSuppressed = isCoverSuppressed
         let fingerprints = projectFingerprints
         let (project, files, bindings, issues, artwork) = try await performFileIO {
             let project = try AudiobookProject.read(from: url)
@@ -173,24 +180,19 @@ extension ConversionSession {
         guard projectOperation == operation else {
             throw ProjectError.invalid("Das Öffnen wurde durch eine andere Aktion unterbrochen; bitte erneut öffnen.")
         }
+        guard previousFiles == audioFiles, previousMetadata == bookMetadata, previousSettings == settings,
+              previousCoverImage === coverImage, previousCoverPath == coverPath, previousCoverData == embeddedCoverData,
+              previousCoverSuppressed == isCoverSuppressed else {
+            throw ProjectError.invalid("Das aktive Projekt wurde beim Öffnen bearbeitet. Bitte erneut öffnen.")
+        }
         try applyProject(project, from: url, files: files, bindings: bindings, issues: issues, artwork: artwork)
     }
 
     public func saveProjectAsync(to url: URL) async throws {
-        try await saveProjectAsync(to: url) { project, destination in
-            // Sonst könnte ein langsamer älterer Vorgang eine neuere Datei überschreiben.
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-                projectWriteQueue.async {
-                    continuation.resume(with: Result { try project.write(to: destination) })
-                }
-            }
-        }
+        try await saveProjectAsync(to: url, didEnqueue: {})
     }
 
-    func saveProjectAsync(
-        to url: URL,
-        writeProject: @Sendable (AudiobookProject, URL) async throws -> Void
-    ) async throws {
+    func saveProjectAsync(to url: URL, didEnqueue: () -> Void) async throws {
         try Task.checkCancellation()
         let operation = UUID(); projectOperation = operation
         let files = audioFiles
@@ -221,7 +223,14 @@ extension ConversionSession {
         defer {
             if projectSourcesBeingWritten?.operation == operation { projectSourcesBeingWritten = nil }
         }
-        try await writeProject(project, url)
+        // Die Warteschlange erhält den Auftrag noch auf dem Main Actor.
+        // So kann eine neuere Speicherung ihn nicht beim Einreihen überholen.
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            projectWriteQueue.async {
+                continuation.resume(with: Result { try project.write(to: url) })
+            }
+            didEnqueue()
+        }
         // Ein Import oder Öffnen darf den bereits geschriebenen Stand nicht an
         // seinen eigenen, inzwischen aktiven Zustand binden.
         guard projectOperation == operation else {

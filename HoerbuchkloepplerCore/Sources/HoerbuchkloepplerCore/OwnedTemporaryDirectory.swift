@@ -47,12 +47,10 @@ enum OwnedTemporaryDirectory {
     }
 
     static func ownerPID(_ url: URL) -> pid_t? {
-        let marker = url.appendingPathComponent(tempOwnerFilename)
-        guard let text = try? String(contentsOf: marker, encoding: .utf8),
-            let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
-            pid > 0
-        else { return nil }
-        return pid_t(pid)
+        let descriptor = FileSystemEntry.openDirectory(url)
+        guard descriptor >= 0 else { return nil }
+        defer { _ = Darwin.close(descriptor) }
+        return ownerPID(descriptor: descriptor)
     }
 
     static func ownerPID(
@@ -62,7 +60,7 @@ enum OwnedTemporaryDirectory {
             Darwin.openat(
                 descriptor,
                 $0,
-                O_RDONLY | O_CLOEXEC | O_NOFOLLOW
+                O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
             )
         }
         guard markerDescriptor >= 0 else { return nil }

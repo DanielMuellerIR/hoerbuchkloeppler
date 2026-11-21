@@ -121,6 +121,15 @@ struct SourceDiscoveryTests {
         #expect(folderSession.audioFiles.isEmpty)
         #expect(folderSession.lastImportFailures.first?.reason == .noAudioTrack)
         #expect(folderSession.importErrorMessage?.contains("vollständig verworfen") == true)
+
+        let valid = directory.appendingPathComponent("Gueltig", isDirectory: true)
+        try FileManager.default.createDirectory(at: valid, withIntermediateDirectories: false)
+        try writeSilentWAV(to: valid.appendingPathComponent("Kapitel.wav"))
+        await folderSession.prepareFolder(valid, analyzeArtwork: false)
+        #expect(folderSession.audioFiles.count == 1)
+        #expect(folderSession.lastImportFailures.isEmpty)
+        #expect(folderSession.importErrorMessage == nil)
+        #expect(!folderSession.showSelectionUI)
     }
 
     @Test("Kapitelcontainer und Bilder dürfen nur am Ziel eine Endung tragen")
@@ -180,7 +189,7 @@ struct SourceDiscoveryTests {
         }
         let session = ConversionSession(settings: AudioSettings())
 
-        await session.processIncomingFiles(files, skipCoverExtraction: true)
+        await session.importAnalyzedFiles(files, analyzeArtwork: false)
 
         #expect(session.audioFiles.map(\.chapterTitle) == [
             "CD1/01.mp3", "CD1/02.mp3", "CD2/01.mp3", "CD2/02.mp3"

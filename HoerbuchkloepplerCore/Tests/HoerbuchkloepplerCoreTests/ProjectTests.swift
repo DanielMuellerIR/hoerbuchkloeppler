@@ -149,7 +149,7 @@ struct ProjectTests {
         session.removeChapter(id: originalFirst.id)
         let newFirst = AudioFile(url: source, startTime: 0, duration: 2, chapterTitle: "Neues erstes Kapitel")
         let newSecond = AudioFile(url: source, startTime: 2, duration: 2, chapterTitle: "Neues zweites Kapitel")
-        await session.processIncomingFiles([newFirst, newSecond], skipCoverExtraction: true)
+        await session.importAnalyzedFiles([newFirst, newSecond], analyzeArtwork: false)
         #expect(session.audioFiles.map(\.id) == [originalSecond.id, newFirst.id])
         try await session.verifyProjectSources()
         #expect(session.projectSourceIssues.map(\.reason) == ["Quelle wurde verändert"])
@@ -366,6 +366,36 @@ struct ProjectTests {
         #expect(session.loadedProjectURL == nil)
     }
 
+    @Test("Bearbeitungen während des asynchronen Öffnens bleiben erhalten")
+    func editsDuringAsyncOpenKeepSession() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("Quelle.wav")
+        let url = root.appendingPathComponent("Buch.hkproject")
+        try Data(count: 64 * 1024 * 1024).write(to: source)
+        let saved = ConversionSession(settings: AudioSettings())
+        saved.audioFiles = [testAudioFile(source)]
+        saved.title = "Anderes Buch"
+        try saved.saveProject(to: url)
+        let session = ConversionSession(settings: AudioSettings())
+        session.audioFiles = [testAudioFile(source)]
+        session.title = "Aktuelles Buch"
+
+        let operation = session.projectOperation
+        let opening = Task { try await session.openProjectAsync(from: url) }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while session.projectOperation == operation, ContinuousClock.now < deadline { await Task.yield() }
+        if session.projectOperation == operation { opening.cancel() }
+        try #require(session.projectOperation != operation)
+        session.renameChapter(id: session.audioFiles[0].id, title: "Neuer Kapiteltitel")
+
+        await #expect { try await opening.value } throws: { error in
+            error.localizedDescription == "Das aktive Projekt wurde beim Öffnen bearbeitet. Bitte erneut öffnen."
+        }
+        #expect(session.title == "Aktuelles Buch")
+        #expect(session.audioFiles.map(\.chapterTitle) == ["Neuer Kapiteltitel"])
+        #expect(session.loadedProjectURL == nil)
+    }
+
     @Test("Teilen, Zusammenführen, Nummerieren und Undo/Redo erhalten Zeitabschnitte")
     func editing() {
         let source = URL(fileURLWithPath: "/tmp/source.wav")
@@ -506,7 +536,7 @@ struct ProjectTests {
         let files = ["B", "A", "D", "C"].map { AudioFile(url: URL(fileURLWithPath: "/tmp/\($0).wav"), startTime: 0, duration: 1, chapterTitle: $0) }
         session.audioFiles = Array(files.prefix(2))
         session.title = "Buch"; session.author = "Autor"
-        await session.processIncomingFiles(Array(files.suffix(2)), skipCoverExtraction: true)
+        await session.importAnalyzedFiles(Array(files.suffix(2)), analyzeArtwork: false)
         #expect(session.audioFiles.map(\.chapterTitle) == ["B", "A", "C", "D"])
         session.moveChapters(from: IndexSet(integer: 0), to: 4)
         #expect(session.audioFiles.map(\.chapterTitle) == ["A", "C", "D", "B"])
@@ -694,6 +724,24 @@ struct ProjectTests {
         #expect(!FileManager.default.fileExists(atPath: url.path))
     }
 
+    @Test("Eine neuere Speicherung am selben Ziel folgt dem eingereihten Schreibauftrag")
+    func newerSaveWinsAtSameDestination() async throws {
+        let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("Buch.hkproject")
+        let session = ConversionSession(settings: AudioSettings())
+        session.title = "Alt"
+        var newerSave: Task<Void, any Error>?
+
+        await #expect(throws: ProjectError.self) {
+            try await session.saveProjectAsync(to: url) {
+                session.title = "Neu"
+                newerSave = Task { try await session.saveProjectAsync(to: url) }
+            }
+        }
+        try await #require(newerSave).value
+        #expect(try AudiobookProject.read(from: url).metadata.title == "Neu")
+    }
+
     @Test("Bereits geschriebener Projektstand meldet spätere Änderungen", arguments: [false, true])
     func lateChangeAfterAsyncSave(reset: Bool) async throws {
         let root = try directory(); defer { try? FileManager.default.removeItem(at: root) }
@@ -707,12 +755,9 @@ struct ProjectTests {
             ? "Die Projektdatei wurde geschrieben. Eine andere Aktion hat inzwischen das aktive Projekt verändert."
             : "Die Projektdatei enthält den Stand vor den letzten Änderungen. Bitte erneut speichern."
         await #expect {
-            try await session.saveProjectAsync(to: url) { project, destination in
-                try project.write(to: destination)
-                await MainActor.run {
-                    if reset { session.resetSession() }
-                    else { session.renameChapter(id: session.audioFiles[0].id, title: "Neu") }
-                }
+            try await session.saveProjectAsync(to: url) {
+                if reset { session.resetSession() }
+                else { session.renameChapter(id: session.audioFiles[0].id, title: "Neu") }
             }
         } throws: { error in
             error.localizedDescription == expectedMessage
@@ -743,15 +788,12 @@ struct ProjectTests {
         session.audioFiles = [first, second]
         session.removeChapter(id: second.id)
         await #expect {
-            try await session.saveProjectAsync(to: url) { project, destination in
-                try project.write(to: destination)
-                await MainActor.run {
-                    if merge {
-                        session.undoChapterEdit()
-                        session.mergeChapterWithNext(id: first.id)
-                    } else {
-                        session.splitChapter(id: first.id, at: 1)
-                    }
+            try await session.saveProjectAsync(to: url) {
+                if merge {
+                    session.undoChapterEdit()
+                    session.mergeChapterWithNext(id: first.id)
+                } else {
+                    session.splitChapter(id: first.id, at: 1)
                 }
             }
         } throws: { error in

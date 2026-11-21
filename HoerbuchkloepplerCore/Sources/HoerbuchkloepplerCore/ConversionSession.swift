@@ -410,12 +410,16 @@ public final class ConversionSession: ObservableObject, Identifiable {
     /// Vollständiger CLI-Ordnerimport als abbrechbarer Vorbereitungstask.
     /// Bei explizitem Cover oder `--no-cover` spart `analyzeArtwork == false`
     /// die sonst wirkungslose Analyse eingebetteter und separater Bilder.
-    public nonisolated func prepareFolder(
+    public func prepareFolder(
         _ url: URL,
         analyzeArtwork: Bool = true
     ) async {
-        await runPreparationTask { @MainActor [weak self] in
-            await self?.addFolder(url, analyzeArtwork: analyzeArtwork)
+        let token = beginImport(expectedItemCount: 1, allowsSelectionUI: false,
+                                reusePreparation: true, resumeArtworkSearch: analyzeArtwork)
+        await runImportTask(token) {
+            let scanned = await self.scanFolder(url, importToken: token, analyzeArtwork: analyzeArtwork)
+            self.stageScannedFolder(scanned, importToken: token)
+            await self.finishImport(token)
         }
     }
 
@@ -870,7 +874,8 @@ public final class ConversionSession: ObservableObject, Identifiable {
     private func beginImport(
         expectedItemCount: Int,
         allowsSelectionUI: Bool,
-        reusePreparation: Bool
+        reusePreparation: Bool,
+        resumeArtworkSearch: Bool = true
     ) -> ImportToken {
         projectOperation = UUID()
         importService.retainCachedArtwork(for: audioFiles.map(\.url))
@@ -883,7 +888,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
         importGeneration = UUID()
         let batch = PendingImportBatch(
             expectedItemCount: expectedItemCount,
-            shouldResumeArtworkSearch: pendingImport?.shouldResumeArtworkSearch == true || isPreparingArtwork
+            shouldResumeArtworkSearch: resumeArtworkSearch && (pendingImport?.shouldResumeArtworkSearch == true || isPreparingArtwork)
         )
         pendingImport = batch
         importCompletedItems = 0
@@ -1013,15 +1018,16 @@ public final class ConversionSession: ObservableObject, Identifiable {
         await finishImport(token, completed: results.count, countingProgress: false, fileOrder: fileOrder)
     }
 
-    func finishImport(_ token: ImportToken, countingProgress: Bool = true) async {
-        await finishImport(token, completed: 1, countingProgress: countingProgress)
+    func finishImport(_ token: ImportToken, countingProgress: Bool = true, analyzeArtwork: Bool = true) async {
+        await finishImport(token, completed: 1, countingProgress: countingProgress, analyzeArtwork: analyzeArtwork)
     }
 
     private func finishImport(
         _ token: ImportToken,
         completed: Int,
         countingProgress: Bool,
-        fileOrder: [URL: Int]? = nil
+        fileOrder: [URL: Int]? = nil,
+        analyzeArtwork: Bool = true
     ) async {
         guard hasPendingImport(token), completed > 0,
               let remaining = pendingImport?.remainingItems, completed <= remaining else { return }
@@ -1059,7 +1065,7 @@ public final class ConversionSession: ObservableObject, Identifiable {
             warnings: batch.warnings,
             importToken: token,
             sourceFolderForCLI: batch.sourceFolder,
-            skipCoverExtraction: !batch.requiresArtworkSearch,
+            skipCoverExtraction: !analyzeArtwork || !batch.requiresArtworkSearch,
             fileOrder: fileOrder
         ) ?? audioFiles.first
         if batch.shouldResumeArtworkSearch && !isPreparingArtwork { startArtworkSearch() }
@@ -1181,21 +1187,6 @@ public final class ConversionSession: ObservableObject, Identifiable {
         return cliSourceFolderURL
     }
     
-    func processIncomingFiles(
-        _ newFiles: [AudioFile],
-        skipCoverExtraction: Bool = false,
-        importToken: ImportToken? = nil,
-        sourceFolderForCLI: URL? = nil
-    ) async {
-        guard importToken.map(isCurrentImport) ?? true else { return }
-        if let first = commitAudioFiles(newFiles, sourceFolderForCLI: sourceFolderForCLI) {
-            if !skipCoverExtraction { startArtworkSearch(importToken: importToken) }
-            if importToken == nil, bookMetadataIncomplete {
-                await importGlobalMetadata(from: first, importToken: nil)
-            }
-        }
-    }
-
     private func commitAudioFiles(
         _ newFiles: [AudioFile],
         sourceFolderForCLI: URL?,
@@ -1540,43 +1531,6 @@ public final class ConversionSession: ObservableObject, Identifiable {
         pendingImport?.stage(scanned)
     }
 
-    /// Leichter Teil: das Scan-Ergebnis in den Main-Actor-isolierten
-    /// `@Published`-State übernehmen.
-    func applyScannedFolder(
-        _ scanned: ScannedFolder,
-        importToken: ImportToken? = nil
-    ) async {
-        if Task.isCancelled { return }
-        if let importToken, !isCurrentImport(importToken) { return }
-        guard !scanned.wasCancelled else { return }
-        guard scanned.failures.isEmpty else {
-            scanned.warnings.forEach { addLog($0) }
-            scanned.failures.forEach { addLog($0.logMessage, type: .error) }
-            lastImportFailures = scanned.failures
-            importErrorMessage = Self.importFailureMessage(scanned.failures)
-            return
-        }
-        let generation = importGeneration
-        let revision = importToken?.coverRevision ?? coverRevision
-        let artwork = await prepareImportArtwork(
-            embedded: scanned.embeddedArtwork, imageURLs: scanned.imageURLs,
-            coverRevision: revision
-        )
-        guard generation == importGeneration, !preparationCancellationRequested() else { return }
-        let first = applyScannedFolderContents(
-            audioFiles: scanned.audioFiles,
-            artwork: artwork,
-            expectedCoverRevision: revision,
-            warnings: scanned.warnings,
-            importToken: importToken,
-            sourceFolderForCLI: scanned.folderURL,
-            skipCoverExtraction: true
-        )
-        if importToken == nil, bookMetadataIncomplete, let first {
-            await importGlobalMetadata(from: first, importToken: nil)
-        }
-    }
-
     private func prepareImportArtwork(
         embedded: Data?, imageURLs: [URL], coverRevision revision: UInt
     ) async -> PreparedImportArtwork {
@@ -1613,14 +1567,6 @@ public final class ConversionSession: ObservableObject, Identifiable {
             applyCover(cover)
         }
         return first
-    }
-
-    /// Vollständiger Ordner-Import für die CLI: Audioanalyse außerhalb des Main
-    /// Actors, anschließend Übernahme und Metadatenauflösung auf Main.
-    private func addFolder(_ url: URL, analyzeArtwork: Bool = true) async {
-        let scanned = await scanFolder(url, analyzeArtwork: analyzeArtwork)
-        guard !preparationCancellationRequested() else { return }
-        await applyScannedFolder(scanned)
     }
 
     public struct PreparedCover: Sendable {

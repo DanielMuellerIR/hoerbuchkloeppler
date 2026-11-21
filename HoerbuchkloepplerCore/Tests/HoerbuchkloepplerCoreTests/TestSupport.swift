@@ -79,3 +79,19 @@ final class ThreadSafeLogProbe: @unchecked Sendable {
         return messages
     }
 }
+
+extension ConversionSession {
+    @MainActor
+    func importAnalyzedFiles(_ files: [AudioFile], analyzeArtwork: Bool = true) async {
+        let token = beginImport()
+        stageAudioLoadResult(.success(files: files, warnings: []), importToken: token)
+        await finishImport(token, analyzeArtwork: analyzeArtwork)
+    }
+
+    @MainActor
+    func importScannedFolder(_ folder: ScannedFolder) async {
+        let token = beginImport()
+        stageScannedFolder(folder, importToken: token)
+        await finishImport(token)
+    }
+}

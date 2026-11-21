@@ -230,22 +230,36 @@ public struct ProjectSource: Codable, Sendable {
     }
 
     static func fingerprintSnapshot(_ url: URL) throws -> (identity: FileSystemIdentity, sha256: String) {
-        let (handle, identity) = try openRegularFile(url, label: "Quelle")
+        let (handle, initialIdentity) = try openRegularFile(url, label: "Quelle")
         defer { try? handle.close() }
-        var digest = SHA256()
-        var remaining = identity.size
-        while remaining > 0 {
+        var identity = initialIdentity
+        let changed = ProjectError.invalid("Quelle wurde während der Prüfung verändert: \(url.lastPathComponent)")
+        for attempt in 0..<2 {
             try Task.checkCancellation()
-            guard let data = try handle.read(upToCount: Int(min(1024 * 1024, remaining))), !data.isEmpty else { break }
-            digest.update(data: data)
-            remaining -= off_t(data.count)
+            var digest = SHA256()
+            var remaining = identity.size
+            while remaining > 0 {
+                try Task.checkCancellation()
+                guard let data = try handle.read(upToCount: Int(min(1024 * 1024, remaining))), !data.isEmpty else {
+                    throw changed
+                }
+                digest.update(data: data)
+                remaining -= off_t(data.count)
+            }
+            var status = stat()
+            guard fstat(handle.fileDescriptor, &status) == 0 else { throw changed }
+            let current = FileSystemIdentity(stat: status)
+            if identity == current {
+                return (identity, digest.finalize().map { String(format: "%02x", $0) }.joined())
+            }
+            // Finder-Attribute und Moduswechsel ändern die Statuszeit. Den
+            // ersten Hash verwerfen und nur eine vollständig stabile Lesung
+            // übernehmen, auch wenn sich der Inhalt scheinbar nicht änderte.
+            guard attempt == 0, identity.matchesContentSnapshot(current) else { throw changed }
+            try handle.seek(toOffset: 0)
+            identity = current
         }
-        var after = stat()
-        guard remaining == 0, fstat(handle.fileDescriptor, &after) == 0,
-              identity == FileSystemIdentity(stat: after) else {
-            throw ProjectError.invalid("Quelle wurde während der Prüfung verändert: \(url.lastPathComponent)")
-        }
-        return (identity, digest.finalize().map { String(format: "%02x", $0) }.joined())
+        throw changed
     }
 }
 

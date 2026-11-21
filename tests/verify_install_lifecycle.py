@@ -102,6 +102,17 @@ elif name in ("codesign", "spctl", "ffmpeg", "mediainfo"):
         backup.rename(saved)
         shutil.copytree(saved, backup)
         (backup / "version.txt").write_text("foreign-backup")
+    if name == "codesign" and step == "destination" and race == "parallel_install":
+        second_env = dict(os.environ, HK_INSTALL_LOG=os.environ["HK_INSTALL_LOG"] + ".second")
+        second_env.pop("HK_INSTALL_REPLACE_STEP")
+        second_env.pop("INSTALL_TARGET")
+        second = subprocess.run(["bash", "./install.sh"], env=second_env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=45)
+        assert second.returncode != 0 and "läuft bereits" in second.stderr, (second.stdout, second.stderr)
+        calls = [json.loads(line) for line in Path(second_env["HK_INSTALL_LOG"]).read_text().splitlines()]
+        assert not any(call["tool"] == "build.sh" for call in calls), calls
+        print("Parallelstart blieb vor dem Build gesperrt.", file=sys.stderr)
+        sys.exit(27)
     if name == "codesign" and step == "destination" and os.environ.get("HK_INSTALL_REPLACE_STEP") == "destination":
         replace_destination()
         sys.exit(27)
@@ -290,8 +301,14 @@ def main():
             name = race + ("_existing" if existing else "_first")
             result, calls, version, _ = run_case(root, executable, name, existing=existing, race=race)
             assert result.returncode != 0 and version == expected, (name, version, result.stdout, result.stderr)
-            assert [call["tool"] for call in calls] == ["xcrun", "git", "swift", "swift"], (name, calls)
-            assert calls[0]["args"][:2] == ["notarytool", "history"], (name, calls)
+            lifecycle = [
+                call for call in calls
+                if not (call["tool"] == "codesign" and Path(call["args"][-1]).name == "install-bundle")
+            ]
+            assert [call["tool"] for call in lifecycle] == ["xcrun", "git", "swift", "swift"], (name, calls)
+            assert lifecycle[0]["args"][:2] == ["notarytool", "history"], (name, calls)
+            assert lifecycle[2]["args"][-2:] == ["--product", "install-bundle"], (name, calls)
+            assert lifecycle[3]["args"][-1:] == ["--show-bin-path"], (name, calls)
             assert "wurde inzwischen verändert" in result.stderr, (name, result.stderr)
             print("PASS:", name, "Änderung während des Helfer-Builds vor App-Build erkannt")
         for name, existing in [("first_install", False), ("replacement", True)]:
@@ -321,6 +338,12 @@ def main():
             if name in ("source_rejected", "runtime_rejected"):
                 assert not any(call["tool"] == "pgrep" for call in calls), name
             print("PASS:", name, "vorheriger Zustand erhalten, keine Staging-/Backupreste")
+
+        result, _, version, _ = run_case(root, executable, "parallel_install", race="parallel_install")
+        assert result.returncode != 0 and version == "1.0", (version, result.stdout, result.stderr)
+        assert "Parallelstart blieb vor dem Build gesperrt" in result.stderr, result.stderr
+        assert "zurückgerollt" in result.stderr, result.stderr
+        print("PASS: parallel gestarteter Installer übernimmt kein ungeprüftes Bundle")
 
         for name, arguments in [("no_install", ["--no-install"]), ("no_notarize", ["--no-notarize"])]:
             result, calls, version, alive = run_case(root, executable, name, arguments=arguments, processes=True)

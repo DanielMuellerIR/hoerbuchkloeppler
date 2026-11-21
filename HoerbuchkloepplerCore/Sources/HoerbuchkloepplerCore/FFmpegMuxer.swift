@@ -9,8 +9,8 @@ enum FFmpegMuxer {
         session: ConversionSession,
         runID: UUID
     ) -> Bool {
-        let metaContent = FFMetadata.encodeChapters(group: group)
         do {
+            let metaContent = try FFMetadata.encodeChapters(group: group)
             try FFmpegWrapper.writeConcatList(segments, to: listFile)
             try metaContent.write(to: metaFile, atomically: true, encoding: .utf8)
             return true

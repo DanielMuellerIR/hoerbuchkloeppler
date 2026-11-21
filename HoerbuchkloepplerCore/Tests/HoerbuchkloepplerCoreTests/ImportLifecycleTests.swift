@@ -23,7 +23,8 @@ struct ImportLifecycleTests {
             embeddedArtwork: nil
         )
 
-        await session.applyScannedFolder(scanned, importToken: staleToken)
+        session.stageScannedFolder(scanned, importToken: staleToken)
+        await session.finishImport(staleToken)
         #expect(session.audioFiles.isEmpty)
     }
 
@@ -117,22 +118,14 @@ struct ImportLifecycleTests {
             AudioFile(foundFile: linkedFile, startTime: 1, duration: 1, chapterTitle: "Link 2")
         ]
 
-        await session.processIncomingFiles(
-            directChapters,
-            skipCoverExtraction: true,
-            importToken: token
-        )
+        session.stageAudioLoadResult(.success(files: directChapters, warnings: []), importToken: token)
         await session.finishImport(token)
-        await session.processIncomingFiles(
-            linkedChapters,
-            skipCoverExtraction: true,
-            importToken: token
-        )
+        session.stageAudioLoadResult(.success(files: linkedChapters, warnings: []), importToken: token)
         await session.finishImport(token)
 
         #expect(session.audioFiles.map(\.chapterTitle) == ["Link 1", "Link 2"])
         #expect(session.audioFiles.allSatisfy { $0.sourceURL == link })
-        #expect(session.eventLogs.contains { $0.message.contains("1 Audiodatei mit 2 Kapiteln") })
+        #expect(session.eventLogs.contains { $0.message.contains("2 Audiodateien mit 4 Kapiteln") })
         #expect(session.eventLogs.contains { $0.message.contains("lesen dieselbe Audiodatei") })
     }
 
@@ -150,7 +143,7 @@ struct ImportLifecycleTests {
             chapterTitle: "Eins"
         )
 
-        await session.processIncomingFiles([file, file], skipCoverExtraction: true)
+        await session.importAnalyzedFiles([file, file], analyzeArtwork: false)
 
         #expect(session.audioFiles.count == 1)
         #expect(session.eventLogs.contains {
@@ -186,7 +179,7 @@ struct ImportLifecycleTests {
             duration: 1,
             chapterTitle: "Vorher"
         )
-        await session.processIncomingFiles([existing], skipCoverExtraction: true)
+        await session.importAnalyzedFiles([existing], analyzeArtwork: false)
 
         let token = session.beginImport(expectedItemCount: 2)
         let staged = AudioFile(
@@ -261,7 +254,7 @@ struct ImportLifecycleTests {
             duration: 1,
             chapterTitle: "Kapitel"
         )
-        await session.applyScannedFolder(.init(
+        await session.importScannedFolder(.init(
             folderURL: folder,
             audioFiles: [existing],
             imageURLs: [],
@@ -356,7 +349,7 @@ struct ImportLifecycleTests {
         let session = ConversionSession(settings: AudioSettings())
         session.logSink = { _ in }
 
-        await session.applyScannedFolder(.init(
+        await session.importScannedFolder(.init(
             folderURL: URL(fileURLWithPath: "/tmp/Buch"),
             audioFiles: [],
             imageURLs: [],
@@ -382,11 +375,7 @@ struct ImportLifecycleTests {
             chapterTitle: "Fehlt"
         )
 
-        await session.processIncomingFiles(
-            [missing],
-            skipCoverExtraction: true,
-            importToken: token
-        )
+        session.stageAudioLoadResult(.success(files: [missing], warnings: []), importToken: token)
         await session.finishImport(token)
 
         #expect(session.titleCandidates.isEmpty)
@@ -406,11 +395,7 @@ struct ImportLifecycleTests {
             chapterTitle: "Fehlt"
         )
 
-        await session.processIncomingFiles(
-            [missing],
-            skipCoverExtraction: true,
-            importToken: token
-        )
+        session.stageAudioLoadResult(.success(files: [missing], warnings: []), importToken: token)
         await session.finishImport(token)
 
         #expect(!session.showSelectionUI)
@@ -432,11 +417,7 @@ struct ImportLifecycleTests {
             chapterTitle: "Fest"
         )
 
-        await session.processIncomingFiles(
-            [file],
-            skipCoverExtraction: true,
-            importToken: token
-        )
+        session.stageAudioLoadResult(.success(files: [file], warnings: []), importToken: token)
         await session.finishImport(token)
 
         #expect(session.titleCandidates.isEmpty)
@@ -454,11 +435,11 @@ struct ImportLifecycleTests {
             duration: 1,
             chapterTitle: "Kapitel"
         )
-        await session.processIncomingFiles([file], skipCoverExtraction: true, importToken: token)
+        session.audioFiles = [file]
         #expect(session.isImporting)
 
         session.removeAllChapters()
-        await session.applyScannedFolder(.init(
+        session.stageScannedFolder(.init(
             folderURL: URL(fileURLWithPath: "/tmp/veraltet"),
             audioFiles: [file],
             imageURLs: [],
@@ -499,7 +480,7 @@ struct ImportLifecycleTests {
     func emptyProviderDoesNotInvalidateDrop() async {
         let session = ConversionSession(settings: AudioSettings())
         let token = session.beginImport(expectedItemCount: 2)
-        await session.processIncomingFiles([], skipCoverExtraction: true, importToken: token)
+        session.stageAudioLoadResult(.success(files: [], warnings: []), importToken: token)
         await session.finishImport(token)
 
         let file = AudioFile(
@@ -508,7 +489,7 @@ struct ImportLifecycleTests {
             duration: 1,
             chapterTitle: "Gültig"
         )
-        await session.processIncomingFiles([file], skipCoverExtraction: true, importToken: token)
+        session.stageAudioLoadResult(.success(files: [file], warnings: []), importToken: token)
         await session.finishImport(token)
 
         #expect(session.audioFiles.map(\.id) == [file.id])
@@ -518,7 +499,7 @@ struct ImportLifecycleTests {
     func suppressedCoverStaysRemoved() async {
         let session = ConversionSession(settings: AudioSettings())
         session.removeCover()
-        await session.applyScannedFolder(.init(
+        await session.importScannedFolder(.init(
             folderURL: URL(fileURLWithPath: "/tmp/Buch"),
             audioFiles: [],
             imageURLs: [URL(fileURLWithPath: "/tmp/folder.jpg")],

@@ -127,212 +127,220 @@ if [ -z "$SIGN_IDENTITY" ]; then
 fi
 log "Signatur-Identität: $SIGN_IDENTITY"
 
+run_installation() {
+  set -euo pipefail
+  source "./script-helpers.sh"
+
+  # ── 1. Release-Build (baut Core/CLI/App; App landet ad-hoc im Projekt-Root) ──
+  ./build.sh
+  APP="./${APP_NAME}.app"
+  [ -d "$APP" ] || { echo "✗ Build-Ergebnis fehlt: $APP" >&2; exit 1; }
+  APP_EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist" 2>/dev/null || true)"
+  case "$APP_EXECUTABLE_NAME" in
+    ""|*/*) echo "✗ Build-Ergebnis enthält keinen sicheren CFBundleExecutable-Namen." >&2; exit 1 ;;
+  esac
+
+  # ── 2. Mit Developer ID + Hardened Runtime signieren (innen→außen) ───────────
+  log "Signiere Bundle mit Developer ID + Hardened Runtime (eingebettete Programme → App)…"
+  ./sign-bundle.sh "$APP" "$SIGN_IDENTITY"
+
+  # ── 3. Notarisieren (optional): als ZIP hochladen, --wait blockt bis fertig ──
+  if [ "$NOTARIZE" -eq 1 ]; then
+    log "Notarisiere via Profil '$NOTARY_PROFILE' (wartet auf Apple, ~1–10 Min)…"
+    notarize_app() (
+      set -euo pipefail
+      local temp_dir zip
+      temp_dir="$(mktemp -d)"
+      zip="$temp_dir/${APP_NAME}.zip"
+      trap 'rm -rf "$temp_dir"' EXIT
+      ditto -c -k --keepParent "$APP" "$zip"
+      xcrun notarytool submit "$zip" --keychain-profile "$NOTARY_PROFILE" --wait
+    )
+    notarize_app
+    # Ticket ans Bundle heften → validiert auch OFFLINE (ohne Netz).
+    log "Hefte Notarisierungs-Ticket ans Bundle…"
+    xcrun stapler staple "$APP"
+    xcrun stapler validate "$APP"
+  else
+    log "⚠ --no-notarize: nur Developer-ID-signierter Test-Build (kein Notary-Ticket)."
+  fi
+
+  # Die Signatur des Build-Artefakts immer prüfen. Ohne Notarisierung endet der
+  # Schnellpfad HIER: Er darf weder eine laufende App beenden noch unter
+  # /Applications löschen oder kopieren.
+  codesign --verify --deep --strict "$APP"
+  if [ "$NOTARIZE" -eq 0 ]; then
+    VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" 2>/dev/null || echo "?")"
+    echo
+    echo "TEST BUILD OK: $APP ($VERSION) — nicht installiert"
+    exit 0
+  fi
+
+  # Gatekeeper muss das tatsächlich zu installierende Quell-Bundle akzeptieren,
+  # bevor der Installationspfad irgendeine Mutation unter /Applications ausführt.
+  log "Prüfe Notarisierung und Gatekeeper-Freigabe des Build-Artefakts…"
+  xcrun stapler validate "$APP"
+  spctl --assess --type execute -vv "$APP" 2>&1 | sed 's/^/    /'
+
+  # Vor jeder Mutation unter /Applications beide tatsächlich eingebetteten
+  # Laufzeitprogramme starten. Ein bloß vorhandenes oder signiertes Binary kann
+  # trotzdem durch eine falsche Architektur oder beschädigte Payload unbrauchbar
+  # sein.
+  RESOURCE_BIN="$APP/Contents/Resources/HoerbuchkloepplerCore_HoerbuchkloepplerCore.bundle/Contents/Resources/bin"
+  APP_FFMPEG="$RESOURCE_BIN/ffmpeg"
+  APP_MEDIAINFO="$RESOURCE_BIN/mediainfo"
+  [ -x "$APP_FFMPEG" ] || { echo "✗ Gebündeltes ffmpeg fehlt oder ist nicht ausführbar." >&2; exit 1; }
+  [ -x "$APP_MEDIAINFO" ] || { echo "✗ Gebündeltes mediainfo fehlt oder ist nicht ausführbar." >&2; exit 1; }
+  "$APP_FFMPEG" -version >/dev/null 2>&1 \
+    || { echo "✗ Gebündeltes ffmpeg startet im Build-Artefakt nicht." >&2; exit 1; }
+  "$APP_MEDIAINFO" --Version >/dev/null 2>&1 \
+    || { echo "✗ Gebündeltes mediainfo startet im Build-Artefakt nicht." >&2; exit 1; }
+  log "Gebündelte Laufzeitprogramme im Build-Artefakt sind ausführbar."
+
+  # Ausstieg für release.sh: notarisiert, aber /Applications bleibt unberührt.
+  if [ "$INSTALL" -eq 0 ]; then
+    VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" 2>/dev/null || echo "?")"
+    echo
+    echo "BUILD OK: $APP ($VERSION) — notarisiert, nicht installiert"
+    exit 0
+  fi
+
+  # ── 4. Nach /Applications installieren (laufende Ziel-Instanz vorher beenden) ─
+  install_target() {
+    "$INSTALL_TOOL" "$INSTALL_TARGET" "$@"
+  }
+  install_target require-original
+
+  # Nur Prozesse des tatsächlich zu ersetzenden Bundles beenden. Ein pauschales
+  # `pkill -x` träfe auch einen Test-Build aus diesem oder einem anderen Worktree.
+  DEST_EXECUTABLE_NAME="$APP_EXECUTABLE_NAME"
+  if [ -f "$DEST/Contents/Info.plist" ]; then
+    installed_executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$DEST/Contents/Info.plist" 2>/dev/null || true)"
+    case "$installed_executable_name" in
+      ""|*/*) ;;
+      *) DEST_EXECUTABLE_NAME="$installed_executable_name" ;;
+    esac
+  fi
+  DEST_EXECUTABLE=""
+  if [ -d "$DEST/Contents/MacOS" ]; then
+    DEST_EXECUTABLE_DIR="$(cd "$DEST/Contents/MacOS" && pwd -P)"
+    DEST_EXECUTABLE="$DEST_EXECUTABLE_DIR/$DEST_EXECUTABLE_NAME"
+  fi
+  destination_pids=()
+  destination_identities=()
+  process_is_original_destination() {
+    hoerbuchkloeppler_process_matches_snapshot "$1" "$2" "$DEST_EXECUTABLE"
+  }
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    process_snapshot="$(hoerbuchkloeppler_process_snapshot "$pid")"
+    if hoerbuchkloeppler_snapshot_targets_executable "$process_snapshot" "$DEST_EXECUTABLE"; then
+        destination_pids+=("$pid")
+        destination_identities+=("$process_snapshot")
+    fi
+  done < <(pgrep -x "$DEST_EXECUTABLE_NAME" 2>/dev/null || true)
+  if [ "${#destination_pids[@]}" -gt 0 ]; then
+    log "Beende laufende ${APP_NAME}-Instanz aus $DEST"
+    for index in "${!destination_pids[@]}"; do
+      pid="${destination_pids[$index]}"
+      if process_is_original_destination "$pid" "${destination_identities[$index]}"; then
+        kill "$pid" 2>/dev/null || true
+      fi
+    done
+    for _ in {1..50}; do
+      still_running=0
+      for index in "${!destination_pids[@]}"; do
+        pid="${destination_pids[$index]}"
+        if process_is_original_destination "$pid" "${destination_identities[$index]}"; then
+          still_running=1; break
+        fi
+      done
+      [ "$still_running" -eq 0 ] && break
+      sleep 0.1
+    done
+    for index in "${!destination_pids[@]}"; do
+      pid="${destination_pids[$index]}"
+      if process_is_original_destination "$pid" "${destination_identities[$index]}"; then
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+    done
+    for _ in {1..20}; do
+      still_running=0
+      for index in "${!destination_pids[@]}"; do
+        pid="${destination_pids[$index]}"
+        if process_is_original_destination "$pid" "${destination_identities[$index]}"; then
+          still_running=1; break
+        fi
+      done
+      [ "$still_running" -eq 0 ] && break
+      sleep 0.1
+    done
+    [ "$still_running" -eq 0 ] \
+      || { echo "✗ Laufende Ziel-App konnte nicht beendet werden: $DEST" >&2; exit 1; }
+  fi
+  STAGED="$(install_target staging-path)"
+  STAGED_IDENTITY=""
+  REPLACE_STARTED=0
+
+  rollback_install() {
+    local status="$?"
+    trap - EXIT
+    if [ -n "$STAGED_IDENTITY" ]; then
+      if [ "$REPLACE_STARTED" -eq 1 ]; then
+        install_target rollback "$STAGED_IDENTITY" || true
+      fi
+      install_target discard "$STAGED_IDENTITY" \
+        || echo "⚠ Staging konnte nicht eindeutig zugeordnet werden und bleibt erhalten: $STAGED" >&2
+    fi
+    exit "$status"
+  }
+  trap rollback_install EXIT
+  STAGED_IDENTITY="$(install_target stage)"
+  ditto "$APP" "$STAGED"
+
+  # Die tatsächlich kopierte Staging-App vollständig prüfen. Nur so kann ein
+  # Kopierfehler nicht erst auffallen, nachdem die vorige Installation ersetzt ist.
+  codesign --verify --deep --strict "$STAGED"
+  xcrun stapler validate "$STAGED"
+  spctl --assess --type execute -vv "$STAGED" 2>&1 | sed 's/^/    /'
+  STAGED_RESOURCE_BIN="$STAGED/Contents/Resources/HoerbuchkloepplerCore_HoerbuchkloepplerCore.bundle/Contents/Resources/bin"
+  "$STAGED_RESOURCE_BIN/ffmpeg" -version >/dev/null 2>&1 \
+    || { echo "✗ Gebündeltes ffmpeg startet im Staging-Bundle nicht." >&2; exit 1; }
+  "$STAGED_RESOURCE_BIN/mediainfo" --Version >/dev/null 2>&1 \
+    || { echo "✗ Gebündeltes mediainfo startet im Staging-Bundle nicht." >&2; exit 1; }
+
+  REPLACE_STARTED=1
+  install_target replace "$STAGED_IDENTITY"
+
+  # ── 5. Signatur, Ticket, Gatekeeper und Laufzeitprogramme am Ziel prüfen ────
+  codesign --verify --deep --strict "$DEST"
+  xcrun stapler validate "$DEST"
+  # spctl bewertet zusätzlich die Gatekeeper-Freigabe der installierten Kopie.
+  spctl --assess --type execute -vv "$DEST" 2>&1 | sed 's/^/    /'
+  DEST_RESOURCE_BIN="$DEST/Contents/Resources/HoerbuchkloepplerCore_HoerbuchkloepplerCore.bundle/Contents/Resources/bin"
+  "$DEST_RESOURCE_BIN/ffmpeg" -version >/dev/null 2>&1 \
+    || { echo "✗ Gebündeltes ffmpeg startet nach der Installation nicht." >&2; exit 1; }
+  "$DEST_RESOURCE_BIN/mediainfo" --Version >/dev/null 2>&1 \
+    || { echo "✗ Gebündeltes mediainfo startet nach der Installation nicht." >&2; exit 1; }
+  log "Gebündelte Laufzeitprogramme im installierten Bundle sind ausführbar."
+
+  # Erst nach allen Zielprüfungen ist das alte Bundle entbehrlich.
+  install_target require-installed "$STAGED_IDENTITY"
+  trap - EXIT
+  install_target cleanup "$STAGED_IDENTITY"
+
+  VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/Contents/Info.plist" 2>/dev/null || echo "?")"
+  echo
+  echo "INSTALL OK: $DEST ($VERSION)"
+}
+
 if [ "$INSTALL" -eq 1 ] && [ "$NOTARIZE" -eq 1 ]; then
   INSTALL_PACKAGE="./tools/InstallBundle"
   swift build --package-path "$INSTALL_PACKAGE" --product install-bundle >&2
   INSTALL_TOOL="$(swift build --package-path "$INSTALL_PACKAGE" --show-bin-path)/install-bundle"
-  INSTALL_TARGET="$("$INSTALL_TOOL" snapshot "$DEST_PARENT" "$DEST_BASENAME" "$$" \
-    "${INITIAL_PARENT#Directory:}" "${INITIAL_DEST#Directory:}")"
+  export APP_NAME DEST INSTALL NOTARIZE SIGN_IDENTITY NOTARY_PROFILE INSTALL_TOOL
+  export -f log run_installation
+  exec "$INSTALL_TOOL" run-locked "$DEST_PARENT" "$DEST_BASENAME" "$$" \
+    "${INITIAL_PARENT#Directory:}" "${INITIAL_DEST#Directory:}"
 fi
-
-# ── 1. Release-Build (baut Core/CLI/App; App landet ad-hoc im Projekt-Root) ──
-./build.sh
-APP="./${APP_NAME}.app"
-[ -d "$APP" ] || { echo "✗ Build-Ergebnis fehlt: $APP" >&2; exit 1; }
-APP_EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist" 2>/dev/null || true)"
-case "$APP_EXECUTABLE_NAME" in
-  ""|*/*) echo "✗ Build-Ergebnis enthält keinen sicheren CFBundleExecutable-Namen." >&2; exit 1 ;;
-esac
-
-# ── 2. Mit Developer ID + Hardened Runtime signieren (innen→außen) ───────────
-log "Signiere Bundle mit Developer ID + Hardened Runtime (eingebettete Programme → App)…"
-./sign-bundle.sh "$APP" "$SIGN_IDENTITY"
-
-# ── 3. Notarisieren (optional): als ZIP hochladen, --wait blockt bis fertig ──
-if [ "$NOTARIZE" -eq 1 ]; then
-  log "Notarisiere via Profil '$NOTARY_PROFILE' (wartet auf Apple, ~1–10 Min)…"
-  notarize_app() (
-    set -euo pipefail
-    local temp_dir zip
-    temp_dir="$(mktemp -d)"
-    zip="$temp_dir/${APP_NAME}.zip"
-    trap 'rm -rf "$temp_dir"' EXIT
-    ditto -c -k --keepParent "$APP" "$zip"
-    xcrun notarytool submit "$zip" --keychain-profile "$NOTARY_PROFILE" --wait
-  )
-  notarize_app
-  # Ticket ans Bundle heften → validiert auch OFFLINE (ohne Netz).
-  log "Hefte Notarisierungs-Ticket ans Bundle…"
-  xcrun stapler staple "$APP"
-  xcrun stapler validate "$APP"
-else
-  log "⚠ --no-notarize: nur Developer-ID-signierter Test-Build (kein Notary-Ticket)."
-fi
-
-# Die Signatur des Build-Artefakts immer prüfen. Ohne Notarisierung endet der
-# Schnellpfad HIER: Er darf weder eine laufende App beenden noch unter
-# /Applications löschen oder kopieren.
-codesign --verify --deep --strict "$APP"
-if [ "$NOTARIZE" -eq 0 ]; then
-  VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" 2>/dev/null || echo "?")"
-  echo
-  echo "TEST BUILD OK: $APP ($VERSION) — nicht installiert"
-  exit 0
-fi
-
-# Gatekeeper muss das tatsächlich zu installierende Quell-Bundle akzeptieren,
-# bevor der Installationspfad irgendeine Mutation unter /Applications ausführt.
-log "Prüfe Notarisierung und Gatekeeper-Freigabe des Build-Artefakts…"
-xcrun stapler validate "$APP"
-spctl --assess --type execute -vv "$APP" 2>&1 | sed 's/^/    /'
-
-# Vor jeder Mutation unter /Applications beide tatsächlich eingebetteten
-# Laufzeitprogramme starten. Ein bloß vorhandenes oder signiertes Binary kann
-# trotzdem durch eine falsche Architektur oder beschädigte Payload unbrauchbar
-# sein.
-RESOURCE_BIN="$APP/Contents/Resources/HoerbuchkloepplerCore_HoerbuchkloepplerCore.bundle/Contents/Resources/bin"
-APP_FFMPEG="$RESOURCE_BIN/ffmpeg"
-APP_MEDIAINFO="$RESOURCE_BIN/mediainfo"
-[ -x "$APP_FFMPEG" ] || { echo "✗ Gebündeltes ffmpeg fehlt oder ist nicht ausführbar." >&2; exit 1; }
-[ -x "$APP_MEDIAINFO" ] || { echo "✗ Gebündeltes mediainfo fehlt oder ist nicht ausführbar." >&2; exit 1; }
-"$APP_FFMPEG" -version >/dev/null 2>&1 \
-  || { echo "✗ Gebündeltes ffmpeg startet im Build-Artefakt nicht." >&2; exit 1; }
-"$APP_MEDIAINFO" --Version >/dev/null 2>&1 \
-  || { echo "✗ Gebündeltes mediainfo startet im Build-Artefakt nicht." >&2; exit 1; }
-log "Gebündelte Laufzeitprogramme im Build-Artefakt sind ausführbar."
-
-# Ausstieg für release.sh: notarisiert, aber /Applications bleibt unberührt.
-if [ "$INSTALL" -eq 0 ]; then
-  VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" 2>/dev/null || echo "?")"
-  echo
-  echo "BUILD OK: $APP ($VERSION) — notarisiert, nicht installiert"
-  exit 0
-fi
-
-# ── 4. Nach /Applications installieren (laufende Ziel-Instanz vorher beenden) ─
-install_target() {
-  "$INSTALL_TOOL" "$INSTALL_TARGET" "$@"
-}
-install_target require-original
-
-# Nur Prozesse des tatsächlich zu ersetzenden Bundles beenden. Ein pauschales
-# `pkill -x` träfe auch einen Test-Build aus diesem oder einem anderen Worktree.
-DEST_EXECUTABLE_NAME="$APP_EXECUTABLE_NAME"
-if [ -f "$DEST/Contents/Info.plist" ]; then
-  installed_executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$DEST/Contents/Info.plist" 2>/dev/null || true)"
-  case "$installed_executable_name" in
-    ""|*/*) ;;
-    *) DEST_EXECUTABLE_NAME="$installed_executable_name" ;;
-  esac
-fi
-DEST_EXECUTABLE=""
-if [ -d "$DEST/Contents/MacOS" ]; then
-  DEST_EXECUTABLE_DIR="$(cd "$DEST/Contents/MacOS" && pwd -P)"
-  DEST_EXECUTABLE="$DEST_EXECUTABLE_DIR/$DEST_EXECUTABLE_NAME"
-fi
-destination_pids=()
-destination_identities=()
-process_is_original_destination() {
-  hoerbuchkloeppler_process_matches_snapshot "$1" "$2" "$DEST_EXECUTABLE"
-}
-while IFS= read -r pid; do
-  [ -n "$pid" ] || continue
-  process_snapshot="$(hoerbuchkloeppler_process_snapshot "$pid")"
-  if hoerbuchkloeppler_snapshot_targets_executable "$process_snapshot" "$DEST_EXECUTABLE"; then
-      destination_pids+=("$pid")
-      destination_identities+=("$process_snapshot")
-  fi
-done < <(pgrep -x "$DEST_EXECUTABLE_NAME" 2>/dev/null || true)
-if [ "${#destination_pids[@]}" -gt 0 ]; then
-  log "Beende laufende ${APP_NAME}-Instanz aus $DEST"
-  for index in "${!destination_pids[@]}"; do
-    pid="${destination_pids[$index]}"
-    if process_is_original_destination "$pid" "${destination_identities[$index]}"; then
-      kill "$pid" 2>/dev/null || true
-    fi
-  done
-  for _ in {1..50}; do
-    still_running=0
-    for index in "${!destination_pids[@]}"; do
-      pid="${destination_pids[$index]}"
-      if process_is_original_destination "$pid" "${destination_identities[$index]}"; then
-        still_running=1; break
-      fi
-    done
-    [ "$still_running" -eq 0 ] && break
-    sleep 0.1
-  done
-  for index in "${!destination_pids[@]}"; do
-    pid="${destination_pids[$index]}"
-    if process_is_original_destination "$pid" "${destination_identities[$index]}"; then
-      kill -KILL "$pid" 2>/dev/null || true
-    fi
-  done
-  for _ in {1..20}; do
-    still_running=0
-    for index in "${!destination_pids[@]}"; do
-      pid="${destination_pids[$index]}"
-      if process_is_original_destination "$pid" "${destination_identities[$index]}"; then
-        still_running=1; break
-      fi
-    done
-    [ "$still_running" -eq 0 ] && break
-    sleep 0.1
-  done
-  [ "$still_running" -eq 0 ] \
-    || { echo "✗ Laufende Ziel-App konnte nicht beendet werden: $DEST" >&2; exit 1; }
-fi
-STAGED="$(install_target staging-path)"
-STAGED_IDENTITY=""
-REPLACE_STARTED=0
-
-rollback_install() {
-  local status="$?"
-  trap - EXIT
-  if [ -n "$STAGED_IDENTITY" ]; then
-    if [ "$REPLACE_STARTED" -eq 1 ]; then
-      install_target rollback "$STAGED_IDENTITY" || true
-    fi
-    install_target discard "$STAGED_IDENTITY" \
-      || echo "⚠ Staging konnte nicht eindeutig zugeordnet werden und bleibt erhalten: $STAGED" >&2
-  fi
-  exit "$status"
-}
-trap rollback_install EXIT
-STAGED_IDENTITY="$(install_target stage)"
-ditto "$APP" "$STAGED"
-
-# Die tatsächlich kopierte Staging-App vollständig prüfen. Nur so kann ein
-# Kopierfehler nicht erst auffallen, nachdem die vorige Installation ersetzt ist.
-codesign --verify --deep --strict "$STAGED"
-xcrun stapler validate "$STAGED"
-spctl --assess --type execute -vv "$STAGED" 2>&1 | sed 's/^/    /'
-STAGED_RESOURCE_BIN="$STAGED/Contents/Resources/HoerbuchkloepplerCore_HoerbuchkloepplerCore.bundle/Contents/Resources/bin"
-"$STAGED_RESOURCE_BIN/ffmpeg" -version >/dev/null 2>&1 \
-  || { echo "✗ Gebündeltes ffmpeg startet im Staging-Bundle nicht." >&2; exit 1; }
-"$STAGED_RESOURCE_BIN/mediainfo" --Version >/dev/null 2>&1 \
-  || { echo "✗ Gebündeltes mediainfo startet im Staging-Bundle nicht." >&2; exit 1; }
-
-REPLACE_STARTED=1
-install_target replace "$STAGED_IDENTITY"
-
-# ── 5. Signatur, Ticket, Gatekeeper und Laufzeitprogramme am Ziel prüfen ────
-codesign --verify --deep --strict "$DEST"
-xcrun stapler validate "$DEST"
-# spctl bewertet zusätzlich die Gatekeeper-Freigabe der installierten Kopie.
-spctl --assess --type execute -vv "$DEST" 2>&1 | sed 's/^/    /'
-DEST_RESOURCE_BIN="$DEST/Contents/Resources/HoerbuchkloepplerCore_HoerbuchkloepplerCore.bundle/Contents/Resources/bin"
-"$DEST_RESOURCE_BIN/ffmpeg" -version >/dev/null 2>&1 \
-  || { echo "✗ Gebündeltes ffmpeg startet nach der Installation nicht." >&2; exit 1; }
-"$DEST_RESOURCE_BIN/mediainfo" --Version >/dev/null 2>&1 \
-  || { echo "✗ Gebündeltes mediainfo startet nach der Installation nicht." >&2; exit 1; }
-log "Gebündelte Laufzeitprogramme im installierten Bundle sind ausführbar."
-
-# Erst nach allen Zielprüfungen ist das alte Bundle entbehrlich.
-install_target require-installed "$STAGED_IDENTITY"
-trap - EXIT
-install_target cleanup "$STAGED_IDENTITY"
-
-VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/Contents/Info.plist" 2>/dev/null || echo "?")"
-echo
-echo "INSTALL OK: $DEST ($VERSION)"
+run_installation

@@ -245,7 +245,7 @@ struct CLIExecution {
         // Ohne sichtbares Terminal oder interaktive Eingabe hat die Frage
         // möglicherweise niemanden, der sie beantworten kann.
         guard isatty(FileHandle.standardInput.fileDescriptor) != 0,
-              output.renderer.isInteractive else {
+              output.showsPromptInTerminal else {
             throw reportedFailure("❌ Zieldatei(en) existieren bereits: \(names). Zum Überschreiben --force verwenden.")
         }
         output.text("⚠️ Diese Zieldatei(en) existieren bereits: \(names)")

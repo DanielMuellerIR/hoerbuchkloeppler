@@ -1,13 +1,30 @@
 import Foundation
 
 enum FFMetadata {
-    /// Kapitel beginnen am gerundeten Ende des jeweiligen Vorgängers.
-    static func encodeChapters(group: [AudioFile]) -> String {
+    struct Timeline {
+        private var duration: TimeInterval = 0
+        private var end: Int64 = 0
+
+        mutating func append(_ file: AudioFile) throws -> Range<Int64> {
+            duration += file.duration
+            guard file.startTime.isFinite, file.startTime >= 0, file.duration > 0,
+                  let nextEnd = Int64(exactly: (duration * 1_000).rounded(.towardZero)),
+                  nextEnd > end else {
+                throw ConversionOutputError.invalidChapterTime(file.sourceURL)
+            }
+            let range = end..<nextEnd
+            end = nextEnd
+            return range
+        }
+    }
+
+    /// Kapitel beginnen am quantisierten Ende des jeweiligen Vorgängers.
+    static func encodeChapters(group: [AudioFile]) throws -> String {
         var metaContent = ";FFMETADATA1\n"
-        var currentTime: TimeInterval = 0
+        var timeline = Timeline()
         for file in group {
-            metaContent += "[CHAPTER]\nTIMEBASE=1/1000\nSTART=\(Int(currentTime * 1000))\nEND=\(Int((currentTime + file.duration) * 1000))\ntitle=\(escape(file.chapterTitle))\n"
-            currentTime += file.duration
+            let range = try timeline.append(file)
+            metaContent += "[CHAPTER]\nTIMEBASE=1/1000\nSTART=\(range.lowerBound)\nEND=\(range.upperBound)\ntitle=\(escape(file.chapterTitle))\n"
         }
         return metaContent
     }
